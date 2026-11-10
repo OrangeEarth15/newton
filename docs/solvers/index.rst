@@ -100,6 +100,15 @@ Supported Features
      - ❌
      - ❌
      - ❌
+   * - :class:`~newton.solvers.SolverIPC`
+     - Implicit (BDF1)
+     - ❌
+     - ❌
+     - ✅
+     - ❌
+     - 🟨 tetrahedra, static planes :sup:`4`
+     - ❌
+     - ✅
    * - :class:`~newton.solvers.SolverKamino`
      - Semi-implicit: Euler, Moreau-Jean
      - ✅ maximal coordinates
@@ -171,6 +180,8 @@ Supported Features
 | :sup:`3` Run-to-run determinism with ``deterministic=wp.DeterministicMode.RUN_TO_RUN``
   (MuJoCo's CPU backend is deterministic regardless of that argument);
   see :doc:`/concepts/determinism` for limitations and performance trade-offs.
+| :sup:`4` Incremental Potential Contact with barrier contact against static plane shapes;
+  requires the optional ``libuipc-warp`` package.
 
 .. experimental::
     :class:`~newton.solvers.SolverSteel`'s public API and behavior may change without prior notice.
