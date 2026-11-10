@@ -533,6 +533,9 @@ python -m newton.examples --describe robot_omniwheel
       </a>
     </td>
     <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/cloth/example_cloth_ipc.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_ipc.jpg" alt="Cloth IPC">
+      </a>
     </td>
   </tr>
   <tr>
@@ -543,6 +546,7 @@ python -m newton.examples --describe robot_omniwheel
       <code>python -m newton.examples cloth_poker_cards</code>
     </td>
     <td align="center" width="33%">
+      <code>python -m newton.examples cloth_ipc</code>
     </td>
   </tr>
   <tr>

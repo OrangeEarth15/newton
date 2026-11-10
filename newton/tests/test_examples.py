@@ -49,6 +49,7 @@ from newton.tests.unittest_utils import (
 from newton.viewer import ViewerNull
 
 _HAS_ONNX_RUNTIME = importlib.util.find_spec("onnx") is not None and importlib.util.find_spec("warp_nn") is not None
+_HAS_UIPC_WARP = importlib.util.find_spec("uipc_warp") is not None
 _PXR_WORK_THREAD_LIMIT_OUTPUT_RE = (
     r"(?s)#+\n#  PXR_WORK_THREAD_LIMIT is overridden to '1'\.  Default is '0'\.  #\n#+\n?"
 )
@@ -217,6 +218,8 @@ def add_example_test(
                     test.skipTest("onnx or warp-nn not installed")
                 if options.pop("usd_required", False) and not USD_AVAILABLE:
                     test.skipTest("Requires usd-core")
+                if options.pop("uipc_warp_required", False) and not _HAS_UIPC_WARP:
+                    test.skipTest("Requires libuipc-warp")
                 timeout = options.pop("test_timeout", 600)
                 allow_deprecations = options.pop("allow_deprecation_warnings", False)
                 argv = ["--device", str(device), "--test", "--quiet"]
@@ -858,6 +861,13 @@ add_example_test(
     name="cloth.example_cloth_rollers",
     devices=cuda_test_devices,
     test_options={"num-frames": 200},
+    use_viewer=True,
+)
+add_example_test(
+    TestClothExamples,
+    name="cloth.example_cloth_ipc",
+    devices=cuda_test_devices,
+    test_options={"uipc_warp_required": True, "num-frames": 60, "cloth-res": 32},
     use_viewer=True,
 )
 add_example_test(
