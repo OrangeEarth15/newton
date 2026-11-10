@@ -90,7 +90,9 @@ class SolverIPC(SolverBase):
       They follow the positions written to ``state_in`` every step.
     - one gravity vector, taken from world 0.
 
-    Cloth, rigid bodies, self contact and friction are not handled yet.
+    - lagged friction on every contact, with one coefficient ``friction_mu``.
+
+    Cloth, rigid bodies and self contact are not handled yet.
 
     The solver keeps positions and velocities in float64. The first step
     after construction or :meth:`reset` reads ``state_in``. Later steps
@@ -111,6 +113,15 @@ class SolverIPC(SolverBase):
         semi_implicit: Enable libuipc's semi-implicit early exit after
             ``semi_implicit_k_min`` iterations of full feasible steps.
         semi_implicit_k_min: Newton iterations before the early exit applies.
+        friction_mu: Friction coefficient of every contact; 0 disables friction.
+        eps_velocity: Friction smoothing velocity [m/s]; below it static friction becomes a stiff spring.
+
+    Note:
+        A step ends once the Newton update moves no vertex by more than
+        ``newton_velocity_tol * dt``. When a body should gain less velocity
+        per step than ``newton_velocity_tol`` (slow sliding against friction,
+        for example), lower the tolerance, or the body creeps at about
+        ``eps_velocity`` instead.
     """
 
     def __init__(
@@ -126,6 +137,8 @@ class SolverIPC(SolverBase):
         line_search_max_iter: int = 8,
         semi_implicit: bool = True,
         semi_implicit_k_min: int = 6,
+        friction_mu: float = 0.5,
+        eps_velocity: float = 0.01,
     ):
         super().__init__(model)
         try:
@@ -144,6 +157,8 @@ class SolverIPC(SolverBase):
             line_search_max_iter=line_search_max_iter,
             semi_implicit=semi_implicit,
             semi_implicit_k_min=semi_implicit_k_min,
+            friction_mu=friction_mu,
+            eps_velocity=eps_velocity,
         )
         self._thickness = float(thickness)
         self._engine = None

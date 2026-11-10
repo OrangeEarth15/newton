@@ -133,6 +133,44 @@ def test_soft_bodies_stack_without_intersection(test, device):
     test.assertLess(z[n_lower:].min(), 0.21 + 0.01)
 
 
+def test_friction_on_tilted_gravity(test, device):
+    """A box on the ground sticks below the friction angle and slides with g (sin - mu cos) above it."""
+    g = 9.81
+    for tan_theta, sticks in ((0.3, True), (0.8, False)):
+        th = np.arctan(tan_theta)
+        builder = newton.ModelBuilder()
+        builder.add_soft_grid(
+            pos=wp.vec3(-0.05, -0.05, 0.005),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=2,
+            dim_y=2,
+            dim_z=2,
+            cell_x=0.05,
+            cell_y=0.05,
+            cell_z=0.05,
+            density=1000.0,
+            k_mu=3.8e5,
+            k_lambda=5.8e5,
+            k_damp=0.0,
+        )
+        builder.add_ground_plane()
+        model = builder.finalize(device=device)
+        model.set_gravity((g * np.sin(th), 0.0, -g * np.cos(th)))
+        solver = newton.solvers.SolverIPC(model, friction_mu=0.5, newton_velocity_tol=1e-4, semi_implicit=False)
+        s0, s1 = model.state(), model.state()
+        cx = []
+        for _ in range(60):
+            solver.step(s0, s1, None, None, 0.01)
+            s0, s1 = s1, s0
+            cx.append(s0.particle_q.numpy()[:, 0].astype(np.float64).mean())
+        a = np.diff(np.array(cx[30:]), 2).mean() / 0.01**2
+        if sticks:
+            test.assertLess(abs(cx[-1] - cx[-2]) / 0.01, 0.01)
+        else:
+            test.assertAlmostEqual(a / (g * (np.sin(th) - 0.5 * np.cos(th))), 1.0, delta=0.01)
+
+
 def test_graph_capture_matches_eager(test, device):
     model = _soft_cube(device)
     eager = _run(model, newton.solvers.SolverIPC(model), 21)
@@ -158,6 +196,7 @@ add_function_test(
     test_soft_bodies_stack_without_intersection,
     devices=devices,
 )
+add_function_test(TestSolverIPC, "test_friction_on_tilted_gravity", test_friction_on_tilted_gravity, devices=devices)
 add_function_test(TestSolverIPC, "test_graph_capture_matches_eager", test_graph_capture_matches_eager, devices=devices)
 
 
