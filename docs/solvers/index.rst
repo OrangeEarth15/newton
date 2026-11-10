@@ -102,11 +102,11 @@ Supported Features
      - ❌
    * - :class:`~newton.solvers.SolverIPC`
      - Implicit (BDF1)
-     - ❌
+     - 🟨 affine bodies, no joints :sup:`4`
      - ❌
      - ✅
-     - ❌
-     - 🟨 tetrahedra, static planes :sup:`4`
+     - ✅
+     - 🟨 tetrahedra :sup:`4`
      - ❌
      - ✅
    * - :class:`~newton.solvers.SolverKamino`
@@ -180,7 +180,8 @@ Supported Features
 | :sup:`3` Run-to-run determinism with ``deterministic=wp.DeterministicMode.RUN_TO_RUN``
   (MuJoCo's CPU backend is deterministic regardless of that argument);
   see :doc:`/concepts/determinism` for limitations and performance trade-offs.
-| :sup:`4` Incremental Potential Contact with barrier contact against static plane shapes;
+| :sup:`4` Incremental Potential Contact: barrier contact with continuous collision detection between
+  soft bodies, cloth (with self-collision), near-rigid affine bodies, static shapes and planes;
   requires the optional ``libuipc-warp`` package.
 
 .. experimental::
