@@ -108,7 +108,7 @@ Supported Features
      - ✅
      - 🟨 tetrahedra :sup:`4`
      - ❌
-     - ✅
+     - ❌
    * - :class:`~newton.solvers.SolverKamino`
      - Semi-implicit: Euler, Moreau-Jean
      - ✅ maximal coordinates
