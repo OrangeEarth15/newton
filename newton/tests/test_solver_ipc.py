@@ -172,11 +172,14 @@ def test_friction_on_tilted_gravity(test, device):
 
 
 def test_graph_capture_matches_eager(test, device):
+    # The solver adds with float atomics (SpMV, triplet reduction), as libuipc does, so converged
+    # tightly the captured and eager runs agree to rounding rather than bit for bit.
+    tight = {"newton_velocity_tol": 1e-7, "linear_tol_rate": 1e-12, "semi_implicit": False}
     model = _soft_cube(device)
-    eager = _run(model, newton.solvers.SolverIPC(model), 21)
+    eager = _run(model, newton.solvers.SolverIPC(model, **tight), 21)
     model = _soft_cube(device)
-    graph = _run(model, newton.solvers.SolverIPC(model), 21, capture=True)
-    np.testing.assert_array_equal(graph, eager[::2])
+    graph = _run(model, newton.solvers.SolverIPC(model, **tight), 21, capture=True)
+    np.testing.assert_allclose(graph, eager[::2], rtol=0.0, atol=1e-6)
 
 
 @unittest.skipUnless(UIPC_WARP_AVAILABLE, "Requires libuipc-warp (uipc_warp)")
