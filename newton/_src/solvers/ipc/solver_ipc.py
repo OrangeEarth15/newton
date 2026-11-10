@@ -82,12 +82,15 @@ class SolverIPC(SolverBase):
     - contact against static plane shapes (``shape_body == -1`` with
       :attr:`~newton.ShapeFlags.COLLIDE_PARTICLES`), each treated as an
       infinite half space.
+    - contact between soft bodies: point-triangle and edge-edge barriers on
+      the boundary of the tetrahedra, with continuous collision detection.
+      Each connected group of tetrahedra is one body; a body does not
+      collide with itself.
     - kinematic particles (zero mass or not :attr:`~newton.ParticleFlags.ACTIVE`).
       They follow the positions written to ``state_in`` every step.
     - one gravity vector, taken from world 0.
 
-    Triangles, edges, rigid bodies, particle-particle and self contact, and
-    friction are not handled yet.
+    Cloth, rigid bodies, self contact and friction are not handled yet.
 
     The solver keeps positions and velocities in float64. The first step
     after construction or :meth:`reset` reads ``state_in``. Later steps

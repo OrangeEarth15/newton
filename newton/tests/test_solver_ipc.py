@@ -93,6 +93,46 @@ def test_kinematic_particles_stay(test, device):
     test.assertLess(traj[-1][~fixed, 2].min(), x0[~fixed, 2].min())
 
 
+def test_soft_bodies_stack_without_intersection(test, device):
+    from uipc_warp.validation import SurfaceChecker  # noqa: PLC0415
+
+    builder = newton.ModelBuilder()
+    for z, n, cell in ((0.0005, 4, 0.05), (0.26, 2, 0.05)):
+        builder.add_soft_grid(
+            pos=wp.vec3(-0.5 * n * cell, -0.5 * n * cell, z),
+            rot=wp.quat_identity(),
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            dim_x=n,
+            dim_y=n,
+            dim_z=n,
+            cell_x=cell,
+            cell_y=cell,
+            cell_z=cell,
+            density=1000.0,
+            k_mu=3.4e4,
+            k_lambda=1.6e5,
+            k_damp=0.0,
+        )
+    builder.add_ground_plane()
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model)
+    checker = SurfaceChecker.from_engine(solver._engine)
+    s0, s1 = model.state(), model.state()
+    hits = 0
+    dmin = np.inf
+    for _ in range(60):
+        solver.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+        hits += checker.intersections(solver._engine.vm.x)
+        dmin = min(dmin, checker.min_distance(solver._engine.vm.x))
+    test.assertEqual(hits, 0)
+    test.assertGreater(dmin, 0.0)
+    z = s0.particle_q.numpy()[:, 2]
+    n_lower = 5 * 5 * 5
+    test.assertGreater(z[n_lower:].min(), 0.15)  # the upper box rests on the lower one
+    test.assertLess(z[n_lower:].min(), 0.21 + 0.01)
+
+
 def test_graph_capture_matches_eager(test, device):
     model = _soft_cube(device)
     eager = _run(model, newton.solvers.SolverIPC(model), 21)
@@ -112,6 +152,12 @@ add_function_test(
     TestSolverIPC, "test_free_fall_matches_implicit_euler", test_free_fall_matches_implicit_euler, devices=devices
 )
 add_function_test(TestSolverIPC, "test_kinematic_particles_stay", test_kinematic_particles_stay, devices=devices)
+add_function_test(
+    TestSolverIPC,
+    "test_soft_bodies_stack_without_intersection",
+    test_soft_bodies_stack_without_intersection,
+    devices=devices,
+)
 add_function_test(TestSolverIPC, "test_graph_capture_matches_eager", test_graph_capture_matches_eager, devices=devices)
 
 
