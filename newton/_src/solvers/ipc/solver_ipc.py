@@ -84,15 +84,16 @@ class SolverIPC(SolverBase):
       infinite half space.
     - contact between soft bodies: point-triangle and edge-edge barriers on
       the boundary of the tetrahedra, with continuous collision detection.
-      Each connected group of tetrahedra is one body; a body does not
-      collide with itself.
+      Each connected group of tetrahedra is one body. Bodies also collide
+      with themselves, as finite elements do in libuipc, so ``d_hat`` must
+      stay below the spacing of non-adjacent surface primitives at rest.
     - kinematic particles (zero mass or not :attr:`~newton.ParticleFlags.ACTIVE`).
       They follow the positions written to ``state_in`` every step.
     - one gravity vector, taken from world 0.
 
     - lagged friction on every contact, with one coefficient ``friction_mu``.
 
-    Cloth, rigid bodies and self contact are not handled yet.
+    Cloth and rigid bodies are not handled yet.
 
     The solver keeps positions and velocities in float64. The first step
     after construction or :meth:`reset` reads ``state_in``. Later steps
