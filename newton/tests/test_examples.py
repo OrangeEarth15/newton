@@ -922,6 +922,13 @@ add_example_test(
 )
 add_example_test(
     TestClothExamples,
+    name="cloth.example_cloth_ipc",
+    devices=cuda_test_devices,
+    test_options={"requires": ("uipc_warp",), "num-frames": 60, "cloth-res": 32},
+    use_viewer=True,
+)
+add_example_test(
+    TestClothExamples,
     name="vbd.example_cloth_stiff_material_hanging",
     devices=cuda_test_devices,
     test_options={"requires": ("pxr.Usd",), "num-frames": 360},

@@ -100,6 +100,15 @@ Supported Features
      - ❌
      - ❌
      - ❌
+   * - :class:`~newton.solvers.SolverIPC`
+     - Implicit (BDF1)
+     - 🟨 affine bodies, no joints :sup:`5`
+     - ❌
+     - ✅
+     - ✅
+     - 🟨 tetrahedra :sup:`5`
+     - ❌
+     - ❌
    * - :class:`~newton.solvers.SolverKamino`
      - Semi-implicit: Euler, Moreau-Jean
      - ✅ maximal coordinates
@@ -173,6 +182,9 @@ Supported Features
   see :doc:`/concepts/determinism` for limitations and performance trade-offs.
 | :sup:`4` Simulated as MuJoCo flexes; particles that belong to no spring,
   triangle, or tetrahedron are not simulated. See :ref:`mujoco-flexes`.
+| :sup:`5` Incremental Potential Contact: barrier contact with continuous collision detection between
+  soft bodies, cloth (with self-collision), near-rigid affine bodies, static shapes and planes;
+  requires the optional ``libuipc-warp`` package.
 
 .. experimental::
     :class:`~newton.solvers.SolverSteel`'s public API and behavior may change without prior notice.

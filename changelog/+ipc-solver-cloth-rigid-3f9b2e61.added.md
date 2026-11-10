@@ -1,0 +1,1 @@
+Add cloth and rigid bodies to ``SolverIPC``: triangle meshes become libuipc's Baraff-Witkin membrane with discrete-shell bending and self-collision, and bodies with box, sphere, capsule, cylinder, cone, ellipsoid or mesh shapes become affine bodies. Add the ``cloth_ipc`` example.
