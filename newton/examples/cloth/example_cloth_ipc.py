@@ -85,10 +85,6 @@ class Example:
         self.capture()
 
     def capture(self):
-        # SolverIPC's first step reads state_0 into its own state: run the first frame eagerly (this also
-        # compiles the kernels) and capture the frames after it
-        self.simulate()
-        self.sim_time += self.frame_dt
         self.graph = None
         if wp.get_device().is_cuda:
             with wp.ScopedCapture() as capture:

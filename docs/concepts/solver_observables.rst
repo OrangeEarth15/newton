@@ -141,7 +141,8 @@ Standard observables
        :class:`~newton.solvers.SolverKamino`, and :class:`~newton.solvers.SolverSteel`
    * - ``SOLVER_RESIDUAL`` / ``observables.solver_residual``
      - Per-world convergence residual of the step; see :ref:`solver_residual_observable`
-     - :class:`~newton.solvers.SolverKamino` and :class:`~newton.solvers.SolverVBD`
+     - :class:`~newton.solvers.SolverIPC`, :class:`~newton.solvers.SolverKamino`, and
+       :class:`~newton.solvers.SolverVBD`
 
 :class:`~newton.solvers.SolverKamino` computes acceleration as the discrete
 step-average ``(body_qd_out - body_qd_in) / dt``. Across an impact, this includes
@@ -279,6 +280,16 @@ bodies, including every entity of a model built without
 ``iterations=0`` the array is zero, and with
 ``integrate_with_external_rigid_solver=True`` only particles contribute. VBD also
 records this value for every iteration; see :ref:`vbd_residual_history`.
+
+:class:`~newton.solvers.SolverIPC` reports the measure its Newton loop stops on:
+the largest displacement of the last Newton direction over
+``newton_velocity_tol * dt``, with the rows of an affine body's matrix scaled by
+``newton_velocity_tol / newton_transrate_tol``. It is dimensionless and at most one
+when the loop ended on that test; with ``semi_implicit=True`` the semi-implicit test
+may end the loop first, above one. A step that failed reports infinity. The solver
+solves everything it simulates as one system, so every world that owns particles or
+bodies reports the same value; ``SolverIPC.ObservableKind.STATUS`` reports how the
+step ended as :class:`~newton.solvers.SolverIPC.StatusBits`.
 
 Solver-specific observables
 ---------------------------
