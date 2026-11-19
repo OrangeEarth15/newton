@@ -258,7 +258,7 @@ def test_cloth_self_contact_folded_sheet(test, device):
     nx, ny, ds, r, z0 = 28, 10, 0.025, 0.03, 0.02
     builder = newton.ModelBuilder()
     builder.add_cloth_grid(
-        pos=wp.vec3(0.0, 0.0, 0.0),
+        pos=wp.vec3(0.0, 0.0, z0),  # the flat rest shape, apart from the ground as the solver requires
         rot=wp.quat_identity(),
         vel=wp.vec3(0.0, 0.0, 0.0),
         dim_x=nx,
@@ -704,6 +704,63 @@ def test_rejects_intersecting_start(test, device):
         test.assertGreater(SurfaceChecker.from_engine(solver._engine).intersections(solver._engine.vm.x), 0)
 
 
+def test_rejects_start_in_contact(test, device):
+    """Reject the surfaces of different bodies that start at or inside their contact thickness, naming the closest
+    pair, which every step would fail on; accept a gap above the thickness, also inside d_hat, and contact that the
+    solve skips (surfaces that never move, the inside of a body)."""
+
+    def build(*parts, **kwargs):
+        builder = newton.ModelBuilder()
+        for part in parts:
+            part(builder)
+        return newton.solvers.SolverIPC(builder.finalize(device=device), **kwargs)
+
+    def ground(builder):
+        builder.add_ground_plane()
+
+    def static_box(builder):
+        # all coordinates of these boxes are exact in float32, so that touching faces are 0 m apart
+        builder.add_shape_box(
+            -1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.125), wp.quat_identity()), hx=0.125, hy=0.125, hz=0.125
+        )
+
+    def box(z, kinematic=False, half=0.125):
+        def add(builder):
+            b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, z), wp.quat_identity()), is_kinematic=kinematic)
+            builder.add_shape_box(b, hx=half, hy=half, hz=half)
+
+        return add
+
+    def cloth(z, center=(0.0, 0.0)):
+        return lambda builder: _cloth(builder, 4, 0.05, z, center=center)
+
+    for case, parts, kwargs, pattern in (
+        ("on the ground", (ground, box(0.125)), {}, r"body 0 and plane shape 0 start 0 m apart"),
+        ("into the ground", (ground, box(0.12)), {}, r"body 0 and plane shape 0 start -0.005 m apart"),
+        ("on a static box", (static_box, box(0.375)), {}, r"static shape 0 and body 0 start 0 m apart"),
+        ("on another body", (box(0.125), box(0.375)), {}, r"body 0 and body 1 start 0 m apart"),
+        # 1 cm cubes stacked in touching contact: in float32 these faces are 9.3e-10 m apart
+        ("apart by rounding", (box(0.015, half=0.005), box(0.025, half=0.005)), {}, r"rounding of float32 positions"),
+        ("cloth inside its thickness", (static_box, cloth(0.251)), {"thickness": 0.002}, r"thickness \(0.002 m\)"),
+    ):
+        with test.subTest(case=case), test.assertRaisesRegex(ValueError, pattern):
+            build(*parts, **kwargs)
+    # a gap above the thickness, here inside d_hat (1 mm, 1 um); a kinematic body on a static box; touching shapes of
+    # one body
+    build(ground, static_box, box(0.376), cloth(0.003, center=(1.0, 0.0)), thickness=0.002)
+    build(box(0.125), box(0.375 + 1.0e-6))
+    build(static_box, box(0.375, kinematic=True))
+
+    def two_shapes(builder):
+        b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.2), wp.quat_identity()))
+        builder.add_shape_box(b, hx=0.125, hy=0.125, hz=0.125)
+        builder.add_shape_box(
+            b, xform=wp.transform(wp.vec3(0.0, 0.0, 0.25), wp.quat_identity()), hx=0.125, hy=0.125, hz=0.125
+        )
+
+    build(ground, two_shapes)
+
+
 # ---------------------------------------------------------------------------- forces
 
 
@@ -770,35 +827,133 @@ def test_external_forces_match_closed_form(test, device):
 # ---------------------------------------------------------------------------- status of a step
 
 
-def _touching_boxes(device):
-    """A box resting exactly on a static box: their faces touch at z = 0.25 (all coordinates exact)."""
+def _boxes_apart(device):
+    """A box 1 mm above a static box, and the pose ``body_q`` that rests it exactly on the static box: their faces
+    then touch at z = 0.25 (all coordinates exact)."""
     builder = newton.ModelBuilder()
     builder.add_shape_box(
         -1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.125), wp.quat_identity()), hx=0.125, hy=0.125, hz=0.125
     )
-    _box_body(builder, (0.0, 0.0, 0.375), (0.125, 0.125, 0.125))
-    return builder.finalize(device=device)
+    _box_body(builder, (0.0, 0.0, 0.376), (0.125, 0.125, 0.125))
+    model = builder.finalize(device=device)
+    touching = model.body_q.numpy()
+    touching[0, 2] = 0.375
+    return model, touching
 
 
 def test_contact_at_start_fails(test, device):
-    """A step that starts with surfaces in touching contact fails: eagerly it raises, captured it sets the bit."""
-    model = _touching_boxes(device)
+    """A step that starts with surfaces in touching contact fails: eagerly it raises, captured it sets the bit.
+
+    The solver refuses such a start at construction, so the step takes it from a state written between steps.
+    """
+    model, touching = _boxes_apart(device)
     solver = newton.solvers.SolverIPC(model)
     s0, s1 = model.state(), model.state()
+    s0.body_q.assign(touching)
     with test.assertRaisesRegex(RuntimeError, "THICKNESS_VIOLATED"):
         solver.step(s0, s1, None, None, 0.01)
 
-    model = _touching_boxes(device)
+    model, touching = _boxes_apart(device)
     solver = newton.solvers.SolverIPC(model)
     observables = solver.observables({solver.ObservableKind.STATUS, solver.ObservableKind.SOLVER_RESIDUAL})
     s0, s1 = model.state(), model.state()
     with wp.ScopedCapture(device=device) as capture:
         solver.step(s0, s1, None, None, 0.01, observables=observables)
+    s0.body_q.assign(touching)
     wp.capture_launch(capture.graph)
     status = int(observables.status.numpy()[-1])
     test.assertTrue(status & newton.solvers.SolverIPC.StatusBits.THICKNESS_VIOLATED)
     test.assertTrue(status & newton.solvers.SolverIPC.StatusBits.FAILED)
     test.assertEqual(float(observables.solver_residual.numpy()[-1]), np.inf)
+    # the caller of a captured step learns of the failure from check_status
+    with test.assertRaisesRegex(RuntimeError, r"failed on THICKNESS_VIOLATED \(residual inf"):
+        solver.check_status(observables)
+
+
+def test_check_status(test, device):
+    """check_status returns False after a clean step, warns when the Newton loop reached its iteration limit, and
+    refuses a container without the status."""
+    import warnings  # noqa: PLC0415
+
+    model, _ = _boxes_apart(device)
+    observables = {}
+    for max_iter in (1024, 1):
+        solver = newton.solvers.SolverIPC(model, newton_max_iter=max_iter)
+        observables[max_iter] = solver.observables(
+            {solver.ObservableKind.STATUS, solver.ObservableKind.SOLVER_RESIDUAL}
+        )
+        s0, s1 = model.state(), model.state()
+        solver.step(s0, s1, None, None, 0.01, observables=observables[max_iter])  # the box lands on the static box
+        if max_iter == 1:
+            with test.assertWarnsRegex(newton.NewtonWarning, "newton_max_iter without converging \\(residual"):
+                test.assertFalse(solver.check_status(observables[max_iter]))
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                test.assertFalse(solver.check_status(observables[max_iter]))
+    with test.assertRaisesRegex(ValueError, "STATUS"):
+        solver.check_status(solver.observables({solver.ObservableKind.SOLVER_RESIDUAL}))
+
+
+def test_default_d_hat_follows_small_features(test, device):
+    """Without a d_hat argument the solver lowers d_hat to a quarter of the smallest colliding feature.
+
+    The tip of Newton's balance_bird example, a sphere of 8 mm radius 1 mm above the 6 mm top of a static cone,
+    overflowed the contact lists of captured steps with libuipc's 0.01 m; with the default 2 mm it does not. A cloth of
+    5 mm cells gets 2.5 mm and rests unstretched; with 0.01 m the barrier between its non-adjacent primitives
+    stretches it. An explicit d_hat is kept, and a model of large features keeps 0.01 m.
+    """
+
+    def tip():
+        builder = newton.ModelBuilder()
+        pedestal = newton.Mesh.create_cylinder(
+            0.08, 0.06, up_axis=newton.Axis.Z, segments=32, top_radius=0.006, compute_inertia=False
+        )
+        builder.add_shape_mesh(-1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.06), wp.quat_identity()), mesh=pedestal)
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.129), wp.quat_identity()))
+        builder.add_shape_sphere(body, radius=0.008)
+        return builder.finalize(device=device)
+
+    test.assertEqual(newton.solvers.SolverIPC(tip(), d_hat=0.005)._config.d_hat, 0.005)
+    model = tip()
+    solver = newton.solvers.SolverIPC(model)
+    test.assertAlmostEqual(solver._config.d_hat, 0.002)
+    observables = solver.observables({solver.ObservableKind.STATUS})
+    s0, s1 = model.state(), model.state()
+    with wp.ScopedCapture(device=device) as capture:
+        solver.step(s0, s1, None, None, 1.0 / 600.0, observables=observables)
+        solver.step(s1, s0, None, None, 1.0 / 600.0, observables=observables)
+    for _ in range(5):
+        wp.capture_launch(capture.graph)
+        test.assertFalse(solver.check_status(observables))
+
+    # a 10 cm cloth of 5 mm cells, 2 mm above the ground: its mean edge length after 30 steps over the rest length
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    _cloth(builder, 20, 0.005, 0.002, mass=7.5e-6, tri_k=1.0e2, edge_ke=1.0e-4)
+    model = builder.finalize(device=device)
+    tris = model.tri_indices.numpy().reshape(-1, 3)
+    edges = np.unique(np.sort(np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]]), axis=1), axis=0)
+
+    def mean_edge(x):
+        return np.linalg.norm(x[edges[:, 0]] - x[edges[:, 1]], axis=1).mean()
+
+    rest = mean_edge(model.particle_q.numpy())
+    for kwargs, expected_d_hat in (({}, 0.0025), ({"d_hat": 0.01}, 0.01)):
+        solver = newton.solvers.SolverIPC(model, **kwargs)
+        test.assertAlmostEqual(solver._config.d_hat, expected_d_hat)
+        s0, s1 = model.state(), model.state()
+        for _ in range(30):
+            solver.step(s0, s1, None, None, 1.0 / 600.0)
+            s0, s1 = s1, s0
+        if kwargs:
+            test.assertGreater(mean_edge(s0.particle_q.numpy()) / rest, 1.05)
+        else:
+            test.assertLess(mean_edge(s0.particle_q.numpy()) / rest, 1.001)
+
+    builder = newton.ModelBuilder()
+    _box_body(builder, (0.0, 0.0, 1.0), (0.05, 0.5, 0.5))
+    test.assertEqual(newton.solvers.SolverIPC(builder.finalize(device=device))._config.d_hat, 0.01)
 
 
 # small active contact lists, so that the contact of two soft cubes overflows them
@@ -869,13 +1024,15 @@ def test_overflow_grows(test, device):
     overflows, hits, a = 0, 0, 0
     for _ in range(30):
         wp.capture_launch(graphs[a])
-        if int(observables.status.numpy()[-1]) & newton.solvers.SolverIPC.StatusBits.OVERFLOW:
-            # the step ran without some pairs: grow, and step again from the same input state
+        if overflows == 0 and int(observables.status.numpy()[-1]) & newton.solvers.SolverIPC.StatusBits.OVERFLOW:
+            with test.assertRaisesRegex(RuntimeError, "OVERFLOW"):  # without grow=True an overflow is a failure
+                solver.check_status(observables)
+        if solver.check_status(observables, grow=True):
+            # the step ran without some pairs and the lists were grown: step again from the same input state
             overflows += 1
-            solver.grow()
             graphs = capture()
             wp.capture_launch(graphs[a])
-            test.assertFalse(int(observables.status.numpy()[-1]) & newton.solvers.SolverIPC.StatusBits.FAILED)
+            test.assertFalse(solver.check_status(observables))
         hits += checker.intersections(solver._engine.vm.x)
         a = 1 - a
     test.assertGreater(overflows, 0)
@@ -1143,11 +1300,14 @@ for name, func in (
     ("test_particle_only_shapes_without_particles", test_particle_only_shapes_without_particles),
     ("test_rejects_surface_velocity", test_rejects_surface_velocity),
     ("test_rejects_intersecting_start", test_rejects_intersecting_start),
+    ("test_rejects_start_in_contact", test_rejects_start_in_contact),
     ("test_external_forces_match_closed_form", test_external_forces_match_closed_form),
 ):
     add_function_test(TestSolverIPCInputs, name, func, devices=devices)
 for name, func in (
     ("test_contact_at_start_fails", test_contact_at_start_fails),
+    ("test_check_status", test_check_status),
+    ("test_default_d_hat_follows_small_features", test_default_d_hat_follows_small_features),
     ("test_overflow_grows", test_overflow_grows),
     ("test_teleport_equals_fresh_solver", test_teleport_equals_fresh_solver),
     ("test_reset_inside_captured_graph", test_reset_inside_captured_graph),

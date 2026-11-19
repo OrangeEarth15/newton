@@ -10,6 +10,12 @@ membrane with discrete-shell bending, the boxes are affine bodies, and every
 contact (cloth on boxes, cloth on itself, boxes on boxes and on the ground)
 is a barrier with continuous collision detection, so nothing interpenetrates.
 
+The example captures its substeps in a CUDA graph. A captured step cannot
+raise, so after every replay the example reads each substep's status with
+:meth:`~newton.solvers.SolverIPC.check_status`: a failed step raises there,
+and a contact-list overflow grows the lists and repeats the frame in a graph
+captured anew.
+
 Requires the optional ``libuipc-warp`` package.
 
 Success criteria:
@@ -80,6 +86,14 @@ class Example:
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
+        # the state a frame starts from, to repeat the frame after an overflow
+        self.frame_start = self.model.state()
+        # how each substep ended: a captured step reports a failure only here, one container per substep
+        kinds = {
+            newton.solvers.SolverIPC.ObservableKind.STATUS,
+            newton.solvers.SolverIPC.ObservableKind.SOLVER_RESIDUAL,
+        }
+        self.observables = [self.solver.observables(kinds) for _ in range(self.sim_substeps)]
 
         self.viewer.set_model(self.model)
         self.capture()
@@ -92,13 +106,27 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        for _ in range(self.sim_substeps):
-            self.solver.step(self.state_0, self.state_1, None, None, self.sim_dt)
+        for observables in self.observables:
+            self.solver.step(self.state_0, self.state_1, None, None, self.sim_dt, observables=observables)
             self.state_0, self.state_1 = self.state_1, self.state_0
+
+    def check_substeps(self) -> bool:
+        """Raise if a substep of the last replay failed; return True when a contact list overflowed and the lists
+        were grown, so that the frame must be repeated."""
+        grown = False
+        for observables in self.observables:
+            grown = self.solver.check_status(observables, grow=True) or grown
+        return grown
 
     def step(self):
         if self.graph:
+            self.frame_start.assign(self.state_0)
             wp.capture_launch(self.graph)
+            # after an overflow, repeat the frame from its start in a new graph (the old one holds the old lists)
+            while self.check_substeps():
+                self.state_0.assign(self.frame_start)
+                self.capture()
+                wp.capture_launch(self.graph)
         else:
             self.simulate()
         self.sim_time += self.frame_dt

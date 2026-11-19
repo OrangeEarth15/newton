@@ -33,6 +33,13 @@ _MAX_REGROWS = 8
 # pairs per second on a recent GPU, in one launch
 _START_CHECK_PAIRS = 2**31 - 1
 
+# libuipc's barrier activation distance (contact/d_hat) [m]. The default d_hat stays below the shares of the smallest
+# colliding shape's half-size and of the median edge of the cloth and tetrahedral meshes at which the barrier spans the
+# feature: a contact list overflows from about half the radius of a small sphere, a mesh stretches from one edge length
+_D_HAT = 0.01
+_D_HAT_SHAPE_SHARE = 0.25
+_D_HAT_MESH_SHARE = 0.5
+
 
 @wp.func
 def _to64(a: wp.vec3) -> wp.vec3d:
@@ -345,6 +352,48 @@ def _colliding_shapes(model: Model) -> np.ndarray:
     return (flags & mask) != 0
 
 
+def _default_d_hat(model: Model) -> float:
+    """libuipc's d_hat, or less when the model has smaller colliding features [m]: a quarter of the smallest half-size of
+    a colliding shape other than a plane (a sphere's or capsule's radius, the smaller of a cylinder's or cone's radius
+    and half height, a box's or ellipsoid's smallest half extent, half of a mesh's thinnest extent that is not zero),
+    and half the median rest length of the edges of the cloth triangles and tetrahedra."""
+    size = np.inf
+    if model.shape_count:
+        types, scale = model.shape_type.numpy(), model.shape_scale.numpy().astype(np.float64)
+        for s in np.flatnonzero(_colliding_shapes(model)):
+            t, sc = int(types[s]), scale[s]
+            if t in (GeoType.BOX, GeoType.ELLIPSOID):
+                half = sc.min()
+            elif t in (GeoType.SPHERE, GeoType.CAPSULE):
+                half = sc[0]
+            elif t in (GeoType.CYLINDER, GeoType.CONE):
+                half = min(sc[0], sc[1])
+            elif t in (GeoType.MESH, GeoType.CONVEX_MESH) and model.shape_source[s] is not None:
+                extent = np.ptp(np.asarray(model.shape_source[s].vertices, np.float64).reshape(-1, 3) * sc, axis=0)
+                extent = extent[extent > 0.0]
+                half = 0.5 * extent.min() if len(extent) else np.inf
+            else:
+                continue
+            if half > 0.0:
+                size = min(size, float(half))
+    d_hat = min(_D_HAT, _D_HAT_SHAPE_SHARE * size)
+    edges = []
+    if model.tri_count:
+        t = model.tri_indices.numpy().reshape(-1, 3)
+        edges.append(np.concatenate([t[:, [0, 1]], t[:, [1, 2]], t[:, [2, 0]]]))
+    if model.tet_count:
+        t = model.tet_indices.numpy().reshape(-1, 4)
+        edges.append(np.concatenate([t[:, [a, b]] for a in range(3) for b in range(a + 1, 4)]))
+    if edges:
+        e = np.unique(np.sort(np.concatenate(edges), axis=1), axis=0)
+        x = model.particle_q.numpy().astype(np.float64)
+        length = np.linalg.norm(x[e[:, 0]] - x[e[:, 1]], axis=1)
+        length = length[length > 0.0]
+        if len(length):
+            d_hat = min(d_hat, _D_HAT_MESH_SHARE * float(np.median(length)))
+    return d_hat
+
+
 def _check_supported(model: Model) -> None:
     """Reject model content the solver would otherwise accept and ignore."""
     if model.requires_grad:
@@ -547,8 +596,8 @@ class SolverIPC(SolverBase):
       continuous collision detection. Each connected group of tetrahedra or
       cloth triangles is one body and collides with itself (as finite elements
       do in libuipc), so ``d_hat`` must stay below the spacing of
-      non-adjacent surface primitives at rest. A rigid body does not collide
-      with itself.
+      non-adjacent surface primitives at rest, as the default ``d_hat`` does
+      (see the note below). A rigid body does not collide with itself.
     - kinematic particles (zero mass or not :attr:`~newton.ParticleFlags.ACTIVE`)
       and kinematic bodies (:attr:`~newton.BodyFlags.KINEMATIC` or zero mass).
       They follow the poses written to ``state_in`` every step; the jump is not
@@ -683,16 +732,24 @@ class SolverIPC(SolverBase):
     and solves the step again; when the step failed otherwise (a non-finite
     value, a contact starting at or inside its thickness, an exhausted BVH
     traversal), it raises :class:`RuntimeError` and leaves ``state_out``
-    unwritten. A captured step cannot do either: it sets the bit. After a
-    captured step reports :attr:`SolverIPC.StatusBits.OVERFLOW`, call :meth:`grow` and
-    capture again.
+    unwritten. A captured step cannot do either: it sets the bit, and nothing
+    else reports the failure. A caller that captures :meth:`step` must
+    therefore request ``STATUS``, pass one container to each captured step
+    (a container holds the bits of the last step that wrote it), and after
+    every replay call :meth:`check_status` with each container. It raises
+    :class:`RuntimeError` on a failed step and warns on an iteration limit;
+    with ``grow=True`` it answers :attr:`SolverIPC.StatusBits.OVERFLOW` with
+    :meth:`grow` and returns ``True``, and the caller then restores the
+    state the replayed steps started from, captures again and repeats them.
 
     This solver requires the optional ``libuipc-warp`` package (``import uipc_warp``).
 
     Args:
         model: The model to simulate.
         kappa: Barrier stiffness [Pa], libuipc's contact resistance.
-        d_hat: Barrier activation distance [m].
+        d_hat: Barrier activation distance [m]. ``None`` takes libuipc's
+            0.01 m, or less for a model with small colliding features (see
+            the note below).
         thickness: Contact thickness of every particle [m]; rigid-body and
             static-shape vertices have none, as in libuipc.
         newton_max_iter: Maximum Newton iterations per step.
@@ -722,15 +779,34 @@ class SolverIPC(SolverBase):
 
         With a stiff barrier (large ``kappa``) a resting contact settles just
         inside ``d_hat``, so objects rest up to ``d_hat`` apart; lower ``d_hat``
-        for tighter contact. The barrier needs a gap at the start: surfaces
-        that start at or inside their contact thickness fail the first step
+        for tighter contact. Without a ``d_hat`` argument the solver keeps it
+        at or below a quarter of the smallest half-size of a colliding shape (a
+        sphere's or capsule's radius, a box's smallest half extent, half of a
+        mesh's thinnest extent) and half the median rest length of the edges
+        of the cloth triangles and tetrahedra, chosen whenever the solve is
+        built. A ``d_hat`` that spans a small shape lets it rest up to its own
+        size away and puts more contact pairs inside ``d_hat`` than the contact
+        lists reserve, which a captured step reports as
+        :attr:`SolverIPC.StatusBits.OVERFLOW`; one as long as the edges of a
+        cloth or soft body puts its non-adjacent primitives inside ``d_hat`` at
+        rest, and the barrier stretches it. A smaller ``d_hat`` also leaves
+        less room for the jump of a kinematic body, which is not swept.
+
+        The barrier needs a gap at the start. When the surfaces of different
+        bodies cross each other, or are at or inside their contact thickness (up
+        to the rounding of float32 positions), in the model's state, the solver
+        raises :class:`ValueError` at construction and names the closest pair,
+        as libuipc's sanity check rejects such a scene at init. Surfaces that
+        never move may touch or cross; the inside of a body is not checked, nor
+        two particles that are on no cloth or tetrahedron. A gap inside
+        ``d_hat`` is valid, but there the barrier starts compressed and pushes
+        the surfaces apart in the first steps. The check compares the bodies
+        whose bounding boxes come that close, every primitive of one against
+        every primitive of the other, and skips a pair of bodies with more than
+        2**31 - 1 primitive pairs with a warning. A state written between steps
+        is not checked: a step that starts in contact fails
         (:attr:`SolverIPC.StatusBits.THICKNESS_VIOLATED` or
-        :attr:`SolverIPC.StatusBits.INVALID_CCD_STEP`), and the surfaces of
-        different bodies that cross each other in the model's state raise
-        :class:`ValueError` at construction, as libuipc's sanity check rejects
-        them at init (surfaces that never move may cross; crossings inside one
-        body are not checked). The check tests every surface edge against every
-        triangle, and is skipped with a warning above 2**31 - 1 pairs.
+        :attr:`SolverIPC.StatusBits.INVALID_CCD_STEP`).
     """
 
     class ObservableKind(SolverBase.ObservableKind):
@@ -819,7 +895,7 @@ class SolverIPC(SolverBase):
         model: Model,
         *,
         kappa: float = 1.0e9,
-        d_hat: float = 0.01,
+        d_hat: float | None = None,
         thickness: float = 0.0,
         newton_max_iter: int = 1024,
         newton_velocity_tol: float = 0.05,
@@ -839,9 +915,10 @@ class SolverIPC(SolverBase):
         super().__init__(model)
         _check_supported(model)
         uipc_warp = self._import_uipc_warp()
+        self._d_hat_given = d_hat is not None
         self._config = uipc_warp.SimConfig(
             kappa=kappa,
-            d_hat=d_hat,
+            d_hat=_D_HAT if d_hat is None else d_hat,
             newton_max_iter=newton_max_iter,
             newton_velocity_tol=newton_velocity_tol,
             newton_transrate_tol=newton_transrate_tol,
@@ -911,12 +988,15 @@ class SolverIPC(SolverBase):
         if len(gravity) > 1 and not np.allclose(gravity, gravity[0]):
             raise NotImplementedError("SolverIPC supports a single gravity vector for all worlds.")
         self._config.gravity = tuple(gravity[0])
+        if not self._d_hat_given:
+            self._config.d_hat = _default_d_hat(model)
 
         scene = self._uipc_warp.arrays.ArrayScene()
         tets = self._add_particles_and_tets(scene)
         self._add_cloth(scene, tets)
         self._dyadic = self._add_shapes_and_bodies(scene)
-        for P, N in zip(*self._collect_planes(), strict=True):
+        self._planes = self._collect_planes()
+        for P, N in zip(*self._planes[:2], strict=True):
             scene.add_half_plane(P, N)
         self._scene = scene
         self._shape_geometry = self._shape_geometry_now()
@@ -952,34 +1032,28 @@ class SolverIPC(SolverBase):
         self._make_engine(None)
 
     def _check_start(self) -> None:
-        """Raise ``ValueError`` when the surfaces of different bodies cross each other in the model's state.
+        """Raise ``ValueError`` when the surfaces of different bodies cross each other in the model's state, or start
+        at or inside their contact thickness.
 
-        The barrier needs surfaces that start apart. A step fails on a contact pair at or inside its thickness,
-        but surfaces that cross without such a pair (an edge through a triangle, away from its vertices) step on
-        and the barrier keeps them crossed. libuipc's sanity check rejects such a scene at init; this counts the
-        crossings once, with libuipc-warp's brute-force ``SurfaceChecker``, between the surfaces of different
-        bodies, unless neither ever moves (static shapes, kinematic particles and bodies). Crossings inside one body
-        are not counted: contact ignores them inside a rigid body (overlapping shapes), and inside a cloth or a
-        soft body the checker cannot tell the nearly coplanar triangles of a flat sheet from crossing ones. Above
-        ``_START_CHECK_PAIRS`` edge-triangle pairs the check is skipped with a warning.
+        The barrier needs surfaces that start apart, by more than their contact thickness. A step fails on a contact
+        pair at or inside its thickness (``THICKNESS_VIOLATED`` or ``INVALID_CCD_STEP``), which a captured step only
+        reports, and surfaces that cross without such a pair (an edge through a triangle, away from its vertices) step
+        on with the barrier keeping them crossed. As libuipc's sanity check does at init, this tests the model's state
+        once, without the surfaces that never move (static shapes, kinematic particles and bodies), whose contact the
+        solve skips. Every contact point that moves is tested against every half plane. Triangle meshes are tested body
+        pair by body pair, for the pairs whose bounding boxes come within their contact thickness of each other, with
+        libuipc-warp's brute-force ``SurfaceChecker``: its edge-triangle crossings and its point-triangle and edge-edge
+        distances. A distance above the thickness, also inside ``d_hat``, is a valid start, unless it is within a few
+        float32 steps of the thickness: Newton's positions are float32, and surfaces placed in touching contact come out
+        that far apart. Not tested: the inside of a body (contact ignores crossings inside a rigid body made of
+        overlapping shapes, and inside a cloth or a soft body the checker cannot tell the nearly coplanar triangles of a
+        flat sheet from crossing ones) and two particles that are on no cloth or tetrahedron (the checker has no
+        point-point distance). A body pair of more than ``_START_CHECK_PAIRS`` primitive pairs is skipped with a
+        warning.
         """
         eng = self._engine
         if eng is None:
             return
-        edges = np.asarray(eng.surface["edges"], np.int32).reshape(-1, 2)
-        tris = np.asarray(eng.surface["triangles"], np.int32).reshape(-1, 3)
-        if len(edges) == 0 or len(tris) == 0:
-            return
-        if len(edges) * len(tris) > _START_CHECK_PAIRS:
-            warnings.warn(
-                f"SolverIPC does not check whether surfaces intersect at the start: {len(edges)} edges and "
-                f"{len(tris)} triangles make more pairs than the check tests ({_START_CHECK_PAIRS}).",
-                NewtonWarning,
-                stacklevel=3,
-            )
-            return
-        from uipc_warp.validation import SurfaceChecker  # noqa: PLC0415
-
         layout = self._scene.layout()
         still = np.zeros(layout.n, bool)  # vertices that the solve never moves
         still[: layout.n_fem] = self._fixed_particle
@@ -987,36 +1061,185 @@ class SolverIPC(SolverBase):
         offsets = layout.body_vertex_offsets
         for b in np.flatnonzero(self._kinematic_body):
             still[offsets[b] : offsets[b + 1]] = True
-        no_body = np.zeros(layout.n, np.int32)  # the checker's body ids serve its distance query only
-
-        def crossings(edge_mask: np.ndarray, tri_mask: np.ndarray) -> int:
-            e, f = edges[edge_mask], tris[tri_mask]
-            if len(e) == 0 or len(f) == 0:
-                return 0
-            surface = {"edges": e, "triangles": f, "vertices": np.unique(f).astype(np.int32)}
-            return SurfaceChecker(surface, no_body, self.model.device).intersections(eng.vm.x)
-
-        found = crossings(np.ones(len(edges), bool), np.ones(len(tris), bool))
-        if found == 0:
+        x = eng.vm.x.numpy()
+        thickness = np.zeros(layout.n)
+        thickness[: layout.n_fem] = self._thickness
+        points = np.asarray(eng.contact_points, np.int64)
+        if len(points) == 0:
             return
-        # take away, each once, the crossings between surfaces that never move and those inside one body (a group
-        # of finite elements, an obstacle or a rigid body: the engine's contact bodies)
-        still_edges, still_tris = still[edges].all(axis=1), still[tris].all(axis=1)
-        found -= crossings(still_edges, still_tris)
-        body = eng.body.numpy()
-        edge_body, tri_body = body[edges[:, 0]], body[tris[:, 0]]
-        for b in np.intersect1d(edge_body, tri_body):
-            in_edges, in_tris = edge_body == b, tri_body == b
-            if still_edges[in_edges].all() and still_tris[in_tris].all():
-                continue  # all of it never moves: counted above
-            found -= crossings(in_edges, in_tris)
-            if still_edges[in_edges].any() and still_tris[in_tris].any():
-                found += crossings(in_edges & still_edges, in_tris & still_tris)
-        if found > 0:
-            raise ValueError(
-                f"SolverIPC: surfaces of different bodies intersect in the model's state: {found} edges cross "
-                "triangles. The barrier needs surfaces that start apart; a step would keep them crossed."
+        # the engine's contact bodies, with the particles on no surface (each a body of its own) taken as one
+        group = eng.body.numpy().astype(np.int64)
+        lone = np.setdiff1d(points, np.asarray(eng.surface["vertices"], np.int64))
+        if len(lone):
+            group[lone] = group.max() + 1
+        ids, point_group = np.unique(group[points], return_inverse=True)
+        # Newton's positions are float32: surfaces placed in touching contact come out up to a few float32 steps
+        # apart, which the barrier would take as a valid, nearly singular start. Such a gap counts as contact.
+        slack = 4.0 * float(np.spacing(np.float32(np.abs(x[points]).max())))
+        # (crossings, gap, distance, pair thickness, contact body, the half plane (as -1 - plane) or contact body)
+        violations = []
+
+        # contact points against half planes
+        P, N, plane_shapes = self._planes
+        moves = ~still[points]
+        if moves.any() and len(P):
+            d = x[points[moves]] @ N.T - np.einsum("ij,ij->i", P, N)
+            gap = d - thickness[points[moves]][:, None]
+            owner = point_group[moves]
+            for j in range(len(P)):
+                hit = np.flatnonzero(gap[:, j] <= slack)
+                for g in np.unique(owner[hit]):
+                    k = hit[owner[hit] == g]
+                    k = k[np.argmin(gap[k, j])]
+                    violations.append((0, gap[k, j], d[k, j], thickness[points[moves][k]], g, -1 - j))
+
+        # triangle meshes, one pair of bodies at a time
+        lo = np.full((len(ids), 3), np.inf)
+        hi = np.full((len(ids), 3), -np.inf)
+        np.minimum.at(lo, point_group, x[points])
+        np.maximum.at(hi, point_group, x[points])
+        reach = np.zeros(len(ids))
+        np.maximum.at(reach, point_group, thickness[points])
+        all_still = np.ones(len(ids), bool)
+        np.logical_and.at(all_still, point_group, still[points])
+        tris = np.asarray(eng.surface["triangles"], np.int64).reshape(-1, 3)
+        edges = np.asarray(eng.surface["edges"], np.int64).reshape(-1, 2)
+        # the primitives of each body, sorted by body: rows, whether they move, and where each body's rows start
+        prims = {}
+        for name, rows in (("vertices", points[:, None]), ("triangles", tris), ("edges", edges)):
+            body_of = np.searchsorted(ids, group[rows[:, 0]])
+            order = np.argsort(body_of, kind="stable")
+            prims[name] = (
+                rows[order],
+                ~still[rows[order]].all(axis=1),
+                np.searchsorted(body_of[order], np.arange(len(ids) + 1)),
             )
+        for a, b in self._near_boxes(lo, hi, reach, slack):
+            if all_still[a] and all_still[b]:
+                continue
+            result = self._body_pair(prims, group, a, b)
+            if result is None:
+                warnings.warn(
+                    f"SolverIPC does not check whether {self._describe_group(group, points, ids[a])} and "
+                    f"{self._describe_group(group, points, ids[b])} start in contact: their surfaces make more "
+                    f"primitive pairs than the check tests ({_START_CHECK_PAIRS}).",
+                    NewtonWarning,
+                    stacklevel=3,
+                )
+                continue
+            found, distance = result
+            t = reach[a] + reach[b]
+            if found or distance - t <= slack:
+                violations.append((found, distance - t, distance, t, a, b))
+        if not violations:
+            return
+        found, gap, distance, t, a, b = min(violations, key=lambda v: (-v[0], v[1]))
+        n = len(violations) - 1
+        more = f" ({n} more pair{'s' if n > 1 else ''} of bodies {'do' if n > 1 else 'does'} too)" if n else ""
+        one = self._describe_group(group, points, ids[a])
+        other = f"plane shape {plane_shapes[-1 - b]}" if b < 0 else self._describe_group(group, points, ids[b])
+        if found:
+            raise ValueError(
+                f"SolverIPC: the surfaces of {one} and {other} intersect in the model's state: {found} edges of one "
+                f"cross triangles of the other{more}. The barrier needs surfaces that start apart, by more than their "
+                "contact thickness; a step would keep them crossed."
+            )
+        need = f" by more than {t - distance:.6g} m" if t - distance > 0.0 else ""
+        fix = f"lift {one} off it{need}" if b < 0 else f"move them apart{need}, for example by lifting the upper one"
+        rounding = ", up to the rounding of float32 positions" if distance > t else ""
+        raise ValueError(
+            f"SolverIPC: {one} and {other} start {distance:.6g} m apart, at or inside their contact thickness "
+            f"({t:.6g} m{rounding}){more}. The barrier needs a gap larger than the thickness at the start: {fix}."
+        )
+
+    @staticmethod
+    def _near_boxes(lo: np.ndarray, hi: np.ndarray, reach: np.ndarray, slack: float) -> np.ndarray:
+        """The pairs ``(a, b)``, ``a < b``, of boxes ``[lo, hi]`` that come within ``reach[a] + reach[b] + slack`` of
+        each other, by sweep and prune along the axis on which the boxes spread most."""
+        axis = int(np.argmax(np.ptp(lo + hi, axis=0)))
+        order = np.argsort(lo[:, axis], kind="stable")
+        start = lo[order, axis]
+        end = np.searchsorted(start, hi[order, axis] + reach[order] + reach.max() + slack, side="right")
+        count = np.maximum(end - np.arange(len(order)) - 1, 0)
+        first = np.repeat(np.arange(len(order)), count)
+        second = first + 1 + np.arange(count.sum()) - np.repeat(np.cumsum(count) - count, count)
+        a, b = order[first], order[second]
+        apart = np.maximum(lo[b] - hi[a], lo[a] - hi[b]).max(axis=1, initial=-np.inf)
+        near = apart <= reach[a] + reach[b] + slack
+        a, b = a[near], b[near]
+        return np.stack([np.minimum(a, b), np.maximum(a, b)], axis=1)
+
+    def _body_pair(self, prims: dict, body: np.ndarray, a: int, b: int) -> tuple[int, float] | None:
+        """The edge-triangle crossings and the smallest distance between the surfaces of bodies ``a`` and ``b``
+        (indices into ``prims``), without the primitive pairs whose vertices never move: libuipc-warp's
+        ``SurfaceChecker`` on the primitives of ``a`` that move against all of ``b``, and on those of ``a`` that
+        never move against those of ``b`` that move. ``body`` (the contact body of every vertex) keeps the distance
+        query to pairs across the two. None when they make more than ``_START_CHECK_PAIRS`` primitive pairs."""
+        from uipc_warp.validation import SurfaceChecker  # noqa: PLC0415
+
+        def rows(name: str, g: int, moves: bool | None) -> np.ndarray:
+            all_rows, moving, starts = prims[name]
+            r, m = all_rows[starts[g] : starts[g + 1]], moving[starts[g] : starts[g + 1]]
+            return (r if moves is None else r[m == moves]).astype(np.int32)
+
+        halves = [
+            ({n: rows(n, a, mine) for n in prims}, {n: rows(n, b, theirs) for n in prims})
+            for mine, theirs in ((True, None), (False, True))
+        ]
+        size = 0
+        for one, other in halves:
+            v1, t1, e1 = (len(one[n]) for n in ("vertices", "triangles", "edges"))
+            v2, t2, e2 = (len(other[n]) for n in ("vertices", "triangles", "edges"))
+            size += v1 * t2 + v2 * t1 + e1 * e2 + e1 * t2 + e2 * t1
+        if size > _START_CHECK_PAIRS:
+            return None
+        x, device = self._engine.vm.x, self.model.device
+        chunk = 16384  # primitives of one side per launch: every launch stays below 2**31 threads
+        found, distance = 0, np.inf
+        for one, other in halves:
+            for edges, tris in ((one["edges"], other["triangles"]), (other["edges"], one["triangles"])):
+                for i in range(0, len(edges), chunk):
+                    for j in range(0, len(tris), chunk):
+                        e, f = edges[i : i + chunk], tris[j : j + chunk]
+                        surface = {"edges": e, "triangles": f, "vertices": np.zeros(0, np.int32)}
+                        found += SurfaceChecker(surface, body, device).intersections(x)
+            pieces = [max(len(part[n]) for n in prims) for part in (one, other)]
+            if min(pieces) == 0:
+                continue
+            for i in range(0, pieces[0], chunk):
+                for j in range(0, pieces[1], chunk):
+                    surface = {n: np.concatenate([one[n][i : i + chunk], other[n][j : j + chunk]]) for n in prims}
+                    surface["vertices"] = surface["vertices"].reshape(-1)
+                    surface["triangles"] = surface["triangles"].reshape(-1, 3)
+                    surface["edges"] = surface["edges"].reshape(-1, 2)
+                    distance = min(distance, SurfaceChecker(surface, body, device).min_distance(x))
+        return found, distance
+
+    def _describe_vertex(self, v: int) -> str:
+        """The Newton particle, body or shape that engine vertex ``v`` belongs to."""
+        layout = self._scene.layout()
+        if v < layout.n_fem:
+            return f"particle {v}"
+        if v < layout.obstacle_offsets[-1]:
+            k = int(np.searchsorted(layout.obstacle_offsets, v, side="right")) - 1
+            return f"static shape {self._obstacle_shapes[k]}"
+        b = int(np.searchsorted(layout.body_vertex_offsets, v, side="right")) - 1
+        label = self.model.body_label[b] if b < len(self.model.body_label) else ""
+        return f"body {b}" + (f" ({label!r})" if label and label != f"body_{b}" else "")
+
+    def _describe_group(self, group: np.ndarray, points: np.ndarray, g: int) -> str:
+        """The Newton body, static shape or particles of contact body ``g``."""
+        first = int(points[group[points] == g].min())
+        n_fem = self._scene.layout().n_fem
+        if first >= n_fem:
+            return self._describe_vertex(first)
+        members = np.flatnonzero(group[:n_fem] == g)  # with the particles inside a soft body
+        first, last = int(members.min()), int(members.max())
+        if len(members) == 1:
+            return f"particle {first}"
+        if last - first + 1 == len(members):
+            return f"particles {first} to {last}"
+        return f"{len(members)} particles from particle {first}"
 
     def _forget_written(self) -> None:
         """Forget what the solver wrote for the bodies, so that the next step takes their state from ``state_in``
@@ -1171,6 +1394,7 @@ class SolverIPC(SolverBase):
         dyadic masses."""
         model = self.model
         meshes: dict[int, list] = {b: [] for b in range(model.body_count)}
+        self._obstacle_shapes = []  # the shape of every obstacle, in the order they are added
         if model.shape_count:
             shape_type = model.shape_type.numpy()
             shape_body = model.shape_body.numpy()
@@ -1188,6 +1412,7 @@ class SolverIPC(SolverBase):
                 v = _quat_rotate_np(shape_xform[s, 3:7], v) + shape_xform[s, :3]
                 if b == -1:
                     scene.add_obstacle(v, f)
+                    self._obstacle_shapes.append(s)
                 else:
                     meshes[b].append((v, f))
 
@@ -1230,16 +1455,17 @@ class SolverIPC(SolverBase):
             )
         return mass, first, second
 
-    def _collect_planes(self) -> tuple[np.ndarray, np.ndarray]:
+    def _collect_planes(self) -> tuple[np.ndarray, np.ndarray, list[int]]:
+        """The points, normals and shapes of the static planes that collide."""
         model = self.model
         if model.shape_count == 0:
-            return np.zeros((0, 3)), np.zeros((0, 3))
+            return np.zeros((0, 3)), np.zeros((0, 3)), []
         shape_type = model.shape_type.numpy()
         shape_body = model.shape_body.numpy()
         colliding = _colliding_shapes(model)
         shape_xform = model.shape_transform.numpy()
         shape_scale = model.shape_scale.numpy()
-        P, N = [], []
+        P, N, shapes = [], [], []
         for s in range(model.shape_count):
             if shape_type[s] != int(GeoType.PLANE) or shape_body[s] != -1:
                 continue
@@ -1254,7 +1480,8 @@ class SolverIPC(SolverBase):
             xf = shape_xform[s].astype(np.float64)
             P.append(xf[:3])
             N.append(_quat_rotate_np(xf[3:7], np.array([0.0, 0.0, 1.0])))
-        return np.asarray(P).reshape(-1, 3), np.asarray(N).reshape(-1, 3)
+            shapes.append(s)
+        return np.asarray(P).reshape(-1, 3), np.asarray(N).reshape(-1, 3), shapes
 
     # ------------------------------------------------------------------ SolverBase
     @override
@@ -1478,6 +1705,90 @@ class SolverIPC(SolverBase):
         if self.model.body_count:
             # what the solver wrote for the restored state, so that the step's own state_in is kept as it was
             self._store(self._body_q_written, self._body_qd_written, None)
+
+    def check_status(self, observables: SolverBase.Observables, *, grow: bool = False) -> bool:
+        """Raise when a step that wrote ``observables`` failed, and warn when one reached an iteration limit.
+
+        A step captured in a CUDA graph cannot raise: it only writes how it ended into the observables passed to it
+        (see **Status** in the class docstring). Call this after replaying the graph, outside the capture, once for
+        each container the replayed steps wrote. It reads the container back from the device (one synchronization).
+
+        Args:
+            observables: A container from :meth:`observables` with :attr:`SolverIPC.ObservableKind.STATUS`
+                requested, as passed to :meth:`step`. With ``SOLVER_RESIDUAL`` requested as well, the messages give
+                the residual.
+            grow: On :attr:`SolverIPC.StatusBits.OVERFLOW`, call :meth:`grow` and return ``True`` instead of
+                raising, whatever other bits are set: the steps ran without some contact pairs, which can cause the
+                other failures, and the repeated steps report again.
+
+        Returns:
+            ``True`` when a contact list overflowed and ``grow`` enlarged the lists: the steps ran without some
+            contact pairs, so restore the state they started from, capture every graph that holds :meth:`step`
+            again and repeat them. ``False`` otherwise.
+
+        Raises:
+            RuntimeError: When a bit of :attr:`SolverIPC.StatusBits.FAILED` is set and ``grow`` does not take an
+                ``OVERFLOW``: the step's result must not be used.
+            ValueError: When ``observables`` does not hold the ``STATUS`` observable.
+
+        Warns:
+            NewtonWarning: When :attr:`SolverIPC.StatusBits.NEWTON_LIMIT` or
+                :attr:`SolverIPC.StatusBits.LINE_SEARCH_LIMIT` is set. Neither fails the step.
+        """
+        if self.model.device.is_capturing:
+            raise RuntimeError("SolverIPC.check_status() reads from the device; call it outside graph capture.")
+        if observables is None or not observables.is_requested(self.ObservableKind.STATUS):
+            raise ValueError("SolverIPC.check_status() needs observables with ObservableKind.STATUS requested.")
+        bits = self.StatusBits(int(np.bitwise_or.reduce(observables.status.numpy())))
+        residual = ""
+        if observables.is_requested(SolverBase.ObservableKind.SOLVER_RESIDUAL):
+            residual = f" (residual {float(observables.solver_residual.numpy().max()):.3g}, at most 1 when converged)"
+        if bits & self.StatusBits.OVERFLOW and grow:
+            self.grow()
+            return True
+        failed = bits & self.StatusBits.FAILED
+        if failed:
+            causes = []
+            if failed & self.StatusBits.OVERFLOW:
+                causes.append(
+                    "A contact list overflowed and the step ran without some contact pairs: call grow() (or "
+                    "check_status(..., grow=True)), restore the state the steps started from, capture again and repeat "
+                    "them."
+                )
+            if failed & (self.StatusBits.THICKNESS_VIOLATED | self.StatusBits.INVALID_CCD_STEP):
+                causes.append(
+                    "A contact pair started at or inside its contact thickness, as surfaces in touching contact or "
+                    "intersecting do (in a state written between steps, for example): surfaces must start apart."
+                )
+            if failed & (
+                self.StatusBits.NONFINITE_ENERGY
+                | self.StatusBits.NONFINITE_PCG_INIT
+                | self.StatusBits.NONFINITE_PCG_ITER
+            ):
+                causes.append(
+                    "The solve met a non-finite value: the state, the forces and the parameters must be finite."
+                )
+            if failed & self.StatusBits.TRAVERSAL_EXHAUSTED:
+                causes.append("A BVH traversal ran out of its node budget, so contact candidates are missing.")
+            last = self._uipc_warp.arrays.frame_status(self._engine)
+            if last.nonfinite and failed & self.StatusBits(1 << last.nonfinite):
+                report = self._engine.nonfinite_report()
+                detail = report.get("message") or ", ".join(f"{k}={v}" for k, v in report.items() if k != "kind")
+                causes.append(f"The last step failed in Newton iteration {report['newton']}: {detail}.")
+            names = "|".join(bit.name for bit in self.StatusBits if bit & failed)
+            raise RuntimeError(
+                f"SolverIPC: a step failed on {names}{residual}; its result must not be used. " + " ".join(causes)
+            )
+        limits = []
+        if bits & self.StatusBits.NEWTON_LIMIT:
+            limits.append(f"the Newton loop stopped at newton_max_iter without converging{residual}")
+        if bits & self.StatusBits.LINE_SEARCH_LIMIT:
+            limits.append("a line search ran out of its line_search_max_iter trials")
+        if limits:
+            warnings.warn(
+                f"SolverIPC: {' and '.join(limits)}; this does not fail the step.", NewtonWarning, stacklevel=2
+            )
+        return False
 
     @override
     def reset(

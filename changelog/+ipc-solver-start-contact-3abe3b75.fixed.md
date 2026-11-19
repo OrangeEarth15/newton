@@ -1,0 +1,1 @@
+Make ``SolverIPC`` raise ``ValueError`` at construction when the surfaces of different bodies start at or inside their contact thickness, as bodies placed on the ground or on each other at distance 0 do. Every step of such a start failed, silently when the step was captured in a CUDA graph. The error, like the one for surfaces that cross, names the closest pair and its distance.
