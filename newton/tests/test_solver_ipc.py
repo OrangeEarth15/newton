@@ -334,6 +334,30 @@ def test_rigid_box_free_fall_matches_implicit_euler(test, device):
         np.testing.assert_allclose(qd[3:], 0.0, atol=1e-5)
 
 
+def test_rigid_spin_slows_as_implicit_euler_turns_an_affine_body(test, device):
+    """A box spinning freely about its axis of symmetry, without gravity: within a step the affine body moves along a
+    straight line in its 12 coordinates and back onto the rotations, so its angular velocity drops by about
+    (omega dt)^2 per step, as a rotation projected back after every step gives it: the increments
+    alpha_1 = atan(omega dt) and alpha_(n+1) = atan(sin alpha_n / (2 - cos alpha_n)), the angular velocity
+    sin(alpha_n) / dt."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    b = _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.05))
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model, newton_velocity_tol=1e-6, linear_tol_rate=1e-12, semi_implicit=False)
+    omega, dt, steps = 1.0, 0.01, 8
+    s0, s1 = model.state(), model.state()
+    s0.body_qd.assign(np.array([[0.0, 0.0, 0.0, 0.0, 0.0, omega]], np.float32))
+    alpha, expected, spin = np.arctan(omega * dt), [], []
+    for _ in range(steps):
+        expected.append(np.sin(alpha) / dt)
+        alpha = np.arctan(np.sin(alpha) / (2.0 - np.cos(alpha)))
+        solver.step(s0, s1, None, None, dt)
+        s0, s1 = s1, s0
+        spin.append(float(s0.body_qd.numpy()[b, 5]))
+    np.testing.assert_allclose(omega - np.array(spin), omega - np.array(expected), rtol=0.02)
+    test.assertAlmostEqual((spin[-2] - spin[-1]) / spin[-2], (omega * dt) ** 2, delta=0.05 * (omega * dt) ** 2)
+
+
 def test_rigid_stack_rests_without_intersection(test, device):
     builder = newton.ModelBuilder()
     half, gap = 0.1, 0.004
@@ -550,15 +574,46 @@ def test_rejects_activations(test, device):
             _rejects(test, builder, "activations", device)
 
 
-def test_rejects_joints_and_drives(test, device):
-    """Reject joints other than free joints, and drive targets on free joints."""
-    builder = newton.ModelBuilder()
-    _hinged_pair(builder)
-    _rejects(test, builder, "joints", device)
-    builder = newton.ModelBuilder()
-    _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
-    builder.joint_target_mode[0] = int(newton.JointTargetMode.POSITION)
-    _rejects(test, builder, "POSITION", device)
+def test_rejects_unsupported_joints(test, device):
+    """Reject the joints SolverIPC does not simulate: D6 and distance joints, drives, passive springs and limits on
+    ball and free joints, joint armature and friction, and an effort limit on a driven joint."""
+
+    def hinged(add, **dof):
+        builder = newton.ModelBuilder()
+        link = builder.add_link(xform=wp.transform((0.0, 0.0, 1.0), wp.quat_identity()))
+        builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1)
+        builder.add_articulation([add(builder, link)])
+        for name, value in dof.items():  # on the first degree of freedom
+            getattr(builder, f"joint_{name}")[0] = value
+        return builder
+
+    def revolute(builder, link):
+        return builder.add_joint_revolute(-1, link, axis=newton.Axis.Y)
+
+    def ball(builder, link):
+        return builder.add_joint_ball(-1, link, parent_xform=wp.transform((0.0, 0.0, 1.2), wp.quat_identity()))
+
+    def d6(builder, link):
+        return builder.add_joint_d6(-1, link, angular_axes=[newton.ModelBuilder.JointDofConfig(axis=newton.Axis.X)])
+
+    def distance(builder, link):
+        return builder.add_joint_distance(-1, link)
+
+    free = newton.ModelBuilder()
+    _box_body(free, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
+    free.joint_target_mode[0] = int(newton.JointTargetMode.POSITION)
+    for name, builder, pattern in (
+        ("d6", hinged(d6), "D6 joints"),
+        ("distance", hinged(distance), "DISTANCE joints"),
+        ("free drive", free, "FREE joint 0 has the target mode POSITION"),
+        ("ball drive", hinged(ball, target_ke=10.0), "BALL joint 0 has target_ke 10.0"),
+        ("ball limit", hinged(ball, limit_lower=-0.5), "limits revolute and prismatic joints only"),
+        ("armature", hinged(revolute, armature=0.01), "joint armature"),
+        ("friction", hinged(revolute, friction=0.5), "joint friction"),
+        ("effort limit", hinged(revolute, target_ke=100.0, effort_limit=5.0), "joint_effort_limit 5.0"),
+    ):
+        with test.subTest(name):
+            _rejects(test, builder, pattern, device)
 
 
 def test_rejects_gradients(test, device):
@@ -828,6 +883,37 @@ def test_external_forces_match_closed_form(test, device):
 
 # converged tightly: free fall and sliding follow their closed forms to rounding
 _TIGHT = {"newton_velocity_tol": 1e-7, "linear_tol_rate": 1e-12, "semi_implicit": False}
+
+
+def test_free_joint_force_pushes_the_parent(test, device):
+    """joint_f on the free joint of a body whose parent is another body, without gravity: the child is pushed by the
+    force, as implicit Euler from rest gives it, and the parent by the reaction, so that the pair's momentum stays 0
+    (as SolverXPBD applies it)."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Y)
+    parent = builder.add_link(xform=wp.transform((1.0, 0.0, 0.0), wp.quat_identity()))
+    builder.add_shape_box(parent, hx=0.1, hy=0.1, hz=0.1)
+    child = builder.add_link(xform=wp.transform((1.5, 0.0, 0.0), wp.quat_identity()))
+    builder.add_shape_box(child, hx=0.1, hy=0.1, hz=0.1)
+    builder.add_articulation([builder.add_joint_free(parent), builder.add_joint_free(child, parent=parent)])
+    model = builder.finalize(device=device)
+    control = model.control()
+    f = np.zeros(model.joint_dof_count, np.float32)
+    f[6:9] = (0.0, 2.0, 0.0)  # the force of the child's free joint, at its centre of mass
+    control.joint_f.assign(f)
+    h, steps = 0.01, 20
+    qd = []
+    s0, s1 = model.state(), model.state()
+    solver = newton.solvers.SolverIPC(model, newton_velocity_tol=1e-6, linear_tol_rate=1e-12, semi_implicit=False)
+    for _ in range(steps):
+        solver.step(s0, s1, control, None, h)
+        s0, s1 = s1, s0
+        qd.append(s0.body_qd.numpy().copy())
+    qd = np.array(qd)
+    mass = model.body_mass.numpy()
+    momentum = mass[parent] * qd[:, parent, 0:3] + mass[child] * qd[:, child, 0:3]
+    np.testing.assert_allclose(momentum, 0.0, atol=1e-6)
+    n = np.arange(1, steps + 1)
+    np.testing.assert_allclose(qd[:, child, 1], 2.0 * n * h / mass[child], rtol=1e-5)
 
 
 def _engine_z(solver, body):
@@ -1792,6 +1878,403 @@ def test_gravity_per_world(test, device):
     check({-1: (1.0, 0.0, -3.0), 0: (0.0, 2.0, -1.0)}, 4)
 
 
+# ---------------------------------------------------------------------------- joints
+
+# a converged Newton loop and PCG, so that a joint follows a closed form to rounding
+_CONVERGED = {
+    "newton_velocity_tol": 1e-6,
+    "newton_transrate_tol": 1e-6,
+    "linear_tol_rate": 1e-12,
+    "semi_implicit": False,
+}
+
+
+def _hinged(device, kind="revolute", gravity=0.0, axis=newton.Axis.Z, offset=(0.0, 0.0, 0.0), radius=0.1, **dof):
+    """A sphere hanging from the world on a revolute or prismatic joint (y up); ``offset`` is the joint's origin in
+    the sphere's frame, and ``dof`` the joint's arguments. Returns the model, a state at its joint coordinates and
+    the joint."""
+    builder = newton.ModelBuilder(gravity=(0.0, -gravity, 0.0), up_axis=newton.Axis.Y)
+    link = builder.add_link()
+    builder.add_shape_sphere(link, radius=radius)
+    add = builder.add_joint_revolute if kind == "revolute" else builder.add_joint_prismatic
+    j = add(-1, link, axis=axis, child_xform=wp.transform(offset, wp.quat_identity()), **dof)
+    builder.add_articulation([j])
+    model = builder.finalize(device=device)
+    state = model.state()
+    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+    return model, state, j
+
+
+def _steps(model, solver, state, steps, dt, control=None, record=lambda s: s.joint_q.numpy().copy()):
+    """``steps`` steps from ``state``; what ``record`` takes of the state after each."""
+    s0, s1 = state, model.state()
+    out = []
+    for _ in range(steps):
+        solver.step(s0, s1, control, None, dt)
+        s0, s1 = s1, s0
+        out.append(record(s0))
+    return np.array(out), s0
+
+
+def _drive_recurrence(
+    inertia, h, steps, q0=0.0, qd0=0.0, ke=0.0, kd=0.0, ks=0.0, c=0.0, q_target=0.0, qd_target=0.0, q_rest=0.0, f=0.0
+):
+    """q_1 .. q_steps of implicit Euler for inertia q'' = ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd + f."""
+    q, qd, out = q0, qd0, []
+    k = inertia / h**2 + ke + ks + (kd + c) / h
+    for _ in range(steps):
+        q_next = (
+            inertia * (q + h * qd) / h**2 + ke * q_target + ks * q_rest + kd * (q / h + qd_target) + c * q / h + f
+        ) / k
+        q, qd = q_next, (q_next - q) / h
+        out.append(q)
+    return np.array(out)
+
+
+def test_pendulum_is_implicit_euler(test, device):
+    """A pendulum of 2 cm per metre swings as implicit Euler integrates the linearized pendulum, step by step to
+    1e-3 of its amplitude, with the period of the closed form 2 pi sqrt(I / (m g L)) to 0.1%."""
+    L, theta0, g, h = 1.0, 0.02, 10.0, 1e-3
+    model, state, _ = _hinged(device, gravity=g, offset=(0.0, L, 0.0), radius=0.05)
+    q = model.joint_q.numpy()
+    q[0] = theta0
+    state.joint_q.assign(q)
+    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+    solver = newton.solvers.SolverIPC(model, **_CONVERGED)
+    m = float(model.body_mass.numpy()[0])
+    inertia = float(model.body_inertia.numpy()[0][2, 2]) + m * L * L
+    period = 2.0 * np.pi * np.sqrt(inertia / (m * g * L))
+    steps = int(1.25 * period / h)
+    angles, _ = _steps(model, solver, state, steps, h)
+    expected = _drive_recurrence(inertia, h, steps, q0=theta0, ke=m * g * L)
+    np.testing.assert_allclose(angles[:, 0], expected, rtol=0.0, atol=1e-3 * theta0)
+    # the first zero crossing upwards after the start: three quarters of a period
+    up = np.flatnonzero((angles[:-1, 0] < 0.0) & (angles[1:, 0] >= 0.0))[0]
+    test.assertAlmostEqual(h * (up + 1) / (0.75 * period), 1.0, delta=1e-3)
+
+
+def test_joint_forces_match_closed_form(test, device):
+    """joint_f from rest without gravity: a revolute and a prismatic joint follow q_n = a h^2 n (n + 1) / 2 of
+    implicit Euler, a = tau / I or F / m, and a ball joint whose parent frame is turned spins its child about the
+    torque turned with it."""
+    # small enough that the bodies turn slowly: an affine body turning under implicit Euler moves along a straight
+    # line in its 12 coordinates and back onto the rotations, which loses about (omega dt)^2 of its angular velocity
+    # per step
+    h, steps = 0.01, 20
+    n = np.arange(1, steps + 1)
+    for kind, f in (("revolute", 0.005), ("prismatic", 2.0)):
+        with test.subTest(kind):
+            model, state, _ = _hinged(device, kind, axis=newton.Axis.X)
+            control = model.control()
+            control.joint_f.assign(np.array([f], np.float32))
+            q, _ = _steps(model, newton.solvers.SolverIPC(model, **_CONVERGED), state, steps, h, control)
+            m = float(model.body_mass.numpy()[0])
+            a = f / (float(model.body_inertia.numpy()[0][0, 0]) if kind == "revolute" else m)
+            np.testing.assert_allclose(q[:, 0], a * h * h * n * (n + 1) / 2.0, rtol=1e-5, atol=0.0)
+
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Y)
+    ball = builder.add_link()
+    builder.add_shape_sphere(ball, radius=0.1)
+    turn = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.5 * np.pi)
+    builder.add_articulation([builder.add_joint_ball(-1, ball, parent_xform=wp.transform((0.0, 0.0, 0.0), turn))])
+    model = builder.finalize(device=device)
+    control = model.control()
+    # the torque about z of the turned parent frame: about -y in the world
+    control.joint_f.assign(np.array([0.0, 0.0, 0.003], np.float32))
+    qd, _ = _steps(model, newton.solvers.SolverIPC(model, **_CONVERGED), model.state(), steps, h, control,
+                   lambda s: s.body_qd.numpy().copy())  # fmt: skip
+    inertia = float(model.body_inertia.numpy()[ball][0, 0])
+    np.testing.assert_allclose(qd[:, ball, 3:6], np.outer(-0.003 * n * h / inertia, [0.0, 1.0, 0.0]), atol=1e-6)
+
+
+def test_fixed_and_ball_joints_hold(test, device):
+    """A box welded to a swinging pendulum keeps its pose relative to it, and a bob on a ball joint keeps its anchor
+    on the pendulum's, within the joints' penalty (a load F stretches a joint by about F dt^2 / K, a few 1e-5 m here),
+    while the pendulum swings through 1.2 rad."""
+    builder = newton.ModelBuilder(gravity=(0.0, -10.0, 0.0), up_axis=newton.Axis.Y)
+    arm = builder.add_link(xform=wp.transform((0.0, -0.5, 0.0), wp.quat_identity()))
+    builder.add_shape_box(arm, hx=0.05, hy=0.5, hz=0.05)
+    weld = builder.add_link(xform=wp.transform((0.15, -0.9, 0.0), wp.quat_identity()))
+    builder.add_shape_box(weld, hx=0.1, hy=0.05, hz=0.05)
+    bob = builder.add_link(xform=wp.transform((0.0, -1.3, 0.0), wp.quat_identity()))
+    builder.add_shape_sphere(bob, radius=0.1)
+    joints = [
+        builder.add_joint_revolute(
+            -1, arm, axis=newton.Axis.Z, child_xform=wp.transform((0.0, 0.5, 0.0), wp.quat_identity())
+        ),
+        builder.add_joint_fixed(arm, weld, parent_xform=wp.transform((0.15, -0.4, 0.0), wp.quat_identity())),
+        builder.add_joint_ball(
+            arm, bob, parent_xform=wp.transform((0.0, -0.6, 0.0), wp.quat_identity()),
+            child_xform=wp.transform((0.0, 0.2, 0.0), wp.quat_identity()),
+        ),
+    ]  # fmt: skip
+    builder.add_articulation(joints)
+    model = builder.finalize(device=device)
+    q = model.joint_q.numpy()
+    q[0] = 1.2
+    state = model.state()
+    state.joint_q.assign(q)
+    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+    body_q, _ = _steps(
+        model, newton.solvers.SolverIPC(model), state, 100, 0.01, None, lambda s: s.body_q.numpy().copy()
+    )
+
+    def transforms(rows):
+        return [wp.transform(*row[:3], *row[3:]) for row in rows]
+
+    swing = np.arctan2(body_q[:, arm, 0], -body_q[:, arm, 1])
+    test.assertGreater(swing.max() - swing.min(), 1.0)
+    for frame in body_q:
+        X_arm, X_weld, X_bob = transforms(frame[[arm, weld, bob]])
+        relative = wp.transform_inverse(X_arm) * X_weld
+        np.testing.assert_allclose(np.array(wp.transform_get_translation(relative)), [0.15, -0.4, 0.0], atol=1e-4)
+        turn = wp.transform_get_rotation(relative)  # its angle is twice the length of its vector part
+        test.assertLess(2.0 * float(wp.length(wp.vec3(turn[0], turn[1], turn[2]))), 1e-4)
+        anchor_arm = wp.transform_point(X_arm, wp.vec3(0.0, -0.6, 0.0))
+        anchor_bob = wp.transform_point(X_bob, wp.vec3(0.0, 0.2, 0.0))
+        test.assertLess(float(wp.length(anchor_arm - anchor_bob)), 1e-4)
+
+
+def test_joint_penalty_follows_the_masses(test, device):
+    """A joint's penalty is joint_strength_ratio times the mass of the dynamic bodies it joins, a kinematic body
+    counting 0, for every kind of joint, and it follows the masses that notify_model_changed gives the bodies (libuipc's
+    revolute and prismatic joints keep the masses they were built with and scale their ratio by them)."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Y)
+    arm = builder.add_link(xform=wp.transform((0.0, -0.5, 0.0), wp.quat_identity()))
+    builder.add_shape_box(arm, hx=0.05, hy=0.5, hz=0.05)
+    bob = builder.add_link(xform=wp.transform((0.0, -1.3, 0.0), wp.quat_identity()))
+    builder.add_shape_sphere(bob, radius=0.2)
+    builder.add_articulation(
+        [
+            builder.add_joint_revolute(-1, arm, child_xform=wp.transform((0.0, 0.5, 0.0), wp.quat_identity())),
+            builder.add_joint_ball(
+                arm, bob, parent_xform=wp.transform((0.0, -0.5, 0.0), wp.quat_identity()),
+                child_xform=wp.transform((0.0, 0.3, 0.0), wp.quat_identity()),
+            ),
+        ]
+    )  # fmt: skip
+    base = builder.add_link(xform=wp.transform((2.0, 0.0, 0.0), wp.quat_identity()), is_kinematic=True)
+    builder.add_shape_box(base, hx=0.2, hy=0.1, hz=0.2)
+    slider = builder.add_link(xform=wp.transform((2.0, -0.5, 0.0), wp.quat_identity()))
+    builder.add_shape_box(slider, hx=0.1, hy=0.1, hz=0.1)
+    builder.add_articulation(
+        [
+            builder.add_joint_fixed(-1, base, parent_xform=wp.transform((2.0, 0.0, 0.0), wp.quat_identity())),
+            builder.add_joint_prismatic(
+                base, slider, axis=newton.Axis.Y, parent_xform=wp.transform((0.0, -0.5, 0.0), wp.quat_identity())
+            ),
+        ]
+    )
+    model = builder.finalize(device=device)
+    state = model.state()
+    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+    solver = newton.solvers.SolverIPC(model)
+
+    def penalties():
+        solver.step(state, model.state(), None, None, 0.01)  # writes the joints' terms
+        groups = solver._joint_groups
+        return [
+            float(groups.revolute.ratio.numpy()[0] * groups.revolute.mass_sum.numpy()[0]),
+            float(groups.spherical.kappa.numpy()[0]),
+            float(groups.fixed.kappa.numpy()[0]),
+            float(groups.prismatic.ratio.numpy()[0] * groups.prismatic.mass_sum.numpy()[0]),
+        ]
+
+    for scale in (1.0, 2.0):
+        with test.subTest(scale=scale):
+            if scale != 1.0:
+                for name in ("body_mass", "body_inertia"):
+                    getattr(model, name).assign(scale * getattr(model, name).numpy())
+                for name in ("body_inv_mass", "body_inv_inertia"):
+                    getattr(model, name).assign(getattr(model, name).numpy() / scale)
+                solver.notify_model_changed(newton.ModelFlags.BODY_INERTIAL_PROPERTIES)
+            m = model.body_mass.numpy().astype(np.float64)
+            expected = [100.0 * m[arm], 100.0 * (m[arm] + m[bob]), 0.0, 100.0 * m[slider]]
+            np.testing.assert_allclose(penalties(), expected, rtol=1e-12)
+
+
+def test_joint_coordinates_are_written(test, device):
+    """After every step joint_q and joint_qd hold the coordinates eval_ik computes from the bodies' state, for a
+    revolute, a prismatic, a ball and a free joint, but the revolute angle, which goes on past pi; an angle written into
+    state_in picks the turn the joint goes on from."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Y)
+    links = []
+    for x in (0.0, 1.0, 2.0):
+        links.append(builder.add_link(xform=wp.transform((x, 0.0, 0.0), wp.quat_identity())))
+        builder.add_shape_box(links[-1], hx=0.1, hy=0.1, hz=0.1)
+    joints = [
+        builder.add_joint_revolute(-1, links[0], axis=newton.Axis.Z),
+        builder.add_joint_prismatic(
+            -1, links[1], axis=newton.Axis.X, parent_xform=wp.transform((1.0, 0.0, 0.0), wp.quat_identity())
+        ),
+        builder.add_joint_ball(
+            links[1], links[2], parent_xform=wp.transform((0.5, 0.0, 0.0), wp.quat_identity()),
+            child_xform=wp.transform((-0.5, 0.0, 0.0), wp.quat_identity()),
+        ),
+    ]  # fmt: skip
+    builder.add_articulation(joints)
+    _box_body(builder, (0.0, 2.0, 0.0), (0.1, 0.1, 0.1))  # a free body
+    model = builder.finalize(device=device)
+    qd = model.joint_qd.numpy()
+    qd[:] = (10.0, 0.5, 1.0, -2.0, 0.5, 0.3, -0.2, 0.1, 0.4, 0.2, 0.7)  # 10 rad/s about the hinge
+    state = model.state()
+    state.joint_qd.assign(qd)
+    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+    solver = newton.solvers.SolverIPC(model, **_CONVERGED)
+    q_ik, qd_ik = wp.zeros_like(state.joint_q), wp.zeros_like(state.joint_qd)
+    s0, s1 = state, model.state()
+    angles = []
+    for _ in range(50):
+        solver.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+        angles.append(float(s0.joint_q.numpy()[0]))
+        newton.eval_ik(model, s0, q_ik, qd_ik)
+        q, q_eval = s0.joint_q.numpy(), q_ik.numpy()
+        turns = np.round((q[0] - q_eval[0]) / (2.0 * np.pi))
+        np.testing.assert_allclose(q[0] - 2.0 * np.pi * turns, q_eval[0], atol=1e-5)
+        np.testing.assert_allclose(q[1:], q_eval[1:], atol=1e-5)
+        np.testing.assert_allclose(s0.joint_qd.numpy(), qd_ik.numpy(), atol=1e-4)
+    test.assertGreater(float(s0.joint_q.numpy()[0]), 4.0, "the hinge turns past pi")
+    # a turn more, written into state_in with the bodies' state unchanged
+    angle = float(s0.joint_q.numpy()[0])
+    q = s0.joint_q.numpy()
+    q[0] += 2.0 * np.pi
+    s0.joint_q.assign(q)
+    solver.step(s0, s1, None, None, 0.01)
+    test.assertAlmostEqual(float(s1.joint_q.numpy()[0]) - angle, 2.0 * np.pi + angles[-1] - angles[-2], delta=2e-3)
+
+
+def test_grown_lists_keep_joint_angles(test, device):
+    """A wheel spins on its hinge while a box drops onto the ground; when it lands, past half a turn of the wheel, the
+    contact lists overflow, and the eager step grows them and solves again from the step's start: the wheel's angle
+    goes on as in a solver with room, and so does every body."""
+
+    def model():
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=(0.0, -9.81, 0.0))
+        wheel = builder.add_link(xform=wp.transform((0.0, 1.0, 0.0), wp.quat_identity()))
+        builder.add_shape_box(wheel, hx=0.2, hy=0.2, hz=0.02)
+        builder.add_articulation(
+            [
+                builder.add_joint_revolute(
+                    -1, wheel, axis=newton.Axis.Z, parent_xform=wp.transform((0.0, 1.0, 0.0), wp.quat_identity())
+                )
+            ]
+        )
+        _box_body(builder, (1.0, 0.6, 0.0), (0.05, 0.05, 0.05))
+        builder.add_ground_plane()
+        m = builder.finalize(device=device)
+        qd = m.joint_qd.numpy()
+        qd[0] = 15.0
+        m.joint_qd.assign(qd)
+        return m
+
+    results = []
+    for tiny in (False, True):
+        m = model()
+        state = m.state()
+        newton.eval_fk(m, m.joint_q, m.joint_qd, state)
+        solver = newton.solvers.SolverIPC(m, **_CONVERGED)
+        if tiny:
+            solver._make_engine(_TINY_LISTS)
+        q, last = _steps(m, solver, state, 45, 0.01)
+        results.append((q[:, 0], last.body_q.numpy()))
+    (roomy, roomy_body_q), (grown, grown_body_q) = results
+    test.assertGreater(roomy[-1], np.pi)
+    np.testing.assert_allclose(grown, roomy, atol=1e-5)
+    np.testing.assert_allclose(grown_body_q, roomy_body_q, atol=1e-5)
+
+
+def test_drives_are_implicit_euler(test, device):
+    """A revolute and a prismatic joint driven from rest by target gains, a passive spring and passive damping,
+    towards a moving target, follow implicit Euler's recurrence of I q'' = ke (q* - q) + kd (qd* - qd) - ks (q - q_rest)
+    - c qd step by step to 1e-4 of their motion (SolverIPC folds the four terms into libuipc's driving term of every
+    step). The hinge turns a large sphere through small angles: an affine body turned under implicit Euler moves
+    along a straight line in its 12 coordinates and back onto the rotations, which adds a term of order
+    (omega dt)^3 to every step, 1e-4 of the motion at 0.5 rad and 1e-6 at 0.05 rad here."""
+    for kind, length, scale in (("revolute", 0.1, 1.0), ("prismatic", 1.0, 10.0)):
+        with test.subTest(kind):
+            gains = {"target_ke": 40.0, "target_kd": 2.0, "stiffness": 10.0, "damping": 1.0}
+            gains = {name: scale * value for name, value in gains.items()}
+            targets = {"target_q": 0.5 * length, "target_qd": 0.1 * length, "rest_q": -0.2 * length}
+            model, state, _ = _hinged(device, kind, axis=newton.Axis.X, radius=0.5, **targets, **gains)
+            solver = newton.solvers.SolverIPC(model, **_CONVERGED)
+            m = float(model.body_mass.numpy()[0])
+            inertia = float(model.body_inertia.numpy()[0][0, 0]) if kind == "revolute" else m
+            h, steps = 0.01, 100
+            q, _ = _steps(model, solver, state, steps, h, model.control())
+            expected = _drive_recurrence(
+                inertia, h, steps, ke=gains["target_ke"], kd=gains["target_kd"], ks=gains["stiffness"],
+                c=gains["damping"], q_target=targets["target_q"], qd_target=targets["target_qd"],
+                q_rest=targets["rest_q"],
+            )  # fmt: skip
+            test.assertGreater(np.abs(expected).max(), 0.1 * length)
+            np.testing.assert_allclose(q[:, 0], expected, rtol=0.0, atol=1e-4 * np.abs(expected).max())
+
+
+def test_joint_limits_hold(test, device):
+    """A revolute joint turned by a torque into its upper limit, and a slider pulled down by gravity onto its lower
+    limit, come to rest past the limit by sqrt(F delta_r / limit_ke), where libuipc's cubic limit balances the load
+    (SolverIPC sets its strength so that it pushes back with limit_ke delta_r at the overshoot delta_r = 1e-3); four
+    times the stiffness halves the overshoot. Without the limit they run on."""
+    tau, upper = 4.0, 0.3
+    for limit_ke in (1.0e4, 4.0e4):
+        with test.subTest(limit_ke=limit_ke):
+            model, state, _ = _hinged(device, limit_lower=-1.0, limit_upper=upper, limit_ke=limit_ke, damping=2.0)
+            control = model.control()
+            control.joint_f.assign(np.array([tau], np.float32))
+            q, _ = _steps(model, newton.solvers.SolverIPC(model, **_CONVERGED), state, 300, 0.01, control)
+            test.assertLess(q[:, 0].max(), upper + 0.01)
+            test.assertAlmostEqual(float(q[-1, 0]) - upper, np.sqrt(tau * 1e-3 / limit_ke), delta=1e-6)
+
+            g, lower = 10.0, -0.1
+            model, state, _ = _hinged(
+                device, "prismatic", gravity=g, axis=newton.Axis.Y, limit_lower=lower, limit_upper=1.0,
+                limit_ke=limit_ke, damping=20.0,
+            )  # fmt: skip
+            m = float(model.body_mass.numpy()[0])
+            q, _ = _steps(model, newton.solvers.SolverIPC(model, **_CONVERGED), state, 300, 0.01)
+            test.assertAlmostEqual(float(q[-1, 0]) - lower, -np.sqrt(m * g * 1e-3 / limit_ke), delta=1e-6)
+    model, state, _ = _hinged(device, limit_lower=-1.0, limit_upper=upper, limit_ke=0.0, damping=2.0)
+    control = model.control()
+    control.joint_f.assign(np.array([tau], np.float32))
+    q, _ = _steps(model, newton.solvers.SolverIPC(model), state, 100, 0.01, control)
+    test.assertGreater(q[-1, 0], 1.0, "a limit of stiffness 0 holds nothing")
+
+
+def test_drive_targets_change_inside_a_captured_graph(test, device):
+    """Targets written into control.joint_target_q between replays of a captured step drive a revolute joint as they
+    do in eager steps, to 1e-6: the drive is computed on the device from the control at every step."""
+
+    def run(capture):
+        model, state, _ = _hinged(device, axis=newton.Axis.X, target_ke=50.0, target_kd=5.0)
+        solver = newton.solvers.SolverIPC(model, **_CONVERGED)
+        control = model.control()
+        s0, s1 = state, model.state()
+        out = []
+        solver.step(s0, s1, control, None, 0.01)  # loads the kernels
+        s0, s1 = s1, s0
+        graph = None
+        if capture:
+            with wp.ScopedCapture(device=device) as cap:
+                solver.step(s0, s1, control, None, 0.01)
+                solver.step(s1, s0, control, None, 0.01)
+            graph = cap.graph
+        for k in range(20):
+            control.joint_target_q.assign(np.array([0.4 * np.sin(0.5 * k)], np.float32))
+            if capture:
+                wp.capture_launch(graph)
+            else:
+                for _ in range(2):
+                    solver.step(s0, s1, control, None, 0.01)
+                    s0, s1 = s1, s0
+            out.append(s0.joint_q.numpy()[0])
+        return np.array(out)
+
+    eager, captured = run(False), run(True)
+    test.assertGreater(np.abs(eager).max(), 0.1)
+    np.testing.assert_allclose(captured, eager, atol=1e-6)
+
+
 @requires("uipc_warp")
 class TestSolverIPC(unittest.TestCase):
     pass
@@ -1902,6 +2385,11 @@ class TestSolverIPCStep(unittest.TestCase):
     """How a step ends and what carries from one step to the next: status, overflow, state, reset, model changes."""
 
 
+@requires("uipc_warp")
+class TestSolverIPCJoints(unittest.TestCase):
+    """Revolute, prismatic, fixed and ball joints: how they hold, forces, coordinates, drives and limits."""
+
+
 devices = get_cuda_test_devices()
 add_function_test(TestSolverIPC, "test_drop_on_ground", test_drop_on_ground, devices=devices)
 add_function_test(
@@ -1928,6 +2416,12 @@ add_function_test(
 )
 add_function_test(
     TestSolverIPC,
+    "test_rigid_spin_slows_as_implicit_euler_turns_an_affine_body",
+    test_rigid_spin_slows_as_implicit_euler_turns_an_affine_body,
+    devices=devices,
+)
+add_function_test(
+    TestSolverIPC,
     "test_rigid_stack_rests_without_intersection",
     test_rigid_stack_rests_without_intersection,
     devices=devices,
@@ -1950,13 +2444,14 @@ for name, func in (
     ("test_rejects_tendons", test_rejects_tendons),
     ("test_rejects_muscles", test_rejects_muscles),
     ("test_rejects_activations", test_rejects_activations),
-    ("test_rejects_joints_and_drives", test_rejects_joints_and_drives),
+    ("test_rejects_unsupported_joints", test_rejects_unsupported_joints),
     ("test_rejects_gradients", test_rejects_gradients),
     ("test_rejects_worlds", test_rejects_worlds),
     ("test_rejects_surface_velocity", test_rejects_surface_velocity),
     ("test_rejects_intersecting_start", test_rejects_intersecting_start),
     ("test_rejects_start_in_contact", test_rejects_start_in_contact),
     ("test_external_forces_match_closed_form", test_external_forces_match_closed_form),
+    ("test_free_joint_force_pushes_the_parent", test_free_joint_force_pushes_the_parent),
 ):
     add_function_test(TestSolverIPCInputs, name, func, devices=devices)
 for name, func in (
@@ -1986,6 +2481,19 @@ for name, func in (
     ("test_gravity_per_world", test_gravity_per_world),
 ):
     add_function_test(TestSolverIPCStep, name, func, devices=devices)
+
+for name, func in (
+    ("test_pendulum_is_implicit_euler", test_pendulum_is_implicit_euler),
+    ("test_joint_forces_match_closed_form", test_joint_forces_match_closed_form),
+    ("test_fixed_and_ball_joints_hold", test_fixed_and_ball_joints_hold),
+    ("test_joint_penalty_follows_the_masses", test_joint_penalty_follows_the_masses),
+    ("test_joint_coordinates_are_written", test_joint_coordinates_are_written),
+    ("test_grown_lists_keep_joint_angles", test_grown_lists_keep_joint_angles),
+    ("test_drives_are_implicit_euler", test_drives_are_implicit_euler),
+    ("test_joint_limits_hold", test_joint_limits_hold),
+    ("test_drive_targets_change_inside_a_captured_graph", test_drive_targets_change_inside_a_captured_graph),
+):
+    add_function_test(TestSolverIPCJoints, name, func, devices=devices)
 
 
 if __name__ == "__main__":

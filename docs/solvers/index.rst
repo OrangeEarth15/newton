@@ -102,8 +102,8 @@ Supported Features
      - ❌
    * - :class:`~newton.solvers.SolverIPC`
      - Implicit (BDF1)
-     - 🟨 affine bodies, no joints :sup:`5`
-     - ❌
+     - 🟨 affine bodies :sup:`5`
+     - 🟨 penalty joints :sup:`5`
      - ✅
      - ✅
      - 🟨 tetrahedra :sup:`5`
@@ -185,7 +185,8 @@ Supported Features
 | :sup:`5` Incremental Potential Contact: barrier contact with continuous collision detection between
   soft bodies, cloth (with self-collision), particles, near-rigid affine bodies, static shapes, planes and
   height fields, between the pairs that the collision groups, worlds and filter pairs let collide; springs
-  without damping; one world besides the global one; requires the optional ``libuipc-warp`` package.
+  without damping; revolute, prismatic, fixed and ball joints as penalty energies; one world besides the global
+  one; requires the optional ``libuipc-warp`` package.
 
 .. experimental::
     :class:`~newton.solvers.SolverSteel`'s public API and behavior may change without prior notice.
@@ -266,6 +267,9 @@ The maximal-coordinate solvers (:class:`~newton.solvers.SolverSemiImplicit`,
 enforce joints as pairwise body constraints but do not use the articulation kinematic-tree structure.
 :class:`~newton.solvers.SolverVBD` supports a subset of joint types through maximal-coordinate
 constraints, using a compliant augmented-Lagrangian (ALM) formulation.
+:class:`~newton.solvers.SolverIPC` holds joints as penalty energies between affine bodies (libuipc's
+affine-body joints), stiff in proportion to the mass of the dynamic bodies a joint joins, and writes
+``joint_q`` and ``joint_qd`` after every step.
 :class:`~newton.solvers.SolverStyle3D` and :class:`~newton.solvers.SolverImplicitMPM` do not support joints.
 
 **Joint types**
@@ -283,7 +287,9 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - :class:`~newton.solvers.SolverMuJoCo`
      - :class:`~newton.solvers.SolverVBD`
      - :class:`~newton.solvers.SolverKamino`
+     - :class:`~newton.solvers.SolverIPC`
    * - PRISMATIC
+     - |yes|
      - |yes|
      - |yes|
      - |yes|
@@ -299,7 +305,9 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - |yes|
      - |yes|
      - |yes|
+     - |yes|
    * - BALL
+     - |yes|
      - |yes|
      - |yes|
      - |yes|
@@ -315,7 +323,9 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - |yes|
      - |yes|
      - |yes|
+     - |yes|
    * - FREE
+     - |yes|
      - |yes|
      - |yes|
      - |yes|
@@ -331,6 +341,7 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - |no|
      - |no|
      - |no|
+     - |no|
    * - D6
      - |yes|
      - |yes|
@@ -338,6 +349,7 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - |yes|
      - |yes|
      - |yes|
+     - |no|
      - |no|
    * - ROD
      - |no|
@@ -347,6 +359,7 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - |no|
      - |yes|
      - |yes| :sup:`2`
+     - |no|
 
 | :sup:`1` DISTANCE joints are treated as FREE (no distance constraint enforcement).
 | :sup:`2` See :ref:`kamino-rod-joints` for the supported rod joint properties.
@@ -366,6 +379,7 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - :class:`~newton.solvers.SolverMuJoCo`
      - :class:`~newton.solvers.SolverVBD`
      - :class:`~newton.solvers.SolverKamino`
+     - :class:`~newton.solvers.SolverIPC`
    * - :attr:`~newton.Model.joint_enabled`
      - |no|
      - |no| :sup:`8`
@@ -374,6 +388,7 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - |no|
      - |yes|
      - |no|
+     - |yes|
    * - :attr:`~newton.Model.joint_armature`
      - |yes|
      - |yes|
@@ -382,6 +397,7 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - |yes|
      - |no|
      - |yes|
+     - |no| :sup:`15`
    * - :attr:`~newton.Model.joint_stiffness` / :attr:`~newton.Model.joint_rest_q`
      - REVOLUTE, PRISMATIC, D6
      - REVOLUTE, PRISMATIC, D6
@@ -390,6 +406,7 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - Scalar joints and isotropic BALL springs
      - ROD ``joint_rest_q`` only
      - |no|
+     - REVOLUTE, PRISMATIC
    * - :attr:`~newton.Model.joint_friction`
      - |no|
      - |yes| :sup:`9`
@@ -398,6 +415,7 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - |yes|
      - |no|
      - |yes|
+     - |no| :sup:`15`
    * - :attr:`~newton.Model.joint_limit_lower` / :attr:`~newton.Model.joint_limit_upper`
      - |yes|
      - |yes| :sup:`10`
@@ -406,6 +424,7 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - |yes|
      - |yes|
      - |yes|
+     - REVOLUTE, PRISMATIC
    * - :attr:`~newton.Model.joint_limit_ke` / :attr:`~newton.Model.joint_limit_kd`
      - |yes|
      - |no|
@@ -414,6 +433,7 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - |yes|
      - |yes| :sup:`7`
      - |no|
+     - ``joint_limit_ke`` only :sup:`16`
    * - :attr:`~newton.Model.joint_effort_limit`
      - |no|
      - |yes| :sup:`11`
@@ -422,6 +442,7 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - |yes|
      - |no|
      - |yes|
+     - |no| :sup:`15`
    * - :attr:`~newton.Model.joint_velocity_limit`
      - |no|
      - |yes| :sup:`12`
@@ -430,8 +451,13 @@ constraints, using a compliant augmented-Lagrangian (ALM) formulation.
      - |no|
      - |no|
      - |no|
+     - |no|
 
 | :sup:`2` Not enforced for BALL joints in SemiImplicit.
+| :sup:`15` SolverIPC raises ``NotImplementedError`` instead of ignoring the property: for non-zero armature or
+  friction, and for an effort limit below 1e6 on a degree of freedom with a drive.
+| :sup:`16` SolverIPC enforces a limit as libuipc's cubic penalty, set to push back with ``joint_limit_ke`` times
+  the overshoot at an overshoot of 1e-3 rad or m, more steeply beyond; ``joint_limit_kd`` is not read.
 
 SemiImplicit angular springs use principal coordinates in [-pi, pi). Crossing
 that boundary produces a force jump of ``2*pi*stiffness`` and can destabilize
@@ -453,6 +479,7 @@ motion; see :ref:`passive-joint-springs` for details.
      - :class:`~newton.solvers.SolverMuJoCo`
      - :class:`~newton.solvers.SolverVBD`
      - :class:`~newton.solvers.SolverKamino`
+     - :class:`~newton.solvers.SolverIPC`
    * - :attr:`~newton.Model.joint_target_ke` / :attr:`~newton.Model.joint_target_kd`
      - |yes|
      - |yes|
@@ -461,6 +488,7 @@ motion; see :ref:`passive-joint-springs` for details.
      - |yes|
      - |yes| :sup:`7`
      - |yes|
+     - REVOLUTE, PRISMATIC
    * - :attr:`~newton.Model.joint_target_mode`
      - |no|
      - |no|
@@ -469,7 +497,9 @@ motion; see :ref:`passive-joint-springs` for details.
      - |yes|
      - |no|
      - |yes|
+     - |no|
    * - :attr:`~newton.Control.joint_f` (feedforward forces)
+     - |yes|
      - |yes|
      - |yes|
      - |yes|
@@ -493,12 +523,14 @@ motion; see :ref:`passive-joint-springs` for details.
      - :class:`~newton.solvers.SolverMuJoCo`
      - :class:`~newton.solvers.SolverVBD`
      - :class:`~newton.solvers.SolverKamino`
+     - :class:`~newton.solvers.SolverIPC`
    * - Equality constraints (CONNECT, WELD, JOINT)
      - |no|
      - |no|
      - |no|
      - |no|
      - |yes|
+     - |no|
      - |no|
      - |no|
    * - Mimic joints
@@ -509,6 +541,7 @@ motion; see :ref:`passive-joint-springs` for details.
      - |yes| :sup:`6`
      - |yes| :sup:`5`
      - |no|
+     - |no|
    * - Particle-body attachments
      - |no|
      - |no|
@@ -516,6 +549,7 @@ motion; see :ref:`passive-joint-springs` for details.
      - |no|
      - |no|
      - |yes| :sup:`14`
+     - |no|
      - |no|
 
 | :sup:`3` Featherstone eliminates follower degrees of freedom from its reduced dynamics and transfers follower forces and inertia to the reference joint.

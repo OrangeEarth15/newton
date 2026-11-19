@@ -10,6 +10,7 @@ import importlib.metadata
 import operator
 import re
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntFlag
 from typing import ClassVar
@@ -17,9 +18,10 @@ from typing import ClassVar
 import numpy as np
 import warp as wp
 
-from ...core.types import Axis, override
+from ...core.types import MAXVAL, Axis, override
 from ...exceptions import NewtonWarning
 from ...geometry import GeoType, Mesh, ParticleFlags, ShapeFlags
+from ...math import velocity_at_point
 from ...sim import BodyFlags, Contacts, Control, JointTargetMode, JointType, Model, ModelFlags, State, StateFlags
 from ..solver import SolverBase
 
@@ -39,6 +41,16 @@ _START_CHECK_PAIRS = 2**31 - 1
 _D_HAT = 0.01
 _D_HAT_SHAPE_SHARE = 0.25
 _D_HAT_MESH_SHARE = 0.5
+
+# libuipc's strength ratio of a joint (the default of its joints' apply_to): the default joint_strength_ratio
+_JOINT_STRENGTH_RATIO = 100.0
+# the overshoot [rad or m] at which libuipc's cubic joint limit pushes back with the force of Newton's linear limit
+# spring of stiffness joint_limit_ke; it is stiffer beyond it and softer below
+_LIMIT_OVERSHOOT = wp.constant(wp.float64(1.0e-3))
+# a joint limit at -MAXVAL or MAXVAL is no limit: Newton stores an infinite one there
+_MAXVAL = wp.constant(wp.float32(MAXVAL))
+# Newton's default joint_effort_limit, which bounds no drive
+_EFFORT_LIMIT = 1.0e6
 
 
 @wp.func
@@ -232,9 +244,7 @@ def _particle_accelerations(
 def _body_accelerations(
     body_f: wp.array[wp.spatial_vector],
     has_body_f: int,
-    joint_f: wp.array[wp.float32],
-    has_joint_f: int,
-    joint_f_start: wp.array[wp.int32],
+    joint_wrench: wp.array[wp.spatial_vector],
     dynamic_body: wp.array[wp.int32],
     body_com: wp.array[wp.vec3],
     mass_inv: wp.array[wp.mat44d],
@@ -243,20 +253,16 @@ def _body_accelerations(
     row0: int,
     acc: wp.array[wp.vec3d],
 ):
-    """The accelerations of a dynamic body's q = (p, rows of A) under the wrench ``body_f`` plus the ``joint_f``
-    of its free joint: M^-1 Q of its generalized force Q, four rows from ``row0 + 4 j``."""
+    """The accelerations of a dynamic body's q = (p, rows of A) under the wrench ``body_f`` plus the wrench of the
+    ``joint_f`` of its free and ball joints (``_joint_wrenches``): M^-1 Q of its generalized force Q, four rows from
+    ``row0 + 4 j``."""
     j = wp.tid()
     b = dynamic_body[j]
-    f = wp.vec3d()
-    t = wp.vec3d()
+    wrench = joint_wrench[b]
     if has_body_f != 0:
-        wrench = body_f[b]
-        f = _to64(wp.spatial_top(wrench))
-        t = _to64(wp.spatial_bottom(wrench))
-    s = joint_f_start[b]
-    if has_joint_f != 0 and s >= 0:
-        f = f + wp.vec3d(wp.float64(joint_f[s]), wp.float64(joint_f[s + 1]), wp.float64(joint_f[s + 2]))
-        t = t + wp.vec3d(wp.float64(joint_f[s + 3]), wp.float64(joint_f[s + 4]), wp.float64(joint_f[s + 5]))
+        wrench = wrench + body_f[b]
+    f = _to64(wp.spatial_top(wrench))
+    t = _to64(wp.spatial_bottom(wrench))
     o = base[b]
     A = wp.matrix_from_rows(x[o + 1], x[o + 2], x[o + 3])
     # The force f at the centre of mass c does the work f . (dp + dA c). The torque t does t . dtheta on a
@@ -271,6 +277,264 @@ def _body_accelerations(
         p_acc[k] = a[0]
         acc[r + 1 + k] = wp.vec3d(a[1], a[2], a[3])
     acc[r] = p_acc
+
+
+@wp.kernel
+def _joint_wrenches(
+    joints: wp.array[wp.int32],
+    joint_type: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_X_p: wp.array[wp.transform],
+    joint_qd_start: wp.array[wp.int32],
+    joint_enabled: wp.array[wp.bool],
+    joint_f: wp.array[wp.float32],
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    wrench: wp.array[wp.spatial_vector],
+):
+    """The ``joint_f`` of a free or ball joint as wrenches at the centres of mass of its bodies: a free joint's is a
+    world-frame wrench at the child's centre of mass, a ball joint's a torque in the parent's joint frame; the parent
+    takes the reaction (``SolverXPBD``'s ``apply_joint_forces`` for a free joint)."""
+    k = wp.tid()
+    j = joints[k]
+    if not joint_enabled[j]:
+        return
+    c = joint_child[j]
+    p = joint_parent[j]
+    s = joint_qd_start[j]
+    if joint_type[j] == JointType.FREE:
+        f = wp.vec3(joint_f[s], joint_f[s + 1], joint_f[s + 2])
+        t = wp.vec3(joint_f[s + 3], joint_f[s + 4], joint_f[s + 5])
+        wp.atomic_add(wrench, c, wp.spatial_vector(f, t))
+        if p >= 0:
+            # the reaction, moved to the parent's centre of mass
+            r = wp.transform_point(body_q[c], body_com[c]) - wp.transform_point(body_q[p], body_com[p])
+            wp.atomic_sub(wrench, p, wp.spatial_vector(f, t + wp.cross(r, f)))
+    else:
+        X_wpj = joint_X_p[j]
+        if p >= 0:
+            X_wpj = body_q[p] * X_wpj
+        t = wp.transform_vector(X_wpj, wp.vec3(joint_f[s], joint_f[s + 1], joint_f[s + 2]))
+        wp.atomic_add(wrench, c, wp.spatial_vector(wp.vec3(), t))
+        if p >= 0:
+            wp.atomic_sub(wrench, p, wp.spatial_vector(wp.vec3(), t))
+
+
+@wp.kernel
+def _joint_terms(
+    joints: wp.array[wp.int32],
+    joint_q_start: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_enabled: wp.array[wp.bool],
+    target_ke: wp.array[wp.float32],
+    target_kd: wp.array[wp.float32],
+    stiffness: wp.array[wp.float32],
+    rest_q: wp.array[wp.float32],
+    damping: wp.array[wp.float32],
+    has_springs: int,
+    limit_lower: wp.array[wp.float32],
+    limit_upper: wp.array[wp.float32],
+    limit_ke: wp.array[wp.float32],
+    target_q: wp.array[wp.float32],
+    has_target_q: int,
+    target_qd: wp.array[wp.float32],
+    has_target_qd: int,
+    joint_f: wp.array[wp.float32],
+    has_joint_f: int,
+    strength: wp.array[wp.float64],
+    mass_sum: wp.array[wp.float64],
+    current: wp.array[wp.float64],
+    dt: wp.float64,
+    drive_scale: wp.float64,
+    ratio: wp.array[wp.float64],
+    drv_on: wp.array[wp.int32],
+    drv_ratio: wp.array[wp.float64],
+    drv_aim: wp.array[wp.float64],
+    lim_on: wp.array[wp.int32],
+    lim_lower: wp.array[wp.float64],
+    lim_upper: wp.array[wp.float64],
+    lim_strength: wp.array[wp.float64],
+    force_on: wp.array[wp.int32],
+    force: wp.array[wp.float64],
+):
+    """The terms of a revolute or prismatic joint for the next step, from Newton's model and control (class docstring,
+    **Joints**): the strength ratio of its penalty ``strength`` (0 when disabled) for the engine's ``mass_sum``, the
+    masses the joint was built with; the drive, passive spring and passive damping as one quadratic potential of the
+    step (libuipc's driving term, ``drive_scale`` 1 for a revolute joint, 1/2 for a prismatic one, whose driving
+    energy counts its distance twice); the limit as libuipc's cubic penalty with Newton's limit stiffness at
+    ``_LIMIT_OVERSHOOT``; ``joint_f`` as libuipc's external torque or force."""
+    e = wp.tid()
+    j = joints[e]
+    d = joint_qd_start[j]
+    i = joint_q_start[j]
+    on = joint_enabled[j]
+    zero = wp.float64(0.0)
+    m = mass_sum[e]
+    r = zero
+    if on and m > zero:
+        r = strength[e] / m
+    ratio[e] = r
+    ke = wp.float64(target_ke[d])
+    kd = wp.float64(target_kd[d])
+    ks = zero
+    c = zero
+    q_rest = zero
+    if has_springs != 0:
+        ks = wp.float64(stiffness[d])
+        c = wp.float64(damping[d])
+        q_rest = wp.float64(rest_q[i])
+    q_target = zero
+    if has_target_q != 0:
+        q_target = wp.float64(target_q[i])
+    qd_target = zero
+    if has_target_qd != 0:
+        qd_target = wp.float64(target_qd[d])
+    # implicit Euler: ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd at the step's end, qd = (q - q_n) / dt, is
+    # minus the gradient of K/2 (q - q_hat)^2
+    K = ke + ks + (kd + c) / dt
+    drive = on and K > zero and m > zero
+    drv_on[e] = wp.where(drive, 1, 0)
+    if drive:
+        q_n = current[e]
+        drv_aim[e] = (ke * q_target + ks * q_rest + (kd / dt) * (q_n + dt * qd_target) + (c / dt) * q_n) / K
+        drv_ratio[e] = drive_scale * K * dt * dt / m
+    lo = limit_lower[d]
+    hi = limit_upper[d]
+    lke = wp.float64(limit_ke[d])
+    limited = on and lke > zero and (lo > -_MAXVAL or hi < _MAXVAL)
+    lim_on[e] = wp.where(limited, 1, 0)
+    if limited:
+        # libuipc's penalty s ((x - u) / (u - l))^3 is, at an overshoot delta, the energy dt^2 lke delta^3 / (3 delta_r)
+        w = wp.float64(hi) - wp.float64(lo)
+        w3 = wp.where(w > zero, w * w * w, wp.float64(1.0))
+        lim_lower[e] = wp.float64(lo)
+        lim_upper[e] = wp.float64(hi)
+        lim_strength[e] = dt * dt * lke * w3 / (wp.float64(3.0) * _LIMIT_OVERSHOOT)
+    value = zero
+    if has_joint_f != 0:
+        value = wp.float64(joint_f[d])
+    force_on[e] = wp.where(on and value != zero, 1, 0)
+    force[e] = value
+
+
+@wp.kernel
+def _enable_anchor_joints(
+    joints: wp.array[wp.int32],
+    joint_enabled: wp.array[wp.bool],
+    strength: wp.array[wp.float64],
+    kappa: wp.array[wp.float64],
+):
+    """The stiffness of a fixed or ball joint for the next step, 0 when it is disabled."""
+    e = wp.tid()
+    kappa[e] = wp.where(joint_enabled[joints[e]], strength[e], wp.float64(0.0))
+
+
+@wp.kernel
+def _adopt_joint_angles(
+    joints: wp.array[wp.int32],
+    joint_q_start: wp.array[wp.int32],
+    joint_q: wp.array[wp.float32],
+    written: wp.array[wp.float32],
+    current: wp.array[wp.float64],
+):
+    """A revolute joint whose ``state_in.joint_q`` is not what the solver wrote takes it as the angle the next unwrap
+    starts from (``compute_current_angles``), which therefore keeps its turn."""
+    e = wp.tid()
+    i = joint_q_start[joints[e]]
+    q = joint_q[i]
+    if q != written[i]:
+        current[e] = wp.float64(q)
+
+
+@wp.func
+def _joint_point_velocity(
+    b: int,
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    point: wp.vec3,
+):
+    """The velocity of a point fixed to body ``b`` (-1: the world, at rest)."""
+    if b < 0:
+        return wp.vec3()
+    return velocity_at_point(body_qd[b], point - wp.transform_point(body_q[b], body_com[b]))
+
+
+@wp.kernel
+def _store_joints(
+    joint_type: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_X_p: wp.array[wp.transform],
+    joint_X_c: wp.array[wp.transform],
+    joint_axis: wp.array[wp.vec3],
+    joint_q_start: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    element: wp.array[wp.int32],
+    revolute_angle: wp.array[wp.float64],
+    prismatic_distance: wp.array[wp.float64],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    joint_q: wp.array[wp.float32],
+    joint_qd: wp.array[wp.float32],
+    written: wp.array[wp.float32],
+):
+    """``joint_q`` and ``joint_qd`` of every joint from the bodies' state, as ``newton.eval_ik`` computes them, but the
+    position of a revolute or prismatic joint, which is libuipc's multi-turn angle or distance (``element``: the
+    joint's row in its group); ``written`` keeps the positions."""
+    j = wp.tid()
+    t = joint_type[j]
+    if t == JointType.FIXED:
+        return
+    p = joint_parent[j]
+    c = joint_child[j]
+    i = joint_q_start[j]
+    d = joint_qd_start[j]
+    X_wpj = joint_X_p[j]
+    w_p = wp.vec3()
+    if p >= 0:
+        X_wpj = body_q[p] * X_wpj
+        w_p = wp.spatial_bottom(body_qd[p])
+    X_wcj = body_q[c] * joint_X_c[j]
+    x_p = wp.transform_get_translation(X_wpj)
+    x_c = wp.transform_get_translation(X_wcj)
+    q_p = wp.transform_get_rotation(X_wpj)
+    q_c = wp.transform_get_rotation(X_wcj)
+    w_err = wp.spatial_bottom(body_qd[c]) - w_p
+    if t == JointType.REVOLUTE:
+        joint_q[i] = wp.float32(revolute_angle[element[j]])
+        joint_qd[d] = wp.dot(w_err, wp.quat_rotate(q_p, joint_axis[d]))
+    elif t == JointType.PRISMATIC:
+        joint_q[i] = wp.float32(prismatic_distance[element[j]])
+        v_err = _joint_point_velocity(c, body_q, body_qd, body_com, x_c) - _joint_point_velocity(
+            p, body_q, body_qd, body_com, x_p
+        )
+        joint_qd[d] = wp.dot(v_err, wp.quat_rotate(q_p, joint_axis[d]))
+    elif t == JointType.BALL:
+        q_pc = wp.quat_inverse(q_p) * q_c
+        for k in range(4):
+            joint_q[i + k] = q_pc[k]
+        w = wp.quat_rotate_inv(q_p, w_err)
+        for k in range(3):
+            joint_qd[d + k] = w[k]
+    else:  # FREE: the child's joint frame relative to the parent's, its centre of mass's velocity, in that frame
+        q_pc = wp.quat_inverse(q_p) * q_c
+        x_err = wp.quat_rotate_inv(q_p, x_c - x_p)
+        com = wp.transform_point(body_q[c], body_com[c])
+        v_err = wp.quat_rotate_inv(
+            q_p, wp.spatial_top(body_qd[c]) - _joint_point_velocity(p, body_q, body_qd, body_com, com)
+        )
+        w = wp.quat_rotate_inv(q_p, w_err)
+        for k in range(3):
+            joint_q[i + k] = x_err[k]
+            joint_qd[d + k] = v_err[k]
+            joint_qd[d + 3 + k] = w[k]
+        for k in range(4):
+            joint_q[i + 3 + k] = q_pc[k]
+    for k in range(joint_q_start[j + 1] - i):
+        written[i + k] = joint_q[i + k]
 
 
 @wp.kernel
@@ -422,21 +686,7 @@ def _check_supported(model: Model) -> None:
     for name, activations in (("triangle", model.tri_activations), ("tetrahedron", model.tet_activations)):
         if activations is not None and len(activations) and np.any(activations.numpy() != 0.0):
             raise NotImplementedError(f"SolverIPC does not take {name} activations; the model has non-zero ones.")
-    if model.joint_count:
-        joint_type = model.joint_type.numpy()
-        if np.any(joint_type != int(JointType.FREE)):
-            raise NotImplementedError(
-                "SolverIPC does not simulate joints; only the free joints of stand-alone bodies are allowed."
-            )
-        if model.joint_target_mode is not None and model.joint_dof_count:
-            mode = model.joint_target_mode.numpy()
-            driven = np.flatnonzero((mode != int(JointTargetMode.NONE)) & (mode != int(JointTargetMode.EFFORT)))
-            if len(driven):
-                raise NotImplementedError(
-                    f"SolverIPC does not drive joints: joint DOF {int(driven[0])} has the target mode "
-                    f"{JointTargetMode(int(mode[driven[0]])).name}. Free joints take Control.joint_f only "
-                    "(JointTargetMode.NONE or EFFORT)."
-                )
+    _check_joints(model)
     _check_springs(model)
     _check_one_world(model)
     _check_surface_velocity(model)
@@ -459,6 +709,90 @@ def _check_springs(model: Model) -> None:
             raise NotImplementedError(
                 f"SolverIPC does not simulate spring {k}, whose {name} is {float(values[k])!r}: {why}."
             )
+
+
+def _check_joints(model: Model) -> None:
+    """Joints that libuipc's affine-body joints represent (class docstring, **Joints**): revolute, prismatic, fixed,
+    ball and free joints; drives, passive springs, damping and limits on revolute and prismatic joints only; no
+    armature, no joint friction, and no effort limit on a driven degree of freedom."""
+    if model.joint_count == 0:
+        return
+    joint_type = model.joint_type.numpy()
+    supported = [
+        int(t) for t in (JointType.FREE, JointType.REVOLUTE, JointType.PRISMATIC, JointType.FIXED, JointType.BALL)
+    ]
+    other = np.flatnonzero(~np.isin(joint_type, supported))
+    if len(other):
+        j = int(other[0])
+        raise NotImplementedError(
+            f"SolverIPC does not simulate {JointType(int(joint_type[j])).name} joints (joint {j}): "
+            "libuipc's affine-body joints are revolute, prismatic, fixed and ball joints."
+        )
+    if model.joint_dof_count == 0:
+        return
+    qd_start = model.joint_qd_start.numpy()
+    dof_joint = np.repeat(np.arange(model.joint_count), np.diff(qd_start))
+    dof_type = joint_type[dof_joint]
+
+    def per_dof(name: str) -> np.ndarray:
+        a = getattr(model, name)
+        return np.zeros(model.joint_dof_count) if a is None else a.numpy().astype(np.float64)
+
+    def refuse(dofs: np.ndarray, what: Callable[[int], str], why: str) -> None:
+        if len(dofs):
+            d = int(dofs[0])
+            j = int(dof_joint[d])
+            raise NotImplementedError(
+                f"SolverIPC {why}: DOF {d} of the {JointType(int(joint_type[j])).name} joint {j} has {what(d)}."
+            )
+
+    for name, why in (
+        ("joint_armature", "does not simulate joint armature"),
+        ("joint_friction", "does not simulate joint friction"),
+    ):
+        values = per_dof(name)
+        refuse(
+            np.flatnonzero(values != 0.0),
+            lambda d, v=values, n=name: f"{n} {float(v[d])!r}",
+            f"{why} (libuipc's joints have none)",
+        )
+    ke, kd = per_dof("joint_target_ke"), per_dof("joint_target_kd")
+    ks, c = per_dof("joint_stiffness"), per_dof("joint_damping")
+    mode = model.joint_target_mode.numpy() if model.joint_target_mode is not None else np.zeros(len(ke), np.int32)
+    actuated = np.isin(
+        mode, [int(m) for m in (JointTargetMode.POSITION, JointTargetMode.VELOCITY, JointTargetMode.POSITION_VELOCITY)]
+    )
+    lo, hi, lke = per_dof("joint_limit_lower"), per_dof("joint_limit_upper"), per_dof("joint_limit_ke")
+    limited = ((lo > -MAXVAL) | (hi < MAXVAL)) & (lke > 0.0)
+    other = np.isin(dof_type, [int(JointType.BALL), int(JointType.FREE)])
+
+    def drive(d: int) -> str:
+        if actuated[d]:
+            return f"the target mode {JointTargetMode(int(mode[d])).name}"
+        return (
+            f"target_ke {float(ke[d])!r}, target_kd {float(kd[d])!r}, stiffness {float(ks[d])!r} "
+            f"and damping {float(c[d])!r}"
+        )
+
+    driven = actuated | (ke != 0.0) | (kd != 0.0) | (ks != 0.0) | (c != 0.0)
+    refuse(
+        np.flatnonzero(other & driven),
+        drive,
+        "drives, springs and damps revolute and prismatic joints only (libuipc's ball joint has no driving term, a "
+        "free body no joint); Control.joint_f acts on every joint",
+    )
+    refuse(
+        np.flatnonzero(other & limited),
+        lambda d: f"the limits [{float(lo[d])!r}, {float(hi[d])!r}] with limit_ke {float(lke[d])!r}",
+        "limits revolute and prismatic joints only (libuipc's ball joint has no limit)",
+    )
+    effort = per_dof("joint_effort_limit")
+    refuse(
+        np.flatnonzero(((ke != 0.0) | (kd != 0.0)) & (effort < _EFFORT_LIMIT)),
+        lambda d: f"joint_effort_limit {float(effort[d])!r} and a drive",
+        "cannot bound the torque of a drive (libuipc's driving term is a quadratic potential); raise the limit to "
+        f"{_EFFORT_LIMIT:g}, Newton's default, to drive the joint without a bound",
+    )
 
 
 def _check_one_world(model: Model) -> None:
@@ -837,10 +1171,14 @@ class SolverIPC(SolverBase):
       They follow the poses written to ``state_in`` every step; the jump is not
       swept by collision detection. A particle that is not active and on no
       cloth or tetrahedron collides with nothing, as in Newton.
+    - revolute, prismatic, fixed and ball joints between bodies or to the
+      world, with drives, passive springs and damping, limits and
+      :attr:`~newton.Control.joint_f` (see **Joints** below); ``joint_q`` and
+      ``joint_qd`` are written at every step.
     - external forces: :attr:`~newton.State.particle_f`, :attr:`~newton.State.body_f`
-      and the :attr:`~newton.Control.joint_f` of free joints, held constant over
-      the step as libuipc holds its external forces (a constant acceleration in
-      the implicit-Euler prediction). A body wrench acts at the centre of mass;
+      and :attr:`~newton.Control.joint_f`, held constant over the step as
+      libuipc holds its external forces (a constant acceleration in the
+      implicit-Euler prediction). A body wrench acts at the centre of mass;
       its torque does work on the rotations of the affine body and none on its
       stretch.
     - gravity per world: a particle or body falls with the
@@ -853,9 +1191,8 @@ class SolverIPC(SolverBase):
     damping element), a rest length of 0 or a negative stiffness,
     particle-body attachments, mimic
     and equality constraints, tendons, muscles, non-zero triangle or
-    tetrahedron activations, joints other than the free joints that
-    :meth:`~newton.ModelBuilder.add_body` creates, drive targets on those free
-    joints (only :class:`~newton.JointTargetMode` ``NONE`` and ``EFFORT``),
+    tetrahedron activations, the joint types and properties that **Joints**
+    below rejects,
     gradients (``model.requires_grad``), content in more than one world (the
     solver has one contact space and one Newton solve), a
     :attr:`~newton.Model.shape_contact_pairs` array assigned to the model, more
@@ -874,7 +1211,8 @@ class SolverIPC(SolverBase):
     :attr:`~newton.Model.particle_radius` of cloth and tetrahedron vertices
     (see **Contact** below), damping coefficients,
     ``spring_control``, drag, lift, ``edge_rest_length`` (see below), the
-    activations of a :class:`~newton.Control`, and ``joint_q`` (not written).
+    activations of a :class:`~newton.Control`, ``joint_target_mode``,
+    ``joint_velocity_limit``, ``joint_limit_kd`` and ``joint_act``.
 
     **Cloth parameters.** libuipc-warp's membrane energy per rest area is
 
@@ -975,8 +1313,13 @@ class SolverIPC(SolverBase):
     orthogonality potential :math:`\\kappa V \\Delta t^2 \\|A A^T - I\\|_F^2` with
     ``body_kappa`` and the volume :math:`V` of the body's collision meshes
     keeps :math:`A` within a small strain of a rotation; this is libuipc's
-    near-rigid body, not an exactly rigid one. Gravity acts on :math:`p`; with
-    the full dyadic mass this is the exact gravity force on the affine body.
+    near-rigid body, not an exactly rigid one. Within a step a turning body
+    moves along a straight line in its 12 coordinates and the orthogonality
+    potential pulls it back onto the rotations, so under implicit Euler a free
+    spin at :math:`\\omega` loses about :math:`(\\omega \\Delta t)^2` of its
+    angular velocity per step: 1e-4 at 1 rad/s and :math:`\\Delta t` = 0.01 s.
+    Gravity acts on :math:`p`; with the full dyadic mass this is the exact
+    gravity force on the affine body.
     An external force :math:`f` at the centre of mass is the generalized force
     :math:`(f, f c^T)` on :math:`(p, A)`, and a torque :math:`\\tau` is
     :math:`(0, \\tfrac{1}{2} [\\tau]_\\times A^{-T})`. The body's collision shapes
@@ -992,6 +1335,78 @@ class SolverIPC(SolverBase):
     :math:`x_{com} = A c + p`; the linear velocity is that point's,
     :math:`\\dot p + \\dot A c`, and the angular velocity is the axial vector of
     the skew part of :math:`\\dot A A^{-1}`.
+
+    **Joints.** Revolute, prismatic, fixed and ball joints are libuipc's
+    affine-body joints (constitutions 18, 20, 25 and 26), between the affine
+    bodies of their parent and child, a parent of -1 being a fixed body
+    without mass at the world's origin. A revolute or prismatic joint holds
+    the two points of its axis, ``joint_X_p`` and ``joint_X_c`` and one metre
+    along ``joint_axis`` from them, together; a prismatic joint also holds the
+    bodies' relative rotation, a fixed joint the anchors and the rotation, a
+    ball joint the anchors. The rotation they hold, and the zero of a joint's
+    coordinate, is where the joint frames coincide, as in Newton, whatever the
+    bodies' poses when the solver is built.
+
+    The joints are penalties, not hard constraints: libuipc's energy
+    :math:`\\tfrac{K}{2}|C|^2` of the joint's violation :math:`C`, a term of
+    the incremental potential (not multiplied by :math:`\\Delta t^2`), with
+    :math:`K` = ``joint_strength_ratio`` times the mass of the dynamic bodies
+    the joint joins (the world and kinematic bodies count 0). Against a
+    translation of the child, in a step of length :math:`\\Delta t`, a
+    revolute or prismatic joint, which holds two points, is a spring of
+    :math:`2K/\\Delta t^2` [N/m], a fixed or ball joint one of
+    :math:`K/\\Delta t^2`: a load that would move the child by :math:`\\delta`
+    in one step stretches the joint by about :math:`\\delta / (2\\gamma)` or
+    :math:`\\delta / \\gamma`, :math:`\\gamma` = ``joint_strength_ratio``.
+    Gravity at 1/60 s and the default 100 stretch a revolute joint by 1.4e-5 m
+    and a ball joint by 2.7e-5 m. A larger ratio holds the joints closer and
+    makes the linear system stiffer.
+
+    Drives, passive springs and passive damping of a revolute or prismatic
+    joint are exact for implicit Euler: the joint's
+    :math:`\\tau = k_e (q^* - q) + k_d (\\dot q^* - \\dot q) - k_s (q - q_r) - c \\dot q`
+    (``joint_target_ke``, ``joint_target_kd``, ``joint_stiffness``,
+    ``joint_rest_q``, ``joint_damping``; targets from
+    :attr:`~newton.Control.joint_target_q` and ``joint_target_qd``), taken at
+    the end of the step with :math:`\\dot q = (q - q_n)/\\Delta t`, is minus the
+    gradient of one quadratic potential in :math:`q`, which the solver gives
+    libuipc's driving term every step. The gains act whatever
+    ``joint_target_mode`` says, as in the other maximal-coordinate solvers.
+
+    Limits are libuipc's cubic penalty outside ``[joint_limit_lower,
+    joint_limit_upper]``, not Newton's linear spring: at an overshoot
+    :math:`\\delta` it stores :math:`k_l \\delta^3 / (3 \\delta_r)` with
+    :math:`k_l` = ``joint_limit_ke`` and :math:`\\delta_r` = 1e-3 (rad or m), so
+    that it pushes back with the spring's :math:`k_l \\delta_r` at
+    :math:`\\delta_r` and harder beyond it; a load :math:`F` rests at
+    :math:`\\sqrt{F \\delta_r / k_l}` past the limit. ``joint_limit_kd`` is not
+    read (libuipc's limit has no damping), a ``joint_limit_ke`` of 0 holds
+    nothing, and a bound at :data:`newton.MAXVAL` is no bound.
+
+    :attr:`~newton.Control.joint_f` of a revolute or prismatic joint is
+    libuipc's joint torque or force between the two bodies; of a ball joint a
+    torque in the parent's joint frame, on the child, the parent taking the
+    reaction; of a free joint a wrench at the child's centre of mass in the
+    world frame, the parent, if it is a body, taking the reaction.
+    ``joint_enabled`` is read at every step, and so are the gains, targets,
+    springs, damping and limits: a captured step takes new values at its next
+    replay. A change of the joints' types, bodies, frames or axes rebuilds
+    the solve (``notify_model_changed`` with ``JOINT_PROPERTIES``).
+
+    After every step ``joint_q`` and ``joint_qd`` hold the coordinates
+    :func:`newton.eval_ik` computes from the bodies' state, for every joint,
+    but the position of a revolute joint, which is libuipc's angle and turns
+    on past :math:`\\pi` as in the generalized-coordinate solvers, and of a
+    prismatic joint, libuipc's distance. A revolute joint's angle continues
+    from the step before; where ``state_in.joint_q`` is not what the solver
+    wrote, it picks the turn of the bodies' angle (the pose decides the angle
+    modulo :math:`2\\pi`).
+
+    Rejected (:class:`NotImplementedError`): distance, D6 and rod joints;
+    drives, springs, damping and limits on ball and free joints (libuipc's
+    ball joint has none); ``joint_armature`` and ``joint_friction`` other
+    than 0; a ``joint_effort_limit`` below Newton's default 1e6 on a driven
+    degree of freedom, since the quadratic drive cannot bound its torque.
 
     **State.** The solver keeps positions and velocities in float64 and reads
     ``state_in`` on every step. A particle whose ``state_in`` position and
@@ -1057,6 +1472,8 @@ class SolverIPC(SolverBase):
             membrane (libuipc's default 100); 0 makes the membrane quadratic.
         body_kappa: Orthogonality stiffness :math:`\\kappa` of rigid bodies [Pa]
             (libuipc's affine-body stiffness).
+        joint_strength_ratio: Penalty of the joints relative to the mass of the
+            dynamic bodies they join (libuipc's ``strength_ratio``; see **Joints**).
         shape_segments: Segments around a sphere, capsule, cylinder, cone or
             ellipsoid when it is triangulated.
 
@@ -1198,6 +1615,7 @@ class SolverIPC(SolverBase):
         eps_velocity: float = 0.01,
         cloth_strain_rate: float = 100.0,
         body_kappa: float = 1.0e8,
+        joint_strength_ratio: float = _JOINT_STRENGTH_RATIO,
         shape_segments: int = 24,
     ):
         if not model.device.is_cuda:
@@ -1221,6 +1639,7 @@ class SolverIPC(SolverBase):
         self._thickness = float(thickness)
         self._cloth_strain_rate = float(cloth_strain_rate)
         self._body_kappa = float(body_kappa)
+        self._joint_strength_ratio = float(joint_strength_ratio)
         self._shape_segments = int(shape_segments)
         self._dt = self._config.dt  # of the last step, which grow() solves again
         self._engine = None
@@ -1243,11 +1662,13 @@ class SolverIPC(SolverBase):
                 "SolverIPC requires the libuipc-warp package: pip install git+https://github.com/OrangeEarth15/libuipc-warp"
             ) from e
         version = getattr(uipc_warp, "__version__", "0")
-        # the newest calls of each kind the solver makes: the frame status, the contact tabular, the start check
+        # the newest calls of each kind the solver makes: the frame status, the contact tabular, the start check, the
+        # joints
         needed = (
             (uipc_warp.arrays, "write_frame_status"),
             (uipc_warp.arrays.ArrayScene, "contact_model"),
             (uipc_warp.validation.SurfaceChecker, "min_gap"),
+            (uipc_warp.arrays, "joint_groups"),
         )
         missing = [f"{owner.__name__}.{name}" for owner, name in needed if not hasattr(owner, name)]
         if missing:
@@ -1297,6 +1718,7 @@ class SolverIPC(SolverBase):
         self._add_cloth(scene, tets)
         self._add_springs(scene)
         self._dyadic = self._add_shapes_and_bodies(scene, elements)
+        self._add_joints(scene)
         self._planes = self._collect_planes()
         for P, N, s in zip(*self._planes, strict=True):
             scene.add_half_plane(P, N, contact_element=elements.shape[s])
@@ -1307,6 +1729,8 @@ class SolverIPC(SolverBase):
             scene.contact_model(a, b, elements.mu[a, b], self._config.kappa, elements.enabled[a, b])
         self._scene = scene
         self._scene_inputs = self._scene_inputs_now()
+        self._joint_inputs = self._joint_inputs_now()
+        self._control = None  # of the last step, whose joint terms a redone frame takes again
 
         layout = scene.layout()
         # the external accelerations: one row per free particle, then four per dynamic body (p and the rows of A)
@@ -1328,7 +1752,7 @@ class SolverIPC(SolverBase):
         if nb:
             self._body_base = wp.array(layout.body_base.astype(np.int32), dtype=wp.int32, device=device)
             self._body_kinematic = wp.array(self._kinematic_body.astype(np.int32), dtype=wp.int32, device=device)
-            self._joint_f_start = wp.array(self._free_joint_dofs(), dtype=wp.int32, device=device)
+            self._joint_wrench = wp.zeros(nb, dtype=wp.spatial_vector, device=device)
             self._body_q_written = wp.empty(nb, dtype=wp.transform, device=device)
             self._body_qd_written = wp.empty(nb, dtype=wp.spatial_vector, device=device)
             self._forget_written()
@@ -1348,7 +1772,7 @@ class SolverIPC(SolverBase):
         if self.model.particle_count:
             out[: layout.n_fem] = g[self.model.particle_world.numpy()]
         if self.model.body_count:
-            out[layout.body_base] = g[self.model.body_world.numpy()]
+            out[layout.body_base[: self.model.body_count]] = g[self.model.body_world.numpy()]
         return out
 
     def _check_start(self) -> None:
@@ -1604,12 +2028,14 @@ class SolverIPC(SolverBase):
         return f"{len(members)} particles from particle {first}"
 
     def _forget_written(self) -> None:
-        """Forget what the solver wrote for the bodies, so that the next step takes their state from ``state_in``
-        (NaN equals nothing)."""
+        """Forget what the solver wrote for the bodies and the joints, so that the next step takes their state from
+        ``state_in`` (NaN equals nothing)."""
         nb = self.model.body_count
         if nb:
             self._body_q_written.assign(np.full((nb, 7), np.nan, np.float32))
             self._body_qd_written.assign(np.full((nb, 6), np.nan, np.float32))
+        if self.model.joint_count:
+            self._joint_q_written.fill_(np.nan)
 
     def _make_engine(self, capacity: dict | None) -> None:
         """The engine of the laid-out scene, with the current gravity and masses; ``capacity``: its list
@@ -1636,7 +2062,8 @@ class SolverIPC(SolverBase):
             self._enabled = np.asarray(tabular["enabled"]) != 0
         if self.model.body_count:
             # notify_model_changed may have changed them since the scene was laid out
-            self._engine.set_dyadic_mass(*self._dyadic)
+            self._engine.set_dyadic_mass(*self._engine_dyadic(self._dyadic))
+        self._joint_groups = self._uipc_warp.arrays.joint_groups(self._engine)
 
     def _add_particles_and_tets(self, scene, elements: _ContactElements) -> np.ndarray:
         """Every particle as a finite-element vertex (engine index = particle index), and the tetrahedra."""
@@ -1780,17 +2207,6 @@ class SolverIPC(SolverBase):
         M[:, 1:, 1:] = second[dynamic]
         return np.linalg.inv(M) if len(dynamic) else np.zeros((0, 4, 4))
 
-    def _free_joint_dofs(self) -> np.ndarray:
-        """The first ``joint_f`` entry of every body's free joint, -1 for a body without one."""
-        model = self.model
-        start = np.full(model.body_count, -1, np.int32)
-        if model.joint_count:
-            child = model.joint_child.numpy()
-            qd_start = model.joint_qd_start.numpy()
-            free = np.flatnonzero((model.joint_type.numpy() == int(JointType.FREE)) & (child >= 0))
-            start[child[free]] = qd_start[free]
-        return start
-
     def _scene_inputs_now(self) -> tuple:
         """What the scene was laid out from besides gravity and the bodies' mass properties, which change in place:
         the triangulated shapes, the friction coefficients of the contact models, the contact thicknesses and the
@@ -1803,6 +2219,15 @@ class SolverIPC(SolverBase):
         if model.shape_count:
             arrays += [model.shape_transform, model.shape_scale, model.shape_material_mu, model.shape_margin]
         return (*materials, *(a.numpy().copy() for a in arrays))
+
+    def _joint_inputs_now(self) -> tuple:
+        """What the joints were laid out from: their types, bodies and frames. The other joint data are read at every
+        step."""
+        model = self.model
+        if model.joint_count == 0:
+            return ()
+        arrays = (model.joint_type, model.joint_parent, model.joint_child, model.joint_X_p, model.joint_X_c)
+        return tuple(a.numpy().copy() for a in (*arrays, model.joint_axis, model.joint_qd_start))
 
     def _add_shapes_and_bodies(self, scene, elements: _ContactElements) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Static non-plane shapes as fixed triangle meshes; every body as an affine body. Returns the bodies'
@@ -1880,6 +2305,96 @@ class SolverIPC(SolverBase):
             )
         return mass, first, second
 
+    def _add_joints(self, scene) -> None:
+        """Newton's revolute, prismatic, fixed and ball joints as libuipc's (class docstring, **Joints**), joint frames
+        taken as the reference rotations, a fixed affine body without mass standing for the world. Sets up what the
+        per-step kernels read: per kind the joint of every group row and the row's penalty (``_joint_strength``,
+        0 without a dynamic body), per joint its row (``_joint_element``), and the free and ball joints, whose
+        ``joint_f`` acts through the bodies' wrenches."""
+        model, device = self.model, self.model.device
+        self._world_body = -1
+        self._joint_rows, self._joint_strength = {}, {}
+        if model.joint_count == 0:
+            return
+        joint_type = model.joint_type.numpy()
+        parent, child = model.joint_parent.numpy(), model.joint_child.numpy()
+        X_p, X_c = model.joint_X_p.numpy().astype(np.float64), model.joint_X_c.numpy().astype(np.float64)
+        axis = model.joint_axis.numpy().astype(np.float64).reshape(-1, 3)
+        qd_start = model.joint_qd_start.numpy()
+        wrenched = np.isin(joint_type, [int(JointType.FREE), int(JointType.BALL)])
+        self._wrenched_joints = wp.array(np.flatnonzero(wrenched).astype(np.int32), dtype=wp.int32, device=device)
+        element = np.full(model.joint_count, -1, np.int32)
+        joints = np.flatnonzero(joint_type != int(JointType.FREE))
+        if len(joints) and np.any(parent[joints] < 0):
+            self._world_body = model.body_count
+            scene.add_affine_body(
+                np.zeros((0, 3)),
+                np.zeros((0, 3), np.int64),
+                mass=0.0,
+                first_moment=np.zeros(3),
+                second_moment=np.zeros((3, 3)),
+                volume=0.0,
+                fixed=True,
+            )
+        self._joint_bodies = {}
+        for kind, t in (
+            ("revolute", JointType.REVOLUTE),
+            ("prismatic", JointType.PRISMATIC),
+            ("fixed", JointType.FIXED),
+            ("spherical", JointType.BALL),
+        ):
+            rows = joints[joint_type[joints] == int(t)]
+            if not len(rows):
+                continue
+            element[rows] = np.arange(len(rows), dtype=np.int32)
+            left = np.where(parent[rows] >= 0, parent[rows], self._world_body)
+            bodies = np.stack([left, child[rows]], axis=1)
+            self._joint_bodies[kind] = bodies
+            R_p = np.array([_quat_to_matrix_np(q) for q in X_p[rows, 3:7]]).reshape(-1, 3, 3)
+            R_c = np.array([_quat_to_matrix_np(q) for q in X_c[rows, 3:7]]).reshape(-1, 3, 3)
+            p_p, p_c = X_p[rows, :3], X_c[rows, :3]
+            # the rotations at which the joint frames coincide, in which Newton's joint coordinates are 0
+            reference = np.stack([np.swapaxes(R_p, 1, 2), np.swapaxes(R_c, 1, 2)], axis=1)
+            ratio, strength = self._joint_strengths(kind, self._dyadic[0])
+            if kind in ("revolute", "prismatic"):
+                a = axis[qd_start[rows]]
+                a = a / np.linalg.norm(a, axis=1, keepdims=True)
+                # the axis points: the joint origin and one metre along the axis, in either body's frame
+                ends_p = np.stack([p_p, p_p + np.einsum("kij,kj->ki", R_p, a)], axis=1)
+                ends_c = np.stack([p_c, p_c + np.einsum("kij,kj->ki", R_c, a)], axis=1)
+                add = scene.add_revolute_joints if kind == "revolute" else scene.add_prismatic_joints
+                add(bodies, ends_p, ends_c, strength_ratio=ratio, reference_rotations=reference)
+            elif kind == "fixed":
+                scene.add_fixed_joints(bodies, p_p, p_c, strength_ratio=ratio, reference_rotations=reference)
+            else:
+                scene.add_spherical_joints(bodies, p_p, p_c, strength_ratio=ratio)
+            self._joint_rows[kind] = wp.array(rows.astype(np.int32), dtype=wp.int32, device=device)
+            self._joint_strength[kind] = wp.array(strength, dtype=wp.float64, device=device)
+        self._no_joint_state = wp.zeros(1, dtype=wp.float64, device=device)  # the state of a kind without joints
+        self._joint_element = wp.array(element, dtype=wp.int32, device=device)
+        self._joint_q_written = wp.full(model.joint_coord_count, np.nan, dtype=wp.float32, device=device)
+
+    def _joint_strengths(self, kind: str, mass: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """For the bodies' masses ``mass``, the strength ratio the joints of ``kind`` are built with and their
+        penalty, ``joint_strength_ratio`` times the mass of the dynamic bodies a joint joins (the world and kinematic
+        bodies count 0), where libuipc's ratio multiplies the masses of both bodies. The per-step kernels take the
+        penalty: a fixed or ball joint's as it is, a revolute or prismatic joint's divided by the masses it was built
+        with, which libuipc keeps."""
+        bodies = self._joint_bodies[kind]
+        everything = np.append(mass, 0.0)  # the world's mass after Newton's bodies
+        dynamic = np.append(np.where(self._kinematic_body, 0.0, mass), 0.0)
+        mass_sum, dynamic_sum = everything[bodies].sum(axis=1), dynamic[bodies].sum(axis=1)
+        stiffness = self._joint_strength_ratio * dynamic_sum
+        ratio = np.divide(stiffness, mass_sum, out=np.zeros(len(bodies)), where=mass_sum > 0.0)
+        return ratio, stiffness
+
+    def _engine_dyadic(self, dyadic: tuple) -> tuple:
+        """The bodies' dyadic masses as the engine holds them: the world's (zero) after Newton's bodies."""
+        if self._world_body < 0:
+            return dyadic
+        mass, first, second = dyadic
+        return np.append(mass, 0.0), np.vstack([first, np.zeros((1, 3))]), np.concatenate([second, np.zeros((1, 3, 3))])
+
     def _collect_planes(self) -> tuple[np.ndarray, np.ndarray, list[int]]:
         """The points, normals and shapes of the static planes that collide, each point moved out by the shape's
         margin."""
@@ -1929,9 +2444,10 @@ class SolverIPC(SolverBase):
             return
         if control is None:
             control = self.model.control(clone_variables=False)
-        self._dt = dt
+        self._dt, self._control = dt, control
         self._load(state_in)
         self._write_forces(state_in, control)
+        self._write_joint_controls(control, dt)
         if self.model.device.is_capturing:
             # the solve joins the caller's graph; it cannot synchronize, grow or raise (see the class docstring)
             self._engine.stop_on_overflow = False
@@ -1975,6 +2491,7 @@ class SolverIPC(SolverBase):
                 device=device,
             )
             self._uipc_warp.arrays.update_body_vertices(eng)  # surface vertices x = A x_bar + p
+            self._load_joints(state_in)
         eng.discard_friction(where=self._changed)
 
     def _write_forces(self, state_in: State, control: Control) -> None:
@@ -1992,16 +2509,34 @@ class SolverIPC(SolverBase):
                 device=model.device,
             )
         if self._n_dynamic:
-            body_f, joint_f = state_in.body_f, control.joint_f
+            self._joint_wrench.zero_()
+            if model.joint_count and control.joint_f is not None and self._wrenched_joints.shape[0]:
+                wp.launch(
+                    _joint_wrenches,
+                    self._wrenched_joints.shape[0],
+                    inputs=[
+                        self._wrenched_joints,
+                        model.joint_type,
+                        model.joint_parent,
+                        model.joint_child,
+                        model.joint_X_p,
+                        model.joint_qd_start,
+                        model.joint_enabled,
+                        control.joint_f,
+                        state_in.body_q,
+                        model.body_com,
+                    ],
+                    outputs=[self._joint_wrench],
+                    device=model.device,
+                )
+            body_f = state_in.body_f
             wp.launch(
                 _body_accelerations,
                 self._n_dynamic,
                 inputs=[
                     body_f,
                     int(body_f is not None),
-                    joint_f,
-                    int(joint_f is not None),
-                    self._joint_f_start,
+                    self._joint_wrench,
                     self._dynamic_bodies,
                     model.body_com,
                     self._body_mass_inv,
@@ -2012,6 +2547,93 @@ class SolverIPC(SolverBase):
                 outputs=[acc],
                 device=model.device,
             )
+
+    def _load_joints(self, state_in: State) -> None:
+        """The joints' angles and distances at the step's start, from the bodies' state just loaded. A revolute joint
+        unwraps its angle against the one it had, or against ``state_in.joint_q`` where that is not what the solver
+        wrote, so that a caller who wrote the angle picks its turn (class docstring, **Joints**)."""
+        groups, x = self._joint_groups, self._engine.vm.x
+        if groups.revolute is not None:
+            if state_in.joint_q is not None:
+                wp.launch(
+                    _adopt_joint_angles,
+                    groups.revolute.n,
+                    inputs=[
+                        self._joint_rows["revolute"],
+                        self.model.joint_q_start,
+                        state_in.joint_q,
+                        self._joint_q_written,
+                    ],
+                    outputs=[groups.revolute.current],
+                    device=self.model.device,
+                )
+            groups.revolute.compute_current_angles(x)
+        if groups.prismatic is not None:
+            groups.prismatic.compute_current_distances(x)
+
+    def _write_joint_controls(self, control: Control, dt: float) -> None:
+        """The joints' terms of the step from the model and ``control``, on the device (``_joint_terms``)."""
+        model, groups = self.model, self._joint_groups
+        if self._engine is None or model.joint_count == 0:
+            return
+        springs = all(a is not None for a in (model.joint_stiffness, model.joint_rest_q, model.joint_damping))
+        target_q, target_qd, joint_f = control.joint_target_q, control.joint_target_qd, control.joint_f
+        for kind, group, scale in (("revolute", groups.revolute, 1.0), ("prismatic", groups.prismatic, 0.5)):
+            if group is None:
+                continue
+            force_on, force = (group.tq_on, group.tq) if kind == "revolute" else (group.f_on, group.f)
+            wp.launch(
+                _joint_terms,
+                group.n,
+                inputs=[
+                    self._joint_rows[kind],
+                    model.joint_q_start,
+                    model.joint_qd_start,
+                    model.joint_enabled,
+                    model.joint_target_ke,
+                    model.joint_target_kd,
+                    model.joint_stiffness,
+                    model.joint_rest_q,
+                    model.joint_damping,
+                    int(springs),
+                    model.joint_limit_lower,
+                    model.joint_limit_upper,
+                    model.joint_limit_ke,
+                    target_q,
+                    int(target_q is not None),
+                    target_qd,
+                    int(target_qd is not None),
+                    joint_f,
+                    int(joint_f is not None),
+                    self._joint_strength[kind],
+                    group.mass_sum,
+                    group.current,
+                    wp.float64(dt),
+                    wp.float64(scale),
+                ],
+                outputs=[
+                    group.ratio,
+                    group.drv_on,
+                    group.drv_ratio,
+                    group.drv_aim,
+                    group.lim_on,
+                    group.lim_lower,
+                    group.lim_upper,
+                    group.lim_strength,
+                    force_on,
+                    force,
+                ],
+                device=model.device,
+            )
+        for kind, group in (("fixed", groups.fixed), ("spherical", groups.spherical)):
+            if group is not None:
+                wp.launch(
+                    _enable_anchor_joints,
+                    group.n,
+                    inputs=[self._joint_rows[kind], model.joint_enabled, self._joint_strength[kind]],
+                    outputs=[group.kappa],
+                    device=model.device,
+                )
 
     def _store(self, body_q_in, body_qd_in, state_out: State | None) -> None:
         """``state_out`` from the engine's state; without one, only the record of what the solver writes."""
@@ -2032,6 +2654,32 @@ class SolverIPC(SolverBase):
                 model.body_count,
                 inputs=[vm.x, vm.v, self._body_base, model.body_com, self._body_kinematic, body_q_in, body_qd_in],
                 outputs=[body_q, body_qd, self._body_q_written, self._body_qd_written],
+                device=model.device,
+            )
+        if model.joint_count and state_out is not None and state_out.joint_q is not None:
+            groups = self._joint_groups
+            angle = self._no_joint_state if groups.revolute is None else groups.revolute.current
+            distance = self._no_joint_state if groups.prismatic is None else groups.prismatic.current
+            wp.launch(
+                _store_joints,
+                model.joint_count,
+                inputs=[
+                    model.joint_type,
+                    model.joint_parent,
+                    model.joint_child,
+                    model.joint_X_p,
+                    model.joint_X_c,
+                    model.joint_axis,
+                    model.joint_q_start,
+                    model.joint_qd_start,
+                    self._joint_element,
+                    angle,
+                    distance,
+                    state_out.body_q,
+                    state_out.body_qd,
+                    model.body_com,
+                ],
+                outputs=[state_out.joint_q, state_out.joint_qd, self._joint_q_written],
                 device=model.device,
             )
 
@@ -2069,17 +2717,22 @@ class SolverIPC(SolverBase):
 
     def _regrow(self) -> None:
         """A new engine whose contact lists hold what the last frame asked for, at the start of that frame and
-        with its external accelerations."""
+        with its external accelerations and its element groups' state (the joints' angles)."""
         old = self._engine
         capacity = old.grown_capacity()
         start = old.frame_start_state()
+        kept = [e.frame_start_state() for e in old.elements]
         forces = None if self._forces is None else self._forces.a
         # release the old engine before the new one allocates
         self._engine = self._frame_graph = self._forces = old = None
         self._make_engine(capacity)
         self._engine.load_state(**start)
+        for e, group_state in zip(self._engine.elements, kept, strict=True):
+            if group_state:
+                e.load_state(group_state)
         if forces is not None:
             wp.copy(self._forces.a, forces)
+        self._write_joint_controls(self._control or self.model.control(clone_variables=False), self._dt)
 
     def _failure(self, status) -> str:
         """Why a step failed, with what libuipc would print."""
@@ -2131,6 +2784,10 @@ class SolverIPC(SolverBase):
         else:
             raise RuntimeError(f"SolverIPC: the contact lists still overflow after {_MAX_REGROWS} enlargements.")
         self._engine.load_state(**self._engine.frame_start_state())
+        for e in self._engine.elements:
+            group_state = e.frame_start_state()
+            if group_state:
+                e.load_state(group_state)
         if self.model.body_count:
             # what the solver wrote for the restored state, so that the step's own state_in is kept as it was
             self._store(self._body_q_written, self._body_qd_written, None)
@@ -2261,14 +2918,17 @@ class SolverIPC(SolverBase):
         """Take changed model properties.
 
         Gravity, of every world (``MODEL_PROPERTIES``), and the bodies' mass, centre of mass and inertia
-        (``BODY_INERTIAL_PROPERTIES``) are updated in place: graphs captured before take them. A change of the
-        triangulated shapes (``SHAPE_PROPERTIES`` with new transforms or scales, ``SHAPE_TYPE_AND_SOURCE``), of the
-        friction coefficients and the contact thicknesses (``SHAPE_PROPERTIES`` with a new ``shape_material_mu`` or
-        ``shape_margin``, ``MODEL_PROPERTIES`` with a new ``soft_contact_mu``, ``particle_mu`` or
-        ``particle_radius``), of the springs (``MODEL_PROPERTIES`` with a new ``spring_rest_length``,
-        ``spring_stiffness`` or ``spring_damping``) or of which bodies are kinematic (``BODY_PROPERTIES``,
+        (``BODY_INERTIAL_PROPERTIES``), with the joints' penalties, which follow the masses, are updated in place:
+        graphs captured before take them. A change of the triangulated shapes (``SHAPE_PROPERTIES`` with new
+        transforms or scales, ``SHAPE_TYPE_AND_SOURCE``), of the friction coefficients and the contact thicknesses
+        (``SHAPE_PROPERTIES`` with a new ``shape_material_mu`` or ``shape_margin``, ``MODEL_PROPERTIES`` with a new
+        ``soft_contact_mu``, ``particle_mu`` or ``particle_radius``), of the springs (``MODEL_PROPERTIES`` with a new
+        ``spring_rest_length``, ``spring_stiffness`` or ``spring_damping``), of the joints' types, bodies, frames or
+        axes (``JOINT_PROPERTIES``) or of which bodies are kinematic (``BODY_PROPERTIES``,
         ``BODY_INERTIAL_PROPERTIES``) builds the solve again: the next step reads ``state_in`` in full, and graphs that
-        hold :meth:`step` must be captured again. Copies from the host: not inside a graph capture.
+        hold :meth:`step` must be captured again. The joints' other data are read at every step; the joint flags only
+        check them again against what **Joints** in the class docstring rejects. Copies from the host: not inside a
+        graph capture.
         """
         if self.model.device.is_capturing:
             raise RuntimeError("SolverIPC.notify_model_changed() copies from the host; call it outside graph capture.")
@@ -2281,6 +2941,19 @@ class SolverIPC(SolverBase):
             rebuild |= len(now) != len(self._scene_inputs) or any(
                 not np.array_equal(a, b) for a, b in zip(now, self._scene_inputs, strict=True)
             )
+        if flags & ModelFlags.JOINT_PROPERTIES:
+            now = self._joint_inputs_now()
+            rebuild |= len(now) != len(self._joint_inputs) or any(
+                not np.array_equal(a, b) for a, b in zip(now, self._joint_inputs, strict=True)
+            )
+        dof_flags = (
+            ModelFlags.JOINT_DOF_PROPERTIES
+            | ModelFlags.JOINT_DOF_FORCE_PROPERTIES
+            | ModelFlags.JOINT_DOF_INERTIAL_PROPERTIES
+            | ModelFlags.JOINT_REFERENCE_POSE_PROPERTIES
+        )
+        if flags & dof_flags:
+            _check_joints(model)  # the other joint data are read at every step
         kinematic = self._kinematic_body
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES) and model.body_count:
             dyadic = self._body_mass_moments(stacklevel=3)
@@ -2294,8 +2967,10 @@ class SolverIPC(SolverBase):
             self._engine.set_gravity(self._vertex_gravity())
         if flags & ModelFlags.BODY_INERTIAL_PROPERTIES and model.body_count:
             self._dyadic = dyadic
-            self._engine.set_dyadic_mass(*dyadic)
+            self._engine.set_dyadic_mass(*self._engine_dyadic(dyadic))
             self._body_mass_inv.assign(self._mass_inverse(*dyadic))
+            for kind in self._joint_bodies:  # the joints' penalties follow the masses
+                self._joint_strength[kind].assign(self._joint_strengths(kind, dyadic[0])[1])
 
     def frame_stats(self) -> dict:
         """Solver counters of the last step: Newton/PCG iterations, line-search trials, convergence.
