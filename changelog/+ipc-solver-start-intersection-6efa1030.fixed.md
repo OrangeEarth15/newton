@@ -1,0 +1,1 @@
+Make ``SolverIPC`` raise ``ValueError`` at construction when the surfaces of different bodies cross each other in the model's state, a start that its steps did not detect when no contact pair was within its thickness.

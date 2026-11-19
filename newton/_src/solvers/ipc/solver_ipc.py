@@ -23,13 +23,15 @@ from ...geometry import GeoType, Mesh, ParticleFlags, ShapeFlags
 from ...sim import BodyFlags, Contacts, Control, JointTargetMode, JointType, Model, ModelFlags, State, StateFlags
 from ..solver import SolverBase
 
-_COLLIDE = int(ShapeFlags.COLLIDE_SHAPES) | int(ShapeFlags.COLLIDE_PARTICLES)
-
 # libuipc-warp releases the solver is written for: from the first to before the second
 _UIPC_WARP_RELEASES = ((0, 4), (0, 5))
 
 # grow-and-redo attempts of an eager step whose contact lists keep overflowing, as libuipc-warp's FrameRunner
 _MAX_REGROWS = 8
+
+# the most edge-triangle pairs the start check tests: libuipc-warp's SurfaceChecker tests every pair, about 1e10
+# pairs per second on a recent GPU, in one launch
+_START_CHECK_PAIRS = 2**31 - 1
 
 
 @wp.func
@@ -334,6 +336,15 @@ def _warp_requirement() -> str | None:
     return None
 
 
+def _colliding_shapes(model: Model) -> np.ndarray:
+    """Which shapes the solver collides: a shape that collides with shapes, and, in a model with particles, a shape
+    that collides with particles. In a model without particles a shape that collides with particles only collides
+    with nothing."""
+    flags = model.shape_flags.numpy()
+    mask = int(ShapeFlags.COLLIDE_SHAPES) | (int(ShapeFlags.COLLIDE_PARTICLES) if model.particle_count else 0)
+    return (flags & mask) != 0
+
+
 def _check_supported(model: Model) -> None:
     """Reject model content the solver would otherwise accept and ignore."""
     if model.requires_grad:
@@ -380,6 +391,7 @@ def _check_supported(model: Model) -> None:
                 )
     _check_one_world(model)
     _check_unfiltered(model)
+    _check_surface_velocity(model)
 
 
 def _check_one_world(model: Model) -> None:
@@ -391,7 +403,7 @@ def _check_one_world(model: Model) -> None:
     if model.body_count:
         worlds.append(model.body_world.numpy())
     if model.shape_count:
-        worlds.append(model.shape_world.numpy()[(model.shape_flags.numpy() & _COLLIDE) != 0])
+        worlds.append(model.shape_world.numpy()[_colliding_shapes(model)])
     local = np.unique(np.concatenate(worlds)) if worlds else np.zeros(0, np.int32)
     local = local[local >= 0]
     if len(local) > 1:
@@ -407,7 +419,7 @@ def _check_unfiltered(model: Model) -> None:
     if model.shape_count == 0:
         return
     flags = model.shape_flags.numpy()
-    colliding = (flags & _COLLIDE) != 0
+    colliding = _colliding_shapes(model)
     shapes_only = np.flatnonzero(colliding & ((flags & int(ShapeFlags.COLLIDE_PARTICLES)) == 0))
     if model.particle_count and len(shapes_only):
         raise NotImplementedError(
@@ -421,8 +433,24 @@ def _check_unfiltered(model: Model) -> None:
         raise NotImplementedError(
             "SolverIPC does not filter contacts: every colliding shape collides with every colliding shape on "
             f"another body ({pairs} pairs), but Model.shape_contact_pairs has {model.shape_contact_pair_count}; "
-            "collision groups, filter pairs or shapes with ShapeFlags.COLLIDE_PARTICLES only exclude some."
+            "collision groups, filter pairs or, in a model with particles, shapes with "
+            "ShapeFlags.COLLIDE_PARTICLES only exclude some."
         )
+
+
+def _check_surface_velocity(model: Model) -> None:
+    """Refuse a collision mesh with a surface velocity: Newton's contacts sample it (a conveyor belt), and the
+    solver, which finds its own contacts, would ignore it."""
+    if model.shape_count == 0:
+        return
+    meshes = np.flatnonzero(_colliding_shapes(model) & (model.shape_type.numpy() == int(GeoType.MESH)))
+    for s in meshes:
+        source = model.shape_source[s]
+        if isinstance(source, Mesh) and source.enable_surface_velocity:
+            raise NotImplementedError(
+                f"SolverIPC does not apply mesh surface velocities: shape {int(s)} is a mesh with "
+                "enable_surface_velocity=True."
+            )
 
 
 def _quat_rotate_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
@@ -542,10 +570,14 @@ class SolverIPC(SolverBase):
     joints (only :class:`~newton.JointTargetMode` ``NONE`` and ``EFFORT``),
     gradients (``model.requires_grad``), content in more than one world (the
     solver has one contact space and one Newton solve), contact filtering (a
-    collision group, a filter pair, or a shape that collides only with shapes or
-    only with particles: every colliding shape collides with everything), and
-    a CPU device. Height-field and SDF shapes and planes attached to bodies
-    raise when the shapes are triangulated. The ``contacts`` argument of
+    collision group, a filter pair, or, in a model with particles, a shape that
+    collides only with shapes or only with particles: every colliding shape
+    collides with everything; in a model without particles, a shape that
+    collides with particles only collides with nothing),
+    collision meshes with a surface velocity (``Mesh.enable_surface_velocity``,
+    which the solver's own contacts would ignore), and a CPU device.
+    Height-field and SDF shapes and planes attached to bodies raise when the
+    shapes are triangulated. The ``contacts`` argument of
     :meth:`step` is not used: the solver detects its own contacts.
 
     Not read: per-shape friction and contact stiffness and
@@ -693,7 +725,12 @@ class SolverIPC(SolverBase):
         for tighter contact. The barrier needs a gap at the start: surfaces
         that start at or inside their contact thickness fail the first step
         (:attr:`SolverIPC.StatusBits.THICKNESS_VIOLATED` or
-        :attr:`SolverIPC.StatusBits.INVALID_CCD_STEP`).
+        :attr:`SolverIPC.StatusBits.INVALID_CCD_STEP`), and the surfaces of
+        different bodies that cross each other in the model's state raise
+        :class:`ValueError` at construction, as libuipc's sanity check rejects
+        them at init (surfaces that never move may cross; crossings inside one
+        body are not checked). The check tests every surface edge against every
+        triangle, and is skipped with a warning above 2**31 - 1 pairs.
     """
 
     class ObservableKind(SolverBase.ObservableKind):
@@ -822,6 +859,7 @@ class SolverIPC(SolverBase):
         self._dt = self._config.dt  # of the last step, which grow() solves again
         self._engine = None
         self._build_engine()
+        self._check_start()
 
     @classmethod
     def _import_uipc_warp(cls):
@@ -912,6 +950,73 @@ class SolverIPC(SolverBase):
             self._body_qd_written = wp.empty(nb, dtype=wp.spatial_vector, device=device)
             self._forget_written()
         self._make_engine(None)
+
+    def _check_start(self) -> None:
+        """Raise ``ValueError`` when the surfaces of different bodies cross each other in the model's state.
+
+        The barrier needs surfaces that start apart. A step fails on a contact pair at or inside its thickness,
+        but surfaces that cross without such a pair (an edge through a triangle, away from its vertices) step on
+        and the barrier keeps them crossed. libuipc's sanity check rejects such a scene at init; this counts the
+        crossings once, with libuipc-warp's brute-force ``SurfaceChecker``, between the surfaces of different
+        bodies, unless neither ever moves (static shapes, kinematic particles and bodies). Crossings inside one body
+        are not counted: contact ignores them inside a rigid body (overlapping shapes), and inside a cloth or a
+        soft body the checker cannot tell the nearly coplanar triangles of a flat sheet from crossing ones. Above
+        ``_START_CHECK_PAIRS`` edge-triangle pairs the check is skipped with a warning.
+        """
+        eng = self._engine
+        if eng is None:
+            return
+        edges = np.asarray(eng.surface["edges"], np.int32).reshape(-1, 2)
+        tris = np.asarray(eng.surface["triangles"], np.int32).reshape(-1, 3)
+        if len(edges) == 0 or len(tris) == 0:
+            return
+        if len(edges) * len(tris) > _START_CHECK_PAIRS:
+            warnings.warn(
+                f"SolverIPC does not check whether surfaces intersect at the start: {len(edges)} edges and "
+                f"{len(tris)} triangles make more pairs than the check tests ({_START_CHECK_PAIRS}).",
+                NewtonWarning,
+                stacklevel=3,
+            )
+            return
+        from uipc_warp.validation import SurfaceChecker  # noqa: PLC0415
+
+        layout = self._scene.layout()
+        still = np.zeros(layout.n, bool)  # vertices that the solve never moves
+        still[: layout.n_fem] = self._fixed_particle
+        still[layout.obstacle_offsets[0] : layout.obstacle_offsets[-1]] = True
+        offsets = layout.body_vertex_offsets
+        for b in np.flatnonzero(self._kinematic_body):
+            still[offsets[b] : offsets[b + 1]] = True
+        no_body = np.zeros(layout.n, np.int32)  # the checker's body ids serve its distance query only
+
+        def crossings(edge_mask: np.ndarray, tri_mask: np.ndarray) -> int:
+            e, f = edges[edge_mask], tris[tri_mask]
+            if len(e) == 0 or len(f) == 0:
+                return 0
+            surface = {"edges": e, "triangles": f, "vertices": np.unique(f).astype(np.int32)}
+            return SurfaceChecker(surface, no_body, self.model.device).intersections(eng.vm.x)
+
+        found = crossings(np.ones(len(edges), bool), np.ones(len(tris), bool))
+        if found == 0:
+            return
+        # take away, each once, the crossings between surfaces that never move and those inside one body (a group
+        # of finite elements, an obstacle or a rigid body: the engine's contact bodies)
+        still_edges, still_tris = still[edges].all(axis=1), still[tris].all(axis=1)
+        found -= crossings(still_edges, still_tris)
+        body = eng.body.numpy()
+        edge_body, tri_body = body[edges[:, 0]], body[tris[:, 0]]
+        for b in np.intersect1d(edge_body, tri_body):
+            in_edges, in_tris = edge_body == b, tri_body == b
+            if still_edges[in_edges].all() and still_tris[in_tris].all():
+                continue  # all of it never moves: counted above
+            found -= crossings(in_edges, in_tris)
+            if still_edges[in_edges].any() and still_tris[in_tris].any():
+                found += crossings(in_edges & still_edges, in_tris & still_tris)
+        if found > 0:
+            raise ValueError(
+                f"SolverIPC: surfaces of different bodies intersect in the model's state: {found} edges cross "
+                "triangles. The barrier needs surfaces that start apart; a step would keep them crossed."
+            )
 
     def _forget_written(self) -> None:
         """Forget what the solver wrote for the bodies, so that the next step takes their state from ``state_in``
@@ -1069,10 +1174,10 @@ class SolverIPC(SolverBase):
         if model.shape_count:
             shape_type = model.shape_type.numpy()
             shape_body = model.shape_body.numpy()
-            shape_flags = model.shape_flags.numpy()
+            colliding = _colliding_shapes(model)
             shape_xform = model.shape_transform.numpy().astype(np.float64)
             for s in range(model.shape_count):
-                if not shape_flags[s] & _COLLIDE:
+                if not colliding[s]:
                     continue
                 b = int(shape_body[s])
                 if shape_type[s] == GeoType.PLANE:
@@ -1131,14 +1236,14 @@ class SolverIPC(SolverBase):
             return np.zeros((0, 3)), np.zeros((0, 3))
         shape_type = model.shape_type.numpy()
         shape_body = model.shape_body.numpy()
-        shape_flags = model.shape_flags.numpy()
+        colliding = _colliding_shapes(model)
         shape_xform = model.shape_transform.numpy()
         shape_scale = model.shape_scale.numpy()
         P, N = [], []
         for s in range(model.shape_count):
             if shape_type[s] != int(GeoType.PLANE) or shape_body[s] != -1:
                 continue
-            if not shape_flags[s] & _COLLIDE:
+            if not colliding[s]:
                 continue
             if shape_scale[s][0] > 0.0 or shape_scale[s][1] > 0.0:
                 warnings.warn(

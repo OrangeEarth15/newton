@@ -593,6 +593,117 @@ def test_rejects_contact_filters(test, device):
             _rejects(test, builder, pattern, device)
 
 
+def test_particle_only_shapes_without_particles(test, device):
+    """In a model without particles a shape that collides with particles only collides with nothing: two such boxes
+    start inside each other and fall freely through each other and through the ground. With a particle in the
+    model the same shapes filter contacts, which the solver refuses."""
+    builder = newton.ModelBuilder()
+    cfg = newton.ModelBuilder.ShapeConfig(has_shape_collision=False)  # keeps COLLIDE_PARTICLES
+    for _ in range(2):
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.15), wp.quat_identity()))
+        builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+    builder.add_ground_plane()
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model)
+    s0, s1 = model.state(), model.state()
+    dt, steps = 0.01, 20
+    for _ in range(steps):
+        solver.step(s0, s1, None, None, dt)
+        s0, s1 = s1, s0
+    # implicit Euler from rest: z_n = z_0 - g dt^2 n (n + 1) / 2, here 5.6 cm below the ground
+    expected = 0.15 - 9.81 * dt * dt * steps * (steps + 1) / 2
+    np.testing.assert_allclose(s0.body_q.numpy()[:, 2], expected, atol=1.0e-4)
+
+    builder.add_particle(wp.vec3(0.0, 0.0, 2.0), wp.vec3(0.0, 0.0, 0.0), 1.0)
+    _rejects(test, builder, "filter contacts", device)
+
+
+def _belt(device, enable_surface_velocity):
+    """A box above a static two-triangle mesh, a conveyor belt when the mesh has a surface velocity."""
+    vertices = np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]], np.float32)
+    belt = newton.Mesh(
+        vertices,
+        np.array([0, 1, 2, 0, 2, 3], np.int32),
+        compute_inertia=False,
+        enable_surface_velocity=enable_surface_velocity,
+    )
+    builder = newton.ModelBuilder()
+    builder.add_shape_mesh(body=-1, mesh=belt)
+    _box_body(builder, (0.0, 0.0, 0.205), (0.2, 0.2, 0.2))
+    return builder.finalize(device=device)
+
+
+def test_rejects_surface_velocity(test, device):
+    """Reject a collision mesh with a surface velocity, which the solver's own contacts would ignore."""
+    with test.assertRaisesRegex(NotImplementedError, "surface velocit"):
+        newton.solvers.SolverIPC(_belt(device, True))
+    newton.solvers.SolverIPC(_belt(device, False))
+
+
+def _open_plane(builder, z=0.0):
+    """A static square of two triangles, 2 m wide, at height ``z``: an open mesh."""
+    vertices = np.array([[-1.0, -1.0, z], [1.0, -1.0, z], [1.0, 1.0, z], [-1.0, 1.0, z]], np.float32)
+    plane = newton.Mesh(vertices, np.array([0, 1, 2, 0, 2, 3], np.int32), compute_inertia=False)
+    builder.add_shape_mesh(body=-1, mesh=plane)
+
+
+def test_rejects_intersecting_start(test, device):
+    """Reject the surfaces of different bodies that cross at the start without a pair inside the contact thickness,
+    which a step would not notice; accept the crossings that contact ignores, and flat sheets."""
+    from uipc_warp.validation import SurfaceChecker  # noqa: PLC0415
+
+    with test.subTest(case="box through an open plane"):
+        builder = newton.ModelBuilder()
+        _open_plane(builder)
+        _box_body(builder, (0.0, 0.0, 0.19), (0.2, 0.2, 0.2))  # 1 cm through the plane
+        with test.assertRaisesRegex(ValueError, "intersect"):
+            newton.solvers.SolverIPC(builder.finalize(device=device))
+    with test.subTest(case="cloth through a static box"):
+        builder = newton.ModelBuilder()
+        builder.add_shape_box(
+            -1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity()), hx=0.1, hy=0.1, hz=0.1
+        )
+        _cloth(builder, 4, 0.1, 0.5, center=(0.033, 0.021))  # the box's vertical edges pierce its triangles
+        with test.assertRaisesRegex(ValueError, "intersect"):
+            newton.solvers.SolverIPC(builder.finalize(device=device))
+    with test.subTest(case="crossings that contact ignores"):
+        builder = newton.ModelBuilder()
+        _open_plane(builder)
+        # two overlapping shapes of one body, above the plane
+        body = _box_body(builder, (0.0, 0.0, 0.5), (0.2, 0.2, 0.2))
+        builder.add_shape_box(
+            body, xform=wp.transform(wp.vec3(0.1, 0.0, 0.0), wp.quat_identity()), hx=0.2, hy=0.05, hz=0.05
+        )
+        # a kinematic body through the static plane
+        kinematic = builder.add_body(xform=wp.transform(wp.vec3(0.6, 0.6, 0.0), wp.quat_identity()), is_kinematic=True)
+        builder.add_shape_box(kinematic, hx=0.1, hy=0.1, hz=0.1)
+        solver = newton.solvers.SolverIPC(builder.finalize(device=device))
+        # the surfaces do cross: the check let these crossings through
+        test.assertGreater(SurfaceChecker.from_engine(solver._engine).intersections(solver._engine.vm.x), 0)
+    with test.subTest(case="a flat sheet off the axes"):
+        # a 10 x 10 cloth in the plane y = x + 50, 100 m wide: its float32 vertices are not exactly coplanar, and
+        # the brute-force checker counts crossings between its nearly coplanar triangles, which are not there
+        t = np.linspace(-50.0, 50.0, 10)
+        x, z = np.meshgrid(t, t, indexing="ij")
+        vertices = np.stack([x, x + 50.0, z], axis=-1).reshape(-1, 3)
+        quads = [(10 * i + j, 10 * i + j + 10, 10 * i + j + 11, 10 * i + j + 1) for i in range(9) for j in range(9)]
+        builder = newton.ModelBuilder()
+        builder.add_cloth_mesh(
+            pos=wp.vec3(0.0, 0.0, 0.0),
+            rot=wp.quat_identity(),
+            scale=1.0,
+            vertices=[wp.vec3(*v) for v in vertices],
+            indices=[i for a, b, c, d in quads for i in (a, b, c, a, c, d)],
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            density=0.1,
+            tri_ke=1.0e4,
+            tri_ka=1.0e4,
+            tri_kd=0.0,
+        )
+        solver = newton.solvers.SolverIPC(builder.finalize(device=device))
+        test.assertGreater(SurfaceChecker.from_engine(solver._engine).intersections(solver._engine.vm.x), 0)
+
+
 # ---------------------------------------------------------------------------- forces
 
 
@@ -1029,6 +1140,9 @@ for name, func in (
     ("test_rejects_gradients", test_rejects_gradients),
     ("test_rejects_worlds", test_rejects_worlds),
     ("test_rejects_contact_filters", test_rejects_contact_filters),
+    ("test_particle_only_shapes_without_particles", test_particle_only_shapes_without_particles),
+    ("test_rejects_surface_velocity", test_rejects_surface_velocity),
+    ("test_rejects_intersecting_start", test_rejects_intersecting_start),
     ("test_external_forces_match_closed_form", test_external_forces_match_closed_form),
 ):
     add_function_test(TestSolverIPCInputs, name, func, devices=devices)

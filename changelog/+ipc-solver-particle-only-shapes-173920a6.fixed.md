@@ -1,0 +1,1 @@
+Make ``SolverIPC`` accept a shape that collides with particles only, such as one built with ``has_shape_collision=False``, in a model without particles, where it collides with nothing, instead of refusing it as contact filtering.
