@@ -1,0 +1,1 @@
+Make ``SolverIPC`` apply the gravity of each entity's world, ``Model.gravity[world]`` with the global world -1 taking the last entry, instead of refusing a model whose gravity entries differ; ``notify_model_changed(MODEL_PROPERTIES)`` updates every world's gravity in place, so that graphs captured before take it. Content in more than one local world is still refused.

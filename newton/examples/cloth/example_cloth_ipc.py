@@ -45,6 +45,8 @@ class Example:
         self.viewer = viewer
 
         builder = newton.ModelBuilder()
+        # friction 0.4 on every contact: the solver takes the mean of the two materials of a pair
+        builder.default_shape_cfg.mu = 0.4
         builder.add_ground_plane()
 
         # rigid boxes (density 1000 kg/m^3), each a few millimetres above what it rests on
@@ -81,8 +83,10 @@ class Example:
         )
 
         self.model = builder.finalize()
+        self.model.soft_contact_mu = 0.4  # the cloth's side of a contact with a shape
+        self.model.particle_mu = 0.4  # the cloth on itself
         # resting contacts settle just inside d_hat: 5 mm keeps the visible gaps small
-        self.solver = newton.solvers.SolverIPC(self.model, d_hat=0.005, friction_mu=0.4)
+        self.solver = newton.solvers.SolverIPC(self.model, d_hat=0.005)
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()

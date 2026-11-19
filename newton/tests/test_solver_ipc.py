@@ -7,6 +7,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.utils.heightfield import HeightfieldData, get_triangle_shape_from_heightfield
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 # SolverIPC's default barrier activation distance; a resting contact settles just inside it
@@ -142,7 +143,8 @@ def test_soft_bodies_stack_without_intersection(test, device):
 
 
 def test_friction_on_tilted_gravity(test, device):
-    """A box on the ground sticks below the friction angle and slides with g (sin - mu cos) above it."""
+    """A box on the ground sticks below the friction angle and slides with g (sin - mu cos) above it; mu is the mean
+    of the ground's 0.5 and the particles' soft_contact_mu, 0.5."""
     g = 9.81
     for tan_theta, sticks in ((0.3, True), (0.8, False)):
         th = np.arctan(tan_theta)
@@ -162,10 +164,11 @@ def test_friction_on_tilted_gravity(test, device):
             k_lambda=5.8e5,
             k_damp=0.0,
         )
-        builder.add_ground_plane()
+        builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=0.5))
         model = builder.finalize(device=device)
+        model.soft_contact_mu = 0.5
         model.set_gravity((g * np.sin(th), 0.0, -g * np.cos(th)))
-        solver = newton.solvers.SolverIPC(model, friction_mu=0.5, newton_velocity_tol=1e-4, semi_implicit=False)
+        solver = newton.solvers.SolverIPC(model, newton_velocity_tol=1e-4, semi_implicit=False)
         s0, s1 = model.state(), model.state()
         cx = []
         for _ in range(60):
@@ -272,7 +275,9 @@ def test_cloth_self_contact_folded_sheet(test, device):
         edge_ke=1.0e-3,
         edge_kd=0.0,
     )
-    builder.add_ground_plane()
+    # the sheet's friction with the ground 0.5 (the mean of this and soft_contact_mu): at the 0.75 of Newton's default
+    # materials a fold of the top layer stays up 1 cm above the bottom one in about one run in ten
+    builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=0.5))
     model = builder.finalize(device=device)
     solver = newton.solvers.SolverIPC(model)  # flat rest shape
 
@@ -381,7 +386,9 @@ def test_kinematic_body_lifts_cloth(test, device):
     builder = newton.ModelBuilder()
     _cloth(builder, 6, 0.025, 0.2095, mass=1.0e-3, tri_k=1.0e3, edge_ke=1.0e-3)
     b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.1), wp.quat_identity()), is_kinematic=True)
-    builder.add_shape_box(b, hx=0.1, hy=0.1, hz=0.1)
+    # friction 0.5 (the mean of this and soft_contact_mu): the solve does not sweep the box's 2 mm jumps, and the
+    # cloth, which moves up 2 mm against the box in every step, crumples at the 0.75 of Newton's default materials
+    builder.add_shape_box(b, hx=0.1, hy=0.1, hz=0.1, cfg=newton.ModelBuilder.ShapeConfig(mu=0.5))
     model = builder.finalize(device=device)
     solver = newton.solvers.SolverIPC(model)
     checker = SurfaceChecker.from_engine(solver._engine)
@@ -437,11 +444,20 @@ def _two_particles():
     return builder
 
 
-def test_rejects_springs(test, device):
-    """Reject a model with springs, which the solver would not simulate."""
-    builder = _two_particles()
-    builder.add_spring(0, 1, 1.0e3, 0.0, 0.0)
-    _rejects(test, builder, "springs", device)
+def test_rejects_springs_without_a_libuipc_form(test, device):
+    """Reject a damped spring (libuipc has no damping element), a spring of rest length 0 (libuipc's energy divides
+    by it) and one of negative stiffness."""
+    for case, pattern in (
+        ("damped", "damping is 0.5"),
+        ("rest length 0", "rest length is 0.0"),
+        ("negative", "stiffness"),
+    ):
+        with test.subTest(case=case):
+            builder = _two_particles()
+            builder.add_spring(0, 1, -1.0e3 if case == "negative" else 1.0e3, 0.5 if case == "damped" else 0.0, 0.0)
+            if case == "rest length 0":
+                builder.spring_rest_length[0] = 0.0
+            _rejects(test, builder, pattern, device)
 
 
 def test_rejects_attachments(test, device):
@@ -563,61 +579,6 @@ def test_rejects_worlds(test, device):
     _rejects(test, builder, "one world", device)
 
 
-def test_rejects_contact_filters(test, device):
-    """Reject collision groups, filter pairs and shapes that collide with shapes only: every shape collides."""
-    for case in ("group", "filter pair", "shapes only"):
-        with test.subTest(case=case):
-            builder = newton.ModelBuilder()
-            a = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()))
-            b = builder.add_body(xform=wp.transform(wp.vec3(0.5, 0.0, 1.0), wp.quat_identity()))
-            cfg = newton.ModelBuilder.ShapeConfig()
-            if case == "group":
-                cfg.collision_group = 2
-            sa = builder.add_shape_box(a, hx=0.1, hy=0.1, hz=0.1)
-            sb = builder.add_shape_box(b, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
-            if case == "filter pair":
-                builder.add_shape_collision_filter_pair(sa, sb)
-            pattern = "filter contacts"
-            if case == "shapes only":
-                cfg.has_particle_collision = False
-                builder.add_shape_box(
-                    b,
-                    xform=wp.transform(wp.vec3(0.0, 0.0, 0.2), wp.quat_identity()),
-                    hx=0.05,
-                    hy=0.05,
-                    hz=0.05,
-                    cfg=cfg,
-                )
-                builder.add_particle(wp.vec3(0.0, 0.0, 2.0), wp.vec3(0.0, 0.0, 0.0), 1.0)
-                pattern = "COLLIDE_PARTICLES"
-            _rejects(test, builder, pattern, device)
-
-
-def test_particle_only_shapes_without_particles(test, device):
-    """In a model without particles a shape that collides with particles only collides with nothing: two such boxes
-    start inside each other and fall freely through each other and through the ground. With a particle in the
-    model the same shapes filter contacts, which the solver refuses."""
-    builder = newton.ModelBuilder()
-    cfg = newton.ModelBuilder.ShapeConfig(has_shape_collision=False)  # keeps COLLIDE_PARTICLES
-    for _ in range(2):
-        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.15), wp.quat_identity()))
-        builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
-    builder.add_ground_plane()
-    model = builder.finalize(device=device)
-    solver = newton.solvers.SolverIPC(model)
-    s0, s1 = model.state(), model.state()
-    dt, steps = 0.01, 20
-    for _ in range(steps):
-        solver.step(s0, s1, None, None, dt)
-        s0, s1 = s1, s0
-    # implicit Euler from rest: z_n = z_0 - g dt^2 n (n + 1) / 2, here 5.6 cm below the ground
-    expected = 0.15 - 9.81 * dt * dt * steps * (steps + 1) / 2
-    np.testing.assert_allclose(s0.body_q.numpy()[:, 2], expected, atol=1.0e-4)
-
-    builder.add_particle(wp.vec3(0.0, 0.0, 2.0), wp.vec3(0.0, 0.0, 0.0), 1.0)
-    _rejects(test, builder, "filter contacts", device)
-
-
 def _belt(device, enable_surface_velocity):
     """A box above a static two-triangle mesh, a conveyor belt when the mesh has a surface velocity."""
     vertices = np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]], np.float32)
@@ -734,6 +695,19 @@ def test_rejects_start_in_contact(test, device):
     def cloth(z, center=(0.0, 0.0)):
         return lambda builder: _cloth(builder, 4, 0.05, z, center=center)
 
+    def particle(z, radius, x=0.0):
+        return lambda builder: builder.add_particle(wp.vec3(x, 0.0, z), wp.vec3(0.0, 0.0, 0.0), 1.0e-3, radius=radius)
+
+    def margin_box(z, margin):
+        def add(builder):
+            b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, z), wp.quat_identity()))
+            builder.add_shape_box(b, hx=0.125, hy=0.125, hz=0.125, cfg=newton.ModelBuilder.ShapeConfig(margin=margin))
+
+        return add
+
+    def thick_ground(builder):
+        builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(margin=0.01))
+
     for case, parts, kwargs, pattern in (
         ("on the ground", (ground, box(0.125)), {}, r"body 0 and plane shape 0 start 0 m apart"),
         ("into the ground", (ground, box(0.12)), {}, r"body 0 and plane shape 0 start -0.005 m apart"),
@@ -742,6 +716,27 @@ def test_rejects_start_in_contact(test, device):
         # 1 cm cubes stacked in touching contact: in float32 these faces are 9.3e-10 m apart
         ("apart by rounding", (box(0.015, half=0.005), box(0.025, half=0.005)), {}, r"rounding of float32 positions"),
         ("cloth inside its thickness", (static_box, cloth(0.251)), {"thickness": 0.002}, r"thickness \(0.002 m\)"),
+        # a free particle's thickness is its radius, a shape's its margin; a pair's is the sum of its two sides'
+        (
+            "particle inside its radius",
+            (ground, particle(0.099, 0.1)),
+            {},
+            r"particle 0 and plane shape 0 start 0.099 m apart, at or inside their contact thickness \(0.1 m\)",
+        ),
+        (
+            "two particles inside their radii",
+            (particle(1.0, 0.1), particle(1.0, 0.1, x=0.15)),
+            {},
+            r"particle 0 and particle 1 start 0.15 m apart, at or inside their contact thickness \(0.2 m\)",
+        ),
+        (
+            "box inside its margin",
+            (ground, margin_box(0.13, 0.01)),
+            {},
+            r"body 0 and plane shape 0 start 0.005 m apart",
+        ),
+        ("box inside the ground's margin", (thick_ground, margin_box(0.13, 0.0)), {}, r"thickness \(0.01 m\)"),
+        ("both margins", (thick_ground, margin_box(0.14, 0.01)), {}, r"start 0.015 m apart, .* thickness \(0.02 m\)"),
     ):
         with test.subTest(case=case), test.assertRaisesRegex(ValueError, pattern):
             build(*parts, **kwargs)
@@ -750,6 +745,11 @@ def test_rejects_start_in_contact(test, device):
     build(ground, static_box, box(0.376), cloth(0.003, center=(1.0, 0.0)), thickness=0.002)
     build(box(0.125), box(0.375 + 1.0e-6))
     build(static_box, box(0.375, kinematic=True))
+    # each pair's own thickness: a small particle 1 cm above a static box beside a large particle far away; a free
+    # particle and a box above their radius and margins; a cloth 3 mm above the ground whatever its radius (0.1)
+    build(static_box, particle(0.26, 0.001), particle(0.5, 0.1, x=3.0))
+    build(ground, particle(0.101, 0.1, x=1.0), margin_box(0.136, 0.01))
+    build(thick_ground, margin_box(0.146, 0.01))
 
     def two_shapes(builder):
         b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.2), wp.quat_identity()))
@@ -822,6 +822,323 @@ def test_external_forces_match_closed_form(test, device):
             # the affine body is near-rigid: its rotation is within 1e-5 of the rigid one (measured)
             test.assertAlmostEqual(angle, ramp, delta=1e-4 * ramp)
             np.testing.assert_allclose(qd[b, 3:], [0.0, 0.0, k * dt], atol=1e-4 * k * dt)
+
+
+# ---------------------------------------------------------------------------- contact elements and materials
+
+# converged tightly: free fall and sliding follow their closed forms to rounding
+_TIGHT = {"newton_velocity_tol": 1e-7, "linear_tol_rate": 1e-12, "semi_implicit": False}
+
+
+def _engine_z(solver, body):
+    """The float64 height of a body's origin in the solver (its translation pseudo-vertex)."""
+    return float(solver._engine.positions()[solver._scene.layout().body_base[body], 2])
+
+
+def _free_fall(model, body, k, dt=0.01, g=9.81):
+    """Implicit Euler's height of a body's origin after k steps of free fall from rest, from the model's (float32)
+    pose. Under ``_TIGHT`` a step ends within 1e-9 m of its converged position, and the differences carry over to the
+    later steps through the velocity: 30 steps stay within 1e-6 m, where a contact would move a body by millimetres."""
+    return float(model.body_q.numpy()[body, 2]) - g * dt * dt * k * (k + 1) / 2.0
+
+
+def test_friction_of_each_pair(test, device):
+    """Two boxes of friction 0.1 and 0.3 and a particle (soft_contact_mu 0.2) slide over a ground of friction 0.5
+    under gravity tilted to tan 0.8: each accelerates with g_t - mu g_n, mu the arithmetic mean of the pair's two
+    coefficients (0.3, 0.4 and 0.35), and a box of friction 1.3 (pair 0.9) sticks."""
+    g, tan_theta, dt = 9.81, 0.8, 0.01
+    th = np.arctan(tan_theta)
+    g_t, g_n = g * np.sin(th), g * np.cos(th)
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=0.5))
+    boxes = []
+    for k, mu in enumerate((0.1, 0.3, 1.3)):  # side by side across the slope
+        b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.5 * k, 0.052), wp.quat_identity()))
+        builder.add_shape_box(b, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(mu=mu))
+        boxes.append(b)
+    particle = builder.add_particle(wp.vec3(0.0, 2.0, 0.004), wp.vec3(0.0, 0.0, 0.0), 1.0e-3, radius=0.002)
+    model = builder.finalize(device=device)
+    model.soft_contact_mu = 0.2
+    model.set_gravity((g_t, 0.0, -g_n))
+    solver = newton.solvers.SolverIPC(model, d_hat=1.0e-3, **_TIGHT)
+    s0, s1 = model.state(), model.state()
+    v_box, v_particle = [], []
+    for _ in range(80):
+        solver.step(s0, s1, None, None, dt)
+        s0, s1 = s1, s0
+        v_box.append(s0.body_qd.numpy()[boxes, 0].astype(np.float64))
+        v_particle.append(float(s0.particle_qd.numpy()[particle, 0]))
+    # the steps after the bodies land, from their velocities (float32: about 1e-7 m/s)
+    a_box = (v_box[79] - v_box[19]) / (60 * dt)
+    a_particle = (v_particle[79] - v_particle[19]) / (60 * dt)
+    np.testing.assert_allclose(a_box[:2], [g_t - 0.3 * g_n, g_t - 0.4 * g_n], rtol=1e-4)
+    test.assertAlmostEqual(a_particle / (g_t - 0.35 * g_n), 1.0, delta=1e-5)
+    test.assertLess(abs(v_box[79][2]), 0.01)  # the friction's smoothing velocity, eps_velocity
+
+
+def test_rest_heights_follow_radius_and_margin(test, device):
+    """Contact thickness: a free particle of radius r comes to rest between r and r + d_hat above the ground, and one
+    of radius 0.02 on a kinematic particle of radius 0.01 between 0.03 and 0.03 + d_hat above it; a box of margin
+    0.002 rests between the sum of its margin and the ground's (0.003) and that plus d_hat above the ground, and as
+    far above a static box of margin 0.004 beside it; a cloth of particle radius 0.2 rests within d_hat of the
+    ground, its thickness (the solver's, 0) being independent of the radius."""
+    d_hat, dt = 1.0e-3, 0.01
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(margin=0.003))
+    builder.add_shape_box(-1, xform=wp.transform(wp.vec3(1.0, 0.0, 0.05), wp.quat_identity()), hx=0.1, hy=0.1, hz=0.05,
+                          cfg=newton.ModelBuilder.ShapeConfig(margin=0.004))  # fmt: skip
+    on_ground = builder.add_particle(wp.vec3(0.0, 0.0, 0.015), wp.vec3(0.0, 0.0, 0.0), 1.0e-3, radius=0.01)
+    below = builder.add_particle(wp.vec3(0.0, 0.5, 0.2), wp.vec3(0.0, 0.0, 0.0), 0.0, radius=0.01)  # kinematic
+    above = builder.add_particle(wp.vec3(0.0, 0.5, 0.235), wp.vec3(0.0, 0.0, 0.0), 1.0e-3, radius=0.02)
+    margin = newton.ModelBuilder.ShapeConfig(margin=0.002)
+    boxes = []
+    for x, z in ((0.5, 0.06), (1.0, 0.16)):  # 1 cm above the surfaces of the ground and the static box
+        boxes.append(builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, z), wp.quat_identity())))
+        builder.add_shape_box(boxes[-1], hx=0.05, hy=0.05, hz=0.05, cfg=margin)
+    n = builder.particle_count
+    builder.add_cloth_grid(
+        pos=wp.vec3(-1.2, -0.1, 0.005),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(0.0, 0.0, 0.0),
+        dim_x=4,
+        dim_y=4,
+        cell_x=0.05,
+        cell_y=0.05,
+        mass=1.0e-3,
+        tri_ke=1.0e3,
+        tri_ka=1.0e3,
+        tri_kd=0.0,
+        particle_radius=0.2,
+    )
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model, d_hat=d_hat)
+    s0, s1 = model.state(), model.state()
+    for _ in range(100):
+        solver.step(s0, s1, None, None, dt)
+        s0, s1 = s1, s0
+    q = s0.particle_q.numpy().astype(np.float64)
+    z = s0.body_q.numpy()[:, 2].astype(np.float64) - 0.05  # the boxes' bottoms
+    for name, value, low in (
+        ("particle on the ground", q[on_ground, 2], 0.01 + 0.003),
+        ("particle on a particle", np.linalg.norm(q[above] - q[below]), 0.03),
+        ("box on the ground", z[0], 0.002 + 0.003),
+        ("box on a box", z[1] - 0.1, 0.002 + 0.004),
+        ("cloth on the ground", q[n:, 2].min(), 0.003),
+    ):
+        with test.subTest(name=name):
+            test.assertGreater(value, low)
+            test.assertLess(value, low + d_hat)
+
+
+def _implicit_euler_oscillator(u0, omega, dt, steps):
+    """u_1 .. u_steps of u'' = -omega^2 u from (u0, 0) under implicit Euler: u_{n+1} (1 + omega^2 dt^2) = u_n + dt w_n,
+    w_{n+1} = (u_{n+1} - u_n) / dt."""
+    u, w, out = u0, 0.0, []
+    for _ in range(steps):
+        u_next = (u + dt * w) / (1.0 + (omega * dt) ** 2)
+        u, w = u_next, (u_next - u) / dt
+        out.append(u)
+    return np.array(out)
+
+
+def test_springs_oscillate_as_implicit_euler(test, device):
+    """Without gravity, two free particles of mass m joined by a spring of stiffness k along x, started 1 cm short of
+    its rest length, and a free particle joined to a kinematic one, 1 cm beyond it: the stretch of each follows the
+    implicit-Euler oscillator of omega^2 = 2 k / m and k / m frame by frame, and the free pair's centre stays put."""
+    m, k, L0, dt, steps = 0.01, 4.0, 0.1, 0.01, 60  # a period and a half of the pair: 2 pi / omega = 0.22 s
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    for x in (0.0, L0 - 0.01):
+        builder.add_particle(wp.vec3(x, 0.0, 1.0), wp.vec3(0.0, 0.0, 0.0), m, radius=0.001)
+    builder.add_particle(wp.vec3(0.0, 1.0, 1.0), wp.vec3(0.0, 0.0, 0.0), 0.0, radius=0.001)  # kinematic
+    builder.add_particle(wp.vec3(L0 + 0.01, 1.0, 1.0), wp.vec3(0.0, 0.0, 0.0), m, radius=0.001)
+    for spring, i in enumerate((0, 2)):
+        builder.add_spring(i, i + 1, k, 0.0, 0.0)
+        builder.spring_rest_length[spring] = L0  # add_spring took the distance at the start
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model, **_TIGHT)
+    rest = model.spring_rest_length.numpy().astype(np.float64)  # float32, as the positions
+    x0 = solver._engine.positions()[:4, 0]
+    stretch = {first: x0[first + 1] - x0[first] - rest[spring] for spring, first in enumerate((0, 2))}
+    expected = {
+        0: _implicit_euler_oscillator(stretch[0], np.sqrt(2.0 * k / m), dt, steps),
+        2: _implicit_euler_oscillator(stretch[2], np.sqrt(k / m), dt, steps),
+    }
+    s0, s1 = model.state(), model.state()
+    measured = {first: [] for first in expected}
+    for _ in range(steps):
+        solver.step(s0, s1, None, None, dt)
+        s0, s1 = s1, s0
+        x = solver._engine.positions()[:4, 0]  # float64
+        for spring, first in enumerate(expected):
+            measured[first].append(x[first + 1] - x[first] - rest[spring])
+        test.assertAlmostEqual(x[0] + x[1], x0[0] + x0[1], delta=1e-12)
+    # to the Newton tolerance of _TIGHT, 1e-9 m per step
+    for first, u in expected.items():
+        np.testing.assert_allclose(measured[first], u, rtol=0.0, atol=1e-9)
+
+
+def _box_on_ramp(builder, center, angle, mu, half=0.05, gap=0.002):
+    """A box of friction ``mu`` resting ``gap`` above the top of a ramp tilted by ``angle`` about x whose top centre is
+    ``center``; returns the body."""
+    q = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), float(angle))
+    up = np.array(wp.quat_rotate(q, wp.vec3(0.0, 0.0, 1.0)))
+    b = builder.add_body(xform=wp.transform(wp.vec3(*(np.asarray(center) + (half + gap) * up)), q))
+    builder.add_shape_box(b, hx=half, hy=half, hz=half, cfg=newton.ModelBuilder.ShapeConfig(mu=mu))
+    return b
+
+
+def test_ramp_sticks_and_slips(test, device):
+    """Boxes on a static ramp of 20 degrees (friction 0.3): one of friction 0.2 (pair 0.25, below tan 20 = 0.364)
+    slides down with g (sin - 0.25 cos), one of friction 0.6 (pair 0.45) sticks.
+
+    The sliding box moves away from the diagonal that splits the ramp's top face (along x = y in the ramp's frame).
+    A box that crosses it meets edge-edge pairs besides its point-triangle pairs there, which change its acceleration
+    over a few steps (by 2% to 4% over ten steps at this ``d_hat``).
+    """
+    g, angle, dt = 9.81, np.radians(20.0), 0.01
+    q = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), float(angle))
+    up = np.array(wp.quat_rotate(q, wp.vec3(0.0, 0.0, 1.0)))
+    down = -np.array(wp.quat_rotate(q, wp.vec3(0.0, 1.0, 0.0)))  # down the slope
+    builder = newton.ModelBuilder()
+    ramp_center = np.array([0.0, 0.0, 0.5])
+    builder.add_shape_box(
+        -1,
+        xform=wp.transform(wp.vec3(*ramp_center), q),
+        hx=0.5,
+        hy=0.5,
+        hz=0.05,
+        cfg=newton.ModelBuilder.ShapeConfig(mu=0.3),
+    )
+    top = ramp_center + 0.05 * up
+    slides = _box_on_ramp(builder, top + np.array([0.2, 0.0, 0.0]), angle, 0.2)
+    sticks = _box_on_ramp(builder, top + np.array([-0.2, 0.0, 0.0]), angle, 0.6)
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model, d_hat=1.0e-3, **_TIGHT)
+    s0, s1 = model.state(), model.state()
+    v = []
+    for _ in range(60):
+        solver.step(s0, s1, None, None, dt)
+        s0, s1 = s1, s0
+        v.append(s0.body_qd.numpy()[[slides, sticks], :3].astype(np.float64) @ down)
+    a = (v[59][0] - v[19][0]) / (40 * dt)
+    test.assertAlmostEqual(a / (g * (np.sin(angle) - 0.25 * np.cos(angle))), 1.0, delta=2e-4)
+    test.assertLess(abs(v[59][1]), 0.01)
+
+
+def test_excluded_pairs_never_collide(test, device):
+    """A box over a static table falls through it as in free fall, without a contact candidate in any step, where
+    Newton's rules exclude the pair: collision groups 2 and 3, one negative group (-1 and -1), or a filter pair. In
+    groups 2 and 2, or -1 and -2, the box comes to rest on the table."""
+    dt, half, table_top = 0.01, 0.05, 0.1
+    z0 = table_top + half + 0.002
+    for box_group, table_group, filtered, falls in (
+        (2, 3, False, True),
+        (-1, -1, False, True),
+        (1, 1, True, True),
+        (2, 2, False, False),
+        (-1, -2, False, False),
+    ):
+        with test.subTest(box_group=box_group, table_group=table_group, filtered=filtered):
+            builder = newton.ModelBuilder()
+            table = builder.add_shape_box(
+                -1,
+                xform=wp.transform(wp.vec3(0.0, 0.0, 0.5 * table_top), wp.quat_identity()),
+                hx=0.3,
+                hy=0.3,
+                hz=0.5 * table_top,
+                cfg=newton.ModelBuilder.ShapeConfig(collision_group=table_group),
+            )
+            body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, z0), wp.quat_identity()))
+            box = builder.add_shape_box(
+                body, hx=half, hy=half, hz=half, cfg=newton.ModelBuilder.ShapeConfig(collision_group=box_group)
+            )
+            if filtered:
+                builder.add_shape_collision_filter_pair(table, box)
+            model = builder.finalize(device=device)
+            test.assertEqual(model.shape_contact_pair_count, 0 if falls else 1)
+            solver = newton.solvers.SolverIPC(model, d_hat=1.0e-3, **_TIGHT)
+            s0, s1 = model.state(), model.state()
+            candidates = 0
+            for k in range(1, 31):
+                solver.step(s0, s1, None, None, dt)
+                s0, s1 = s1, s0
+                candidates += solver.frame_stats()["contact_candidates"]
+                if falls:
+                    test.assertAlmostEqual(_engine_z(solver, body), _free_fall(model, body, k), delta=1e-6)
+            if falls:
+                test.assertEqual(candidates, 0)
+            else:
+                test.assertGreater(candidates, 0)
+                z = float(s0.body_q.numpy()[body, 2])
+                test.assertGreater(z, table_top + half)
+                test.assertLess(z, table_top + half + 1.0e-3)
+
+
+def test_particle_only_shapes(test, device):
+    """A shape that collides with particles only (``has_shape_collision=False``, which keeps COLLIDE_PARTICLES):
+    a static box of that kind holds a particle on its top and lets a box fall through it as in free fall. Two such
+    boxes on bodies, which start inside each other, fall freely through each other and through the ground, whether
+    the model has particles or not (without particles they are not even triangulated)."""
+    dt = 0.01
+    particle_only = newton.ModelBuilder.ShapeConfig(has_shape_collision=False)
+    builder = newton.ModelBuilder()
+    builder.add_shape_box(-1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.05), wp.quat_identity()), hx=0.5, hy=0.5, hz=0.05,
+                          cfg=particle_only)  # fmt: skip
+    particle = builder.add_particle(wp.vec3(-0.25, 0.0, 0.104), wp.vec3(0.0, 0.0, 0.0), 1.0e-3, radius=0.002)
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.25, 0.0, 0.152), wp.quat_identity()))
+    builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05)
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model, d_hat=1.0e-3, **_TIGHT)
+    s0, s1 = model.state(), model.state()
+    for k in range(1, 31):
+        solver.step(s0, s1, None, None, dt)
+        s0, s1 = s1, s0
+        test.assertAlmostEqual(_engine_z(solver, body), _free_fall(model, body, k), delta=1e-6)
+    z = float(s0.particle_q.numpy()[particle, 2])
+    test.assertGreater(z, 0.1)
+    test.assertLess(z, 0.1 + 1.0e-3 + 0.002)
+
+    for with_particle in (False, True):
+        with test.subTest(with_particle=with_particle):
+            builder = newton.ModelBuilder()
+            bodies = []
+            for _ in range(2):
+                bodies.append(builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.15), wp.quat_identity())))
+                builder.add_shape_box(bodies[-1], hx=0.1, hy=0.1, hz=0.1, cfg=particle_only)
+            builder.add_ground_plane()
+            if with_particle:
+                builder.add_particle(wp.vec3(1.0, 0.0, 2.0), wp.vec3(0.0, 0.0, 0.0), 1.0, radius=0.01)
+            model = builder.finalize(device=device)
+            solver = newton.solvers.SolverIPC(model, **_TIGHT)
+            s0, s1 = model.state(), model.state()
+            for k in range(1, 21):
+                solver.step(s0, s1, None, None, dt)
+                s0, s1 = s1, s0
+                for b in bodies:  # 5.6 cm below the ground at the end
+                    test.assertAlmostEqual(_engine_z(solver, b), _free_fall(model, b, k), delta=1e-6)
+
+
+def test_inactive_particles_do_not_collide(test, device):
+    """A box falls onto a particle: through it as in free fall when the particle is not ACTIVE (Newton gives an
+    inactive particle no contact), onto it when the particle is active and kinematic (zero mass)."""
+    dt, z0 = 0.01, 0.054
+    for active in (False, True):
+        with test.subTest(active=active):
+            builder = newton.ModelBuilder()
+            flags = int(newton.ParticleFlags.ACTIVE) if active else 0
+            builder.add_particle(wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0), 0.0, radius=0.001, flags=flags)
+            body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, z0), wp.quat_identity()))
+            builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05)
+            model = builder.finalize(device=device)
+            solver = newton.solvers.SolverIPC(model, d_hat=1.0e-3, **_TIGHT)
+            s0, s1 = model.state(), model.state()
+            for k in range(1, 21):
+                solver.step(s0, s1, None, None, dt)
+                s0, s1 = s1, s0
+                if not active:
+                    test.assertAlmostEqual(_engine_z(solver, body), _free_fall(model, body, k), delta=1e-6)
+            if active:
+                test.assertGreater(float(s0.body_q.numpy()[body, 2]), 0.05)  # held above the particle
 
 
 # ---------------------------------------------------------------------------- status of a step
@@ -1131,15 +1448,16 @@ def test_reset_inside_captured_graph(test, device):
             k_lambda=5.8e5,
             k_damp=0.0,
         )
-        builder.add_ground_plane()
+        builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=mu))
         model = builder.finalize(device=device)
+        model.soft_contact_mu = mu  # the pair's friction is the mean of the two
         # entries [world 0, global world -1]: without begin_world everything is global
         mask = {
             "all": None,
             "global world": wp.array([False, True], dtype=wp.bool, device=device),
             "world 0 only": wp.array([True, False], dtype=wp.bool, device=device),
         }.get(case)
-        solver = newton.solvers.SolverIPC(model, friction_mu=mu, newton_velocity_tol=1e-4, semi_implicit=False)
+        solver = newton.solvers.SolverIPC(model, newton_velocity_tol=1e-4, semi_implicit=False)
         s0, s1 = model.state(), model.state()
         for _ in range(4):  # in contact, with friction pairs
             solver.step(s0, s1, None, None, dt)
@@ -1215,6 +1533,234 @@ def test_notify_updates_gravity_and_inertia_in_place(test, device):
     np.testing.assert_allclose(alpha, [0.0, 0.0, 0.5], atol=1e-4)
 
 
+@wp.kernel
+def _newton_heightfield_triangles(
+    fields: wp.array[HeightfieldData],
+    elevations: wp.array[wp.float32],
+    xform: wp.transform,
+    out: wp.array2d[wp.vec3],
+):
+    """The world vertices of triangle ``tid`` of a height field, as Newton's narrow phase takes them."""
+    t = wp.tid()
+    shape, v0 = get_triangle_shape_from_heightfield(fields[0], elevations, xform, t)
+    q = wp.transform_get_rotation(xform)
+    out[t, 0] = v0
+    out[t, 1] = v0 + wp.quat_rotate(q, shape.scale)
+    out[t, 2] = v0 + wp.quat_rotate(q, shape.auxiliary)
+
+
+def test_heightfield_triangles_and_rest(test, device):
+    """A height field is the triangle mesh Newton's narrow phase collides with: its triangles in the solver are those
+    of get_triangle_shape_from_heightfield, in the field's scaled and moved frame. Spheres dropped on its two
+    plateaus (heights 0 and 0.2 of a scaled field, moved up by 0.1) rest there, within d_hat of touching."""
+    d_hat, radius = 1.0e-3, 0.08
+    data = np.zeros((9, 9), np.float32)
+    data[:, 4] = 0.5
+    data[:, 5:] = 1.0
+    field = newton.Heightfield(data=data, nrow=9, ncol=9, hx=0.5, hy=0.5, min_z=0.0, max_z=0.1)
+    xform = wp.transform(wp.vec3(0.3, 0.0, 0.1), wp.quat_identity())
+    builder = newton.ModelBuilder()
+    builder.add_shape_heightfield(xform=xform, heightfield=field, scale=(2.0, 2.0, 2.0))
+    # the plateaus: x below -0.25 and above 0.25 in the field's frame, at 0 and 0.2 there
+    spots = [(-0.6, -0.5, 0.0), (-0.6, 0.5, 0.0), (0.6, 0.0, 0.2)]
+    bodies = []
+    for x, y, top in spots:
+        bodies.append(
+            builder.add_body(xform=wp.transform(wp.vec3(0.3 + x, y, 0.1 + top + radius + 0.005), wp.quat_identity()))
+        )
+        builder.add_shape_sphere(bodies[-1], radius=radius)
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model, d_hat=d_hat)
+
+    expected = wp.empty((2 * 8 * 8, 3), dtype=wp.vec3, device=device)
+    wp.launch(
+        _newton_heightfield_triangles,
+        len(expected),
+        inputs=[model.heightfield_data, model.heightfield_elevations, xform],
+        outputs=[expected],
+        device=device,
+    )
+    layout = solver._scene.layout()
+    first, end = layout.obstacle_offsets[0], layout.obstacle_offsets[1]
+    tris = np.asarray(solver._engine.surface["triangles"])
+    tris = tris[(tris >= first).all(axis=1) & (tris < end).all(axis=1)]
+    x = solver._engine.positions()
+
+    def rows(t):  # the triangles' vertices in order, sorted by triangle
+        t = np.asarray(t, np.float64).reshape(-1, 9)
+        return t[np.lexsort(t.T[::-1])]
+
+    np.testing.assert_allclose(rows(x[tris]), rows(expected.numpy()), rtol=0.0, atol=1e-6)
+
+    s0, s1 = model.state(), model.state()
+    for _ in range(60):
+        solver.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+    q = s0.body_q.numpy()
+    for b, (x, y, top) in zip(bodies, spots, strict=True):
+        np.testing.assert_allclose(q[b, :2], [0.3 + x, y], atol=1e-3)
+        test.assertGreater(q[b, 2], 0.1 + top + radius)
+        test.assertLess(q[b, 2], 0.1 + top + radius + d_hat)
+
+
+def _sheet(builder, x, tris, rows=None, rest=None, mass=0.01, tri_k=1.0e3, edge_ke=30.0):
+    """Particles at ``x`` with the triangles ``tris`` and, given, the bending edge ``rows`` (o0, o1, v1, v2) with their
+    rest angles (None: Newton measures them at ``x``), without damping."""
+    n = len(x)
+    builder.add_particles([wp.vec3(*p) for p in x], [wp.vec3(0.0, 0.0, 0.0)] * n, [mass] * n, radius=[0.001] * n)
+    t = np.asarray(tris)
+    builder.add_triangles(
+        t[:, 0], t[:, 1], t[:, 2], tri_ke=[tri_k] * len(t), tri_ka=[tri_k] * len(t), tri_kd=[0.0] * len(t)
+    )
+    if rows is not None:
+        r = np.asarray(rows)
+        builder.add_edges(
+            r[:, 0], r[:, 1], r[:, 2], r[:, 3], rest=rest, edge_ke=[edge_ke] * len(r), edge_kd=[0.0] * len(r)
+        )
+
+
+def _newton_angles(model, x):
+    """Newton's angle of every bending edge row at the positions ``x``, as it measures rest angles."""
+    from newton._src.geometry.rest_shape import _dihedral_angles  # noqa: PLC0415
+
+    e = model.edge_indices.numpy().reshape(-1, 4)
+    x = np.asarray(x, np.float64)
+    return _dihedral_angles(x[e[:, 0]], x[e[:, 1]], x[e[:, 2]], x[e[:, 3]], x[e[:, 2]], x[e[:, 3]])
+
+
+def _rest_angles(solver):
+    """The rest angles of the solver's hinges, in its own (winding) convention."""
+    from uipc_warp.backend.finite_element.constitutions.discrete_shell_bending import (  # noqa: PLC0415
+        DiscreteShellBending,
+    )
+
+    elements = solver._scene.engine_inputs(solver._config, solver.model.device)["elements"]
+    return next(g for g in elements if isinstance(g, DiscreteShellBending)).params[3].numpy()
+
+
+def test_rest_shapes_from_tri_poses_and_edge_rest_angle(test, device):
+    """Newton's rest shapes, without gravity. A flat hinge whose edge_rest_angle is 0.6 folds until Newton's angle of
+    its row is 0.6, and the same with the row given in another order (o0's triangle running v2 -> v1) and the rest
+    angle that order measures (-0.6). A triangle whose tri_poses are scaled by 1 / 1.2 grows until its edges are 1.2
+    times as long. A curved sheet gets the same rest angles from its builder's rows as from the rows given by hand in
+    the other order. A hinge whose triangles run their edge the same way is refused."""
+    dt, flat = 0.01, np.array([[0.5, -1.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 1.0, 0.0]])
+    tris = [[0, 1, 2], [3, 2, 1]]  # (0, 1, 2) runs the edge 1 -> 2, (3, 2, 1) runs it 2 -> 1
+    folded = {}
+    for row, rest in (((0, 3, 1, 2), 0.6), ((3, 0, 1, 2), -0.6), ((0, 3, 2, 1), -0.6)):
+        with test.subTest(row=row):
+            builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+            _sheet(builder, flat, tris, [row], [rest])
+            model = builder.finalize(device=device)
+            solver = newton.solvers.SolverIPC(model, **_TIGHT)
+            s0, s1 = model.state(), model.state()
+            for _ in range(200):
+                solver.step(s0, s1, None, None, dt)
+                s0, s1 = s1, s0
+            test.assertAlmostEqual(float(_newton_angles(model, s0.particle_q.numpy())[0]), rest, delta=1e-4)
+            folded[row] = s0.particle_q.numpy()
+    for x in folded.values():
+        np.testing.assert_allclose(x, folded[(0, 3, 1, 2)], atol=1e-5)
+
+    x = np.array([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.03, 0.08, 0.0]])
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    _sheet(builder, x, [[0, 1, 2]])
+    model = builder.finalize(device=device)
+    model.tri_poses.assign(model.tri_poses.numpy() / 1.2)
+    solver = newton.solvers.SolverIPC(model, cloth_strain_rate=0.0, **_TIGHT)
+    s0, s1 = model.state(), model.state()
+    for _ in range(200):
+        solver.step(s0, s1, None, None, dt)
+        s0, s1 = s1, s0
+    y = s0.particle_q.numpy().astype(np.float64)
+    for a, b in ((0, 1), (1, 2), (2, 0)):
+        test.assertAlmostEqual(np.linalg.norm(y[b] - y[a]) / np.linalg.norm(x[b] - x[a]), 1.2, delta=1.2e-5)
+
+    # a 3 x 3 sheet bent around a cylinder; the same rows by hand with their opposite vertices swapped
+    u, v = np.meshgrid(np.linspace(0.0, 0.3, 4), np.linspace(0.0, 0.3, 4), indexing="ij")
+    curved = np.stack([0.5 * np.sin(u / 0.5), v, 0.5 * (1.0 - np.cos(u / 0.5))], axis=-1).reshape(-1, 3)
+    quads = [(4 * i + j, 4 * i + j + 4, 4 * i + j + 5, 4 * i + j + 1) for i in range(3) for j in range(3)]
+    sheet = [t for a, b, c, d in quads for t in ((a, b, c), (a, c, d))]
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    builder.add_cloth_mesh(
+        pos=wp.vec3(0.0, 0.0, 0.0),
+        rot=wp.quat_identity(),
+        scale=1.0,
+        vel=wp.vec3(0.0, 0.0, 0.0),
+        vertices=[wp.vec3(*p) for p in curved],
+        indices=[i for t in sheet for i in t],
+        density=0.1,
+        tri_ke=1.0e3,
+        tri_ka=1.0e3,
+        tri_kd=0.0,
+        edge_ke=1.0,
+        edge_kd=0.0,
+    )
+    given = builder.finalize(device=device)
+    rows = given.edge_indices.numpy().reshape(-1, 4)
+    rows = rows[(rows[:, 0] >= 0) & (rows[:, 1] >= 0)][:, [1, 0, 2, 3]]
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    _sheet(builder, curved, sheet, rows, edge_ke=1.0)
+    by_hand = builder.finalize(device=device)
+    angles = _rest_angles(newton.solvers.SolverIPC(given))
+    test.assertGreater(np.abs(angles).max(), 0.1)  # the edges along the cylinder's axis are folded (0.2 rad)
+    np.testing.assert_allclose(_rest_angles(newton.solvers.SolverIPC(by_hand)), angles, rtol=0.0, atol=1e-6)
+
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    _sheet(builder, flat, [[0, 1, 2], [3, 1, 2]], [(0, 3, 1, 2)], [0.0])
+    with test.assertRaisesRegex(ValueError, r"bending edge 0 \(particles 1 and 2.*the same direction"):
+        newton.solvers.SolverIPC(builder.finalize(device=device))
+
+
+def test_gravity_per_world(test, device):
+    """A global particle and body fall with the global world's gravity (the last entry of Model.gravity) and a
+    particle and body of world 0 with world 0's, as implicit Euler from rest. New gravities of both worlds, set with
+    set_gravity and notify_model_changed(MODEL_PROPERTIES) after a capture, take effect in its next replays."""
+    dt = 0.01
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -2.0))  # the global world's
+    bodies, particles = [], []
+    for local in (False, True):
+        if local:
+            builder.begin_world(gravity=(0.0, 0.0, -5.0))
+        x = 1.0 if local else 0.0
+        particles.append(builder.add_particle(wp.vec3(x, 0.0, 1.0), wp.vec3(0.0, 0.0, 0.0), 1.0, radius=0.01))
+        bodies.append(_box_body(builder, (x + 0.5, 0.0, 1.0), (0.05, 0.05, 0.05)))
+        if local:
+            builder.end_world()
+    model = builder.finalize(device=device)
+    np.testing.assert_array_equal(model.particle_world.numpy(), [-1, 0])
+    np.testing.assert_array_equal(model.body_world.numpy(), [-1, 0])
+    solver = newton.solvers.SolverIPC(model, **_TIGHT)
+    rows = [*particles, *solver._scene.layout().body_base[bodies]]  # the engine rows of their positions
+    x = np.concatenate([model.particle_q.numpy()[particles], model.body_q.numpy()[bodies, :3]]).astype(np.float64)
+    v = np.zeros_like(x)
+
+    def check(gravity, steps):
+        """Implicit Euler from the last state with the gravity of each entity's world, against the solver's."""
+        nonlocal x, v
+        g = np.array([gravity[-1], gravity[0], gravity[-1], gravity[0]])
+        for _ in range(steps):
+            v = v + g * dt
+            x = x + v * dt
+        np.testing.assert_allclose(solver._engine.positions()[rows], x, rtol=0.0, atol=1e-6)
+
+    s0, s1 = model.state(), model.state()
+    solver.step(s0, s1, None, None, dt)
+    check({-1: (0.0, 0.0, -2.0), 0: (0.0, 0.0, -5.0)}, 1)
+    with wp.ScopedCapture(device=device) as capture:
+        solver.step(s1, s0, None, None, dt)
+        solver.step(s0, s1, None, None, dt)
+    for _ in range(2):
+        wp.capture_launch(capture.graph)
+    check({-1: (0.0, 0.0, -2.0), 0: (0.0, 0.0, -5.0)}, 4)
+    model.set_gravity((1.0, 0.0, -3.0), world=-1)
+    model.set_gravity((0.0, 2.0, -1.0), world=0)
+    solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES)
+    for _ in range(2):
+        wp.capture_launch(capture.graph)
+    check({-1: (1.0, 0.0, -3.0), 0: (0.0, 2.0, -1.0)}, 4)
+
+
 @requires("uipc_warp")
 class TestSolverIPC(unittest.TestCase):
     pass
@@ -1238,6 +1784,86 @@ class TestSolverIPCInputs(unittest.TestCase):
         self.assertEqual(_version_mismatches("0.4.2", "1.19.3", None), [])
         for uipc_warp, warp in (("0.3.0", "1.19.0"), ("0.5.0", "1.19.0"), ("0.4.0", "1.20.0"), ("0.4.0", "1.18.1")):
             self.assertEqual(len(_version_mismatches(uipc_warp, warp, ">=1.19,<1.20")), 1, (uipc_warp, warp))
+
+    def test_import_names_missing_calls(self):
+        """Refuse a libuipc-warp that lacks a call the solver makes, naming it."""
+        import uipc_warp.arrays  # noqa: PLC0415
+
+        imported, contact_model = newton.solvers.SolverIPC._uipc_warp, uipc_warp.arrays.ArrayScene.contact_model
+        try:
+            newton.solvers.SolverIPC._uipc_warp = None
+            del uipc_warp.arrays.ArrayScene.contact_model
+            with self.assertRaisesRegex(ImportError, r"lacks ArrayScene\.contact_model"):
+                newton.solvers.SolverIPC._import_uipc_warp()
+        finally:
+            uipc_warp.arrays.ArrayScene.contact_model = contact_model
+            newton.solvers.SolverIPC._uipc_warp = imported
+
+    def test_contact_elements_match_shape_contact_pairs(self):
+        """On random models (collision groups -2 to 3, worlds -1 and 0, collide flags, friction coefficients, filter
+        pairs, shapes on one body), the shape pairs that SolverIPC's contact elements enable on different bodies are
+        exactly Model.shape_contact_pairs, with the mean of the two coefficients; particles meet the shapes with
+        COLLIDE_PARTICLES."""
+        from newton._src.solvers.ipc.solver_ipc import _colliding_shapes, _contact_elements  # noqa: PLC0415
+
+        rng = np.random.default_rng(7)
+        for trial in range(40):
+            builder = newton.ModelBuilder()
+
+            def shape(body, builder=builder):
+                cfg = newton.ModelBuilder.ShapeConfig(
+                    collision_group=int(rng.choice([-2, -1, 0, 1, 2, 3])),
+                    has_shape_collision=bool(rng.random() < 0.8),
+                    has_particle_collision=bool(rng.random() < 0.8),
+                    mu=float(rng.choice([0.2, 0.5])),
+                )
+                xform = wp.transform(wp.vec3(*rng.uniform(-1.0, 1.0, 3)), wp.quat_identity())
+                return builder.add_shape_box(body, xform=xform, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+
+            for local in (False, True):
+                if local:
+                    builder.begin_world()
+                for _ in range(int(rng.integers(0, 3))):
+                    shape(-1)
+                for _ in range(int(rng.integers(1, 4))):
+                    body = builder.add_body(xform=wp.transform(wp.vec3(*rng.uniform(-1.0, 1.0, 3)), wp.quat_identity()))
+                    for _ in range(int(rng.integers(1, 3))):
+                        shape(body)
+                if local:
+                    builder.end_world()
+            for _ in range(int(rng.integers(0, 4))):
+                a, b = rng.choice(builder.shape_count, 2, replace=False)
+                builder.add_shape_collision_filter_pair(int(a), int(b))
+            if trial % 2:
+                builder.add_particle(wp.vec3(0.0, 0.0, 3.0), wp.vec3(0.0, 0.0, 0.0), 1.0)
+            model = builder.finalize(device="cpu")
+            elements = _contact_elements(model)
+            body = model.shape_body.numpy()
+            mu = model.shape_material_mu.numpy().astype(np.float64)
+            shapes = np.flatnonzero(_colliding_shapes(model))
+            enabled = set()
+            for i in shapes:
+                for j in shapes[shapes > i]:
+                    e, f = elements.shape[i], elements.shape[j]
+                    if body[i] != body[j] and elements.enabled[e, f]:
+                        enabled.add((int(i), int(j)))
+                        self.assertAlmostEqual(elements.mu[e, f], 0.5 * (mu[i] + mu[j]), places=7)
+            listed = model.shape_contact_pairs
+            listed = set() if listed is None else {tuple(sorted(map(int, p))) for p in listed.numpy()}
+            self.assertEqual(enabled, listed, f"trial {trial}")
+            if model.particle_count:
+                flags = model.shape_flags.numpy()
+                p = elements.particle[0]
+                for i in shapes:
+                    self.assertEqual(
+                        bool(elements.enabled[p, elements.shape[i]]),
+                        bool(flags[i] & int(newton.ShapeFlags.COLLIDE_PARTICLES)),
+                    )
+
+
+@requires("uipc_warp")
+class TestSolverIPCContact(unittest.TestCase):
+    """Which pairs collide, with which friction and at which distance."""
 
 
 @requires("uipc_warp")
@@ -1286,7 +1912,7 @@ add_function_test(
 
 
 for name, func in (
-    ("test_rejects_springs", test_rejects_springs),
+    ("test_rejects_springs_without_a_libuipc_form", test_rejects_springs_without_a_libuipc_form),
     ("test_rejects_attachments", test_rejects_attachments),
     ("test_rejects_mimic_constraints", test_rejects_mimic_constraints),
     ("test_rejects_equality_constraints", test_rejects_equality_constraints),
@@ -1296,14 +1922,24 @@ for name, func in (
     ("test_rejects_joints_and_drives", test_rejects_joints_and_drives),
     ("test_rejects_gradients", test_rejects_gradients),
     ("test_rejects_worlds", test_rejects_worlds),
-    ("test_rejects_contact_filters", test_rejects_contact_filters),
-    ("test_particle_only_shapes_without_particles", test_particle_only_shapes_without_particles),
     ("test_rejects_surface_velocity", test_rejects_surface_velocity),
     ("test_rejects_intersecting_start", test_rejects_intersecting_start),
     ("test_rejects_start_in_contact", test_rejects_start_in_contact),
     ("test_external_forces_match_closed_form", test_external_forces_match_closed_form),
 ):
     add_function_test(TestSolverIPCInputs, name, func, devices=devices)
+for name, func in (
+    ("test_friction_of_each_pair", test_friction_of_each_pair),
+    ("test_ramp_sticks_and_slips", test_ramp_sticks_and_slips),
+    ("test_excluded_pairs_never_collide", test_excluded_pairs_never_collide),
+    ("test_particle_only_shapes", test_particle_only_shapes),
+    ("test_inactive_particles_do_not_collide", test_inactive_particles_do_not_collide),
+    ("test_rest_heights_follow_radius_and_margin", test_rest_heights_follow_radius_and_margin),
+    ("test_springs_oscillate_as_implicit_euler", test_springs_oscillate_as_implicit_euler),
+    ("test_heightfield_triangles_and_rest", test_heightfield_triangles_and_rest),
+    ("test_rest_shapes_from_tri_poses_and_edge_rest_angle", test_rest_shapes_from_tri_poses_and_edge_rest_angle),
+):
+    add_function_test(TestSolverIPCContact, name, func, devices=devices)
 for name, func in (
     ("test_contact_at_start_fails", test_contact_at_start_fails),
     ("test_check_status", test_check_status),
@@ -1312,6 +1948,7 @@ for name, func in (
     ("test_teleport_equals_fresh_solver", test_teleport_equals_fresh_solver),
     ("test_reset_inside_captured_graph", test_reset_inside_captured_graph),
     ("test_notify_updates_gravity_and_inertia_in_place", test_notify_updates_gravity_and_inertia_in_place),
+    ("test_gravity_per_world", test_gravity_per_world),
 ):
     add_function_test(TestSolverIPCStep, name, func, devices=devices)
 

@@ -1,0 +1,1 @@
+Add height fields to ``SolverIPC``: a static ``GeoType.HFIELD`` shape becomes a fixed, open triangle mesh with the triangles of Newton's own height-field collision, two per grid cell, with the shape's scale and transform.

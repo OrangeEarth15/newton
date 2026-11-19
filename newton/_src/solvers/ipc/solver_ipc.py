@@ -399,7 +399,6 @@ def _check_supported(model: Model) -> None:
     if model.requires_grad:
         raise NotImplementedError("SolverIPC does not support gradients (model.requires_grad=True).")
     for name, count in (
-        ("springs", model.spring_count),
         ("particle-body attachments", model.attachment_particle_body_count),
         ("tendons", model.tendon_count + model.custom_frequency_counts.get("mujoco:tendon", 0)),
         ("muscles", model.muscle_count),
@@ -438,9 +437,28 @@ def _check_supported(model: Model) -> None:
                     f"{JointTargetMode(int(mode[driven[0]])).name}. Free joints take Control.joint_f only "
                     "(JointTargetMode.NONE or EFFORT)."
                 )
+    _check_springs(model)
     _check_one_world(model)
-    _check_unfiltered(model)
     _check_surface_velocity(model)
+
+
+def _check_springs(model: Model) -> None:
+    """Springs that libuipc's Hookean spring represents: no damping (libuipc has no damping element), a rest length
+    above 0 (its energy divides by the rest length) and a stiffness that is not negative."""
+    if model.spring_count == 0:
+        return
+    for name, array, bad, why in (
+        ("damping", model.spring_damping, lambda v: v != 0.0, "libuipc's springs have no damping"),
+        ("rest length", model.spring_rest_length, lambda v: ~(v > 0.0), "libuipc's spring energy divides by it"),
+        ("stiffness", model.spring_stiffness, lambda v: ~(v >= 0.0), "it must not be negative"),
+    ):
+        values = array.numpy()
+        found = np.flatnonzero(bad(values))
+        if len(found):
+            k = int(found[0])
+            raise NotImplementedError(
+                f"SolverIPC does not simulate spring {k}, whose {name} is {float(values[k])!r}: {why}."
+            )
 
 
 def _check_one_world(model: Model) -> None:
@@ -462,28 +480,167 @@ def _check_one_world(model: Model) -> None:
         )
 
 
-def _check_unfiltered(model: Model) -> None:
-    """Every shape that collides collides with every shape on another body and with every particle, as in the
-    solver's single contact space."""
-    if model.shape_count == 0:
-        return
-    flags = model.shape_flags.numpy()
-    colliding = _colliding_shapes(model)
-    shapes_only = np.flatnonzero(colliding & ((flags & int(ShapeFlags.COLLIDE_PARTICLES)) == 0))
-    if model.particle_count and len(shapes_only):
-        raise NotImplementedError(
-            f"SolverIPC collides every shape with the particles; shape {int(shapes_only[0])} has "
-            "ShapeFlags.COLLIDE_SHAPES without COLLIDE_PARTICLES."
+def _compatible_groups(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Newton's collision-group rule for two shapes that take part in shape contact (``shape_contact_pairs.py``): a
+    positive group meets itself and every negative group, a negative group every group but itself. A shape of group 0
+    takes part in no shape pair."""
+    return np.where(a > 0, (a == b) | (b < 0), a != b) & (a != 0) & (b != 0)
+
+
+def _compatible_worlds(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """A global entity (world -1) meets every world, a local one its own world only."""
+    return (a == b) | (a == -1) | (b == -1)
+
+
+@dataclass
+class _ContactElements:
+    """libuipc contact elements for a model and the contact model of every pair of them (class docstring,
+    **Contact**). Element 0 is libuipc's default element; it holds no vertex."""
+
+    shape: np.ndarray  # (shape_count,): the element of every shape the solver triangulates, -1 for the others
+    particle: np.ndarray  # (particle_count,): the element of every particle
+    on_mesh: np.ndarray  # (particle_count,): the particles of cloth and tetrahedra
+    enabled: np.ndarray  # (count, count): whether the two elements collide
+    mu: np.ndarray  # (count, count): their friction coefficient
+
+    @property
+    def count(self) -> int:
+        return len(self.enabled)
+
+
+# libuipc-warp's engine refuses contact tables of more elements (a dense mask of contact x subscene elements)
+_MAX_CONTACT_ELEMENTS = 2048
+
+
+def _contact_elements(model: Model) -> _ContactElements:
+    """The contact elements of a model's shapes and particles and the models of their pairs, checked against
+    :attr:`Model.shape_contact_pairs`.
+
+    Shapes that Newton's rules cannot tell apart share an element: their signature is the collision group, the world,
+    the two collide flags and the friction coefficient. A shape in a filter pair that would otherwise collide gets an
+    element of its own, since the pair excludes two shapes and not two classes of them. The particles take three
+    elements: those in no triangle and no tetrahedron, active (``P_free``) or not (``P_off``), and the vertices of
+    cloth and tetrahedra (``P_surf``). Raises ``NotImplementedError`` when the shape pairs the elements enable on
+    different bodies are not exactly ``Model.shape_contact_pairs`` (a pair array assigned to the model), or when there
+    are more elements than the engine takes.
+    """
+    ns, n_particles = model.shape_count, model.particle_count
+    shape_element = np.full(ns, -1, np.int64)
+    classes = 0
+    if ns:
+        flags = model.shape_flags.numpy()
+        group = model.shape_collision_group.numpy().astype(np.int64)
+        world = model.shape_world.numpy().astype(np.int64)
+        body = model.shape_body.numpy().astype(np.int64)
+        shape_mu = model.shape_material_mu.numpy().astype(np.float32)
+        hits_shapes = (flags & int(ShapeFlags.COLLIDE_SHAPES)) != 0
+        hits_particles = (flags & int(ShapeFlags.COLLIDE_PARTICLES)) != 0
+        takes_part = hits_shapes & (group != 0)
+        # the filter pairs that remove a pair Newton's other rules let collide (_ShapeContactPairs._active_filters)
+        filters = np.asarray(model.shape_collision_filter_pairs_array(), np.int64).reshape(-1, 2)
+        fa, fb = filters[:, 0], filters[:, 1]
+        effective = (
+            takes_part[fa]
+            & takes_part[fb]
+            & (body[fa] != body[fb])
+            & _compatible_worlds(world[fa], world[fb])
+            & _compatible_groups(group[fa], group[fb])
         )
-    _, per_body = np.unique(model.shape_body.numpy()[colliding], return_counts=True)
-    n = int(per_body.sum())
-    pairs = n * (n - 1) // 2 - int((per_body * (per_body - 1) // 2).sum())
-    if model.shape_contact_pair_count != pairs:
+        filters = filters[effective]
+        own = np.full(ns, -1, np.int64)
+        own[filters.reshape(-1)] = filters.reshape(-1)
+        colliding = np.flatnonzero(_colliding_shapes(model))
+        signature = np.stack(
+            [group, world, hits_shapes, hits_particles, shape_mu.view(np.int32).astype(np.int64), own], axis=1
+        )[colliding]
+        _, first, inverse = np.unique(signature, axis=0, return_index=True, return_inverse=True)
+        order = np.argsort(first)  # classes numbered in the order of their first shapes
+        rank = np.empty_like(order)
+        rank[order] = np.arange(len(order))
+        shape_class = rank[inverse.reshape(-1)]
+        shape_element[colliding] = 1 + shape_class
+        classes = len(first)
+        rep = colliding[first[order]]  # one shape of each class
+    count = 1 + classes + (3 if n_particles else 0)
+    if count > _MAX_CONTACT_ELEMENTS:
         raise NotImplementedError(
-            "SolverIPC does not filter contacts: every colliding shape collides with every colliding shape on "
-            f"another body ({pairs} pairs), but Model.shape_contact_pairs has {model.shape_contact_pair_count}; "
-            "collision groups, filter pairs or, in a model with particles, shapes with "
-            "ShapeFlags.COLLIDE_PARTICLES only exclude some."
+            f"SolverIPC needs {count} contact elements for this model (one per class of shapes that collide alike, "
+            f"one per shape in a filter pair), more than libuipc-warp's engine takes ({_MAX_CONTACT_ELEMENTS})."
+        )
+    enabled = np.zeros((count, count), bool)
+    mu = np.zeros((count, count))
+    shapes = slice(1, 1 + classes)
+    if classes:
+        g, w, m = group[rep], world[rep], shape_mu[rep].astype(np.float64)
+        part = takes_part[rep]
+        pairs = (
+            part[:, None]
+            & part[None, :]
+            & _compatible_groups(g[:, None], g[None, :])
+            & _compatible_worlds(w[:, None], w[None, :])
+        )
+        cls = shape_element - 1
+        pairs[cls[filters[:, 0]], cls[filters[:, 1]]] = False
+        pairs[cls[filters[:, 1]], cls[filters[:, 0]]] = False
+        enabled[shapes, shapes] = pairs
+        mu[shapes, shapes] = 0.5 * (m[:, None] + m[None, :])
+        _check_shape_pairs(model, colliding, shape_class, body[colliding], pairs)
+    particle_element = np.zeros(n_particles, np.int64)
+    on_mesh = np.zeros(n_particles, bool)
+    if n_particles:
+        p_free, p_surf, p_off = 1 + classes, 2 + classes, 3 + classes
+        for cells in (model.tri_indices, model.tet_indices):
+            if cells is not None and len(cells):
+                on_mesh[cells.numpy().reshape(-1)] = True
+        active = (model.particle_flags.numpy() & int(ParticleFlags.ACTIVE)) != 0
+        particle_element = np.where(on_mesh, p_surf, np.where(active, p_free, p_off))
+        # particles meet the shapes that collide with particles, in the solver's one world
+        for p in (p_free, p_surf):
+            if classes:
+                enabled[p, shapes] = enabled[shapes, p] = hits_particles[rep]
+                mu[p, shapes] = mu[shapes, p] = 0.5 * (model.soft_contact_mu + m)
+        # particles are spheres to each other where Newton's particle solvers collide them; finite elements always
+        # collide with themselves and with each other
+        spheres = n_particles > 1 and model.particle_max_radius > 0.0
+        enabled[p_free, p_free] = enabled[p_free, p_surf] = enabled[p_surf, p_free] = spheres
+        enabled[p_surf, p_surf] = True
+        mu[p_free : p_surf + 1, p_free : p_surf + 1] = model.particle_mu
+    return _ContactElements(shape_element, particle_element, on_mesh, enabled, mu)
+
+
+def _check_shape_pairs(
+    model: Model, shapes: np.ndarray, shape_class: np.ndarray, shape_body: np.ndarray, enabled: np.ndarray
+) -> None:
+    """Raise unless the shape classes and their ``enabled`` pairs give exactly ``Model.shape_contact_pairs``: every
+    listed pair enabled, and as many enabled pairs of shapes on different bodies (static shapes on body -1) as listed.
+    ``shapes`` are the shapes the solver triangulates, ``shape_class`` and ``shape_body`` theirs."""
+    cls = np.full(model.shape_count, -1, np.int64)
+    cls[shapes] = shape_class
+    listed = model.shape_contact_pairs
+    listed = np.zeros((0, 2), np.int64) if listed is None else listed.numpy().reshape(-1, 2).astype(np.int64)
+    a, b = cls[listed[:, 0]], cls[listed[:, 1]]
+    missing = np.flatnonzero((a < 0) | (b < 0) | ~enabled[np.maximum(a, 0), np.maximum(b, 0)])
+    sizes = np.bincount(shape_class, minlength=len(enabled)).astype(np.int64)
+    upper = np.triu(enabled, 1)
+    count = int((upper * np.outer(sizes, sizes)).sum() + (np.diag(enabled) * sizes * (sizes - 1) // 2).sum())
+    # less the pairs of shapes on one body
+    entries, n = np.unique(np.stack([shape_body, shape_class], axis=1), axis=0, return_counts=True)
+    count -= int((np.diag(enabled)[entries[:, 1]] * n * (n - 1) // 2).sum())
+    starts = np.flatnonzero(np.r_[True, entries[1:, 0] != entries[:-1, 0]])
+    for s, e in zip(starts, np.r_[starts[1:], len(entries)], strict=True):
+        if e - s > 1:
+            c, k = entries[s:e, 1], n[s:e]
+            count -= int((upper[np.ix_(c, c)] * np.outer(k, k)).sum())
+    if len(missing) or count != model.shape_contact_pair_count:
+        detail = (
+            f"shapes {int(listed[missing[0], 0])} and {int(listed[missing[0], 1])} are listed but not in it"
+            if len(missing)
+            else f"they give {count} pairs, Model.shape_contact_pairs lists {model.shape_contact_pair_count}"
+        )
+        raise NotImplementedError(
+            "SolverIPC collides the shapes that Newton's collision groups, worlds, collide flags and filter pairs "
+            f"let collide, which must be Model.shape_contact_pairs: {detail}. A pair array assigned to the model is "
+            "not supported."
         )
 
 
@@ -552,9 +709,77 @@ def _shape_mesh(model: Model, s: int, segments: int) -> tuple[np.ndarray, np.nda
     elif t in (GeoType.MESH, GeoType.CONVEX_MESH):
         src = model.shape_source[s]
         return _weld(np.asarray(src.vertices, np.float64) * sc, np.asarray(src.indices))
+    elif t == GeoType.HFIELD:
+        return _heightfield_mesh(model, s)
     else:
         raise NotImplementedError(f"SolverIPC does not support shape {s} of type {GeoType(t).name}.")
     return _weld(mesh.vertices, mesh.indices)
+
+
+def _heightfield_mesh(model: Model, s: int) -> tuple[np.ndarray, np.ndarray]:
+    """The collision triangles of height field shape ``s`` in its frame, as Newton's narrow phase makes them
+    (``get_triangle_shape_from_heightfield``): sample ``(r, c)`` at ``x = -hx + c dx``, ``y = -hy + r dy``,
+    ``z = min_z + h (max_z - min_z)``, every cell ``(r, c)`` split into ``(p00, p10, p11)`` and ``(p00, p11, p01)``,
+    from :attr:`~newton.Model.heightfield_data`, whose extents carry the shape's scale. An open surface; none for a
+    field of fewer than two rows or columns, which Newton's collision ignores too."""
+    field = model.heightfield_data.numpy()[int(model.shape_heightfield_index.numpy()[s])]
+    nrow, ncol, start = int(field["nrow"]), int(field["ncol"]), int(field["data_offset"])
+    if nrow < 2 or ncol < 2:
+        return np.zeros((0, 3)), np.zeros((0, 3), np.int64)
+    hx, hy, min_z, max_z = (float(field[k]) for k in ("hx", "hy", "min_z", "max_z"))
+    h = model.heightfield_elevations.numpy()[start : start + nrow * ncol].astype(np.float64).reshape(nrow, ncol)
+    y, x = np.meshgrid(np.linspace(-hy, hy, nrow), np.linspace(-hx, hx, ncol), indexing="ij")
+    v = np.stack([x, y, min_z + h * (max_z - min_z)], axis=-1).reshape(-1, 3)
+    r, c = np.meshgrid(np.arange(nrow - 1), np.arange(ncol - 1), indexing="ij")
+    p00, p10 = r * ncol + c, r * ncol + c + 1
+    p01, p11 = p00 + ncol, p10 + ncol
+    f = np.stack([np.stack([p00, p10, p11], -1), np.stack([p00, p11, p01], -1)], axis=2).reshape(-1, 3)
+    return v, f.astype(np.int64)
+
+
+def _winding_signs(tris: np.ndarray, rows: np.ndarray, names: np.ndarray) -> np.ndarray:
+    """For bending edge rows ``(o0, o1, v1, v2)``: 1 where the triangle ``(o0, v1, v2)`` of ``tris`` runs the edge
+    ``v1 -> v2``, -1 where it runs ``v2 -> v1``.
+
+    Newton's rest angle of a row is the signed angle between the normals of ``(o0, v1, v2)`` and ``(o1, v2, v1)`` about
+    ``v2 - v1`` (``edge_rest_angle``). Where ``o0``'s triangle runs ``v1 -> v2``, as in every row of ``MeshAdjacency``,
+    these are the normals by the triangles' winding and the angle is the one libuipc takes; where it runs
+    ``v2 -> v1``, both normals are reversed and the angle is its negative. Raises ``ValueError``, naming the edge by
+    its row in ``names``, for a row whose triangles are not among ``tris`` or run its edge the same way, which has no
+    angle by the winding.
+    """
+    record = [("a", np.int64), ("b", np.int64), ("c", np.int64)]
+
+    def keys(t):
+        return np.ascontiguousarray(np.sort(np.asarray(t, np.int64), axis=1)).view(record).reshape(-1)
+
+    table = keys(tris)
+    order = np.argsort(table, kind="stable")
+    v1, v2 = rows[:, 2], rows[:, 3]
+
+    def runs_forward(opposite):
+        """Whether the triangle of ``opposite`` and the edge runs ``v1 -> v2``, and whether there is one."""
+        wanted = keys(np.stack([opposite, v1, v2], axis=1))
+        at = np.minimum(np.searchsorted(table[order], wanted), len(order) - 1)
+        found = table[order[at]] == wanted
+        t = tris[order[at]]
+        return np.any((t == v1[:, None]) & (np.roll(t, -1, axis=1) == v2[:, None]), axis=1), found
+
+    forward0, found0 = runs_forward(rows[:, 0])
+    forward1, found1 = runs_forward(rows[:, 1])
+    for bad, why in (
+        (~(found0 & found1), "names opposite particles whose triangles with the edge are not both cloth triangles"),
+        (forward0 == forward1, "has two triangles that run the edge in the same direction, so the edge has no rest "
+         "angle by their winding; wind the cloth's triangles consistently"),
+    ):  # fmt: skip
+        k = np.flatnonzero(bad)
+        if len(k):
+            r = rows[k[0]]
+            raise ValueError(
+                f"SolverIPC: bending edge {int(names[k[0]])} (particles {int(r[2])} and {int(r[3])}, opposite "
+                f"{int(r[0])} and {int(r[1])}) {why}."
+            )
+    return np.where(forward0, 1.0, -1.0)
 
 
 def _closed_volume(v: np.ndarray, f: np.ndarray) -> float:
@@ -580,61 +805,76 @@ class SolverIPC(SolverBase):
 
     Supported model content:
 
-    - particles and tetrahedra. Elasticity is the SNK1 stable Neo-Hookean
+    - particles (a particle on no cloth or tetrahedron is a sphere of its
+      radius, see **Contact**) and tetrahedra. Elasticity is the SNK1 stable Neo-Hookean
       model with Lamé parameters ``tet_materials[:, 0]`` (``k_mu``) and
       ``tet_materials[:, 1]`` (``k_lambda``). ``k_damp`` is ignored.
     - cloth: triangles of :attr:`~newton.Model.tri_indices` that are not on a
       tetrahedral body become libuipc's strain-limiting Baraff-Witkin membrane,
       and bending edges of :attr:`~newton.Model.edge_indices` become
       discrete-shell hinges (see the mapping below).
+    - springs between particles: libuipc's Hookean springs with Newton's
+      energy :math:`\\tfrac{1}{2} k_e (l - L_0)^2` (``spring_stiffness``,
+      ``spring_rest_length``). A spring adds no contact primitive: the
+      particles it joins collide as other particles do.
     - rigid bodies with box, sphere, capsule, cylinder, cone, ellipsoid or mesh
       collision shapes become affine bodies (see below).
     - contact against static plane shapes, each treated as an infinite half
       space, and against other static shapes, which become fixed triangle
-      meshes.
+      meshes; a height field with Newton's collision triangles, two per cell
+      of its grid (an open surface, as Newton's).
     - contact between all of these: point-triangle and edge-edge barriers with
-      continuous collision detection. Each connected group of tetrahedra or
-      cloth triangles is one body and collides with itself (as finite elements
-      do in libuipc), so ``d_hat`` must stay below the spacing of
-      non-adjacent surface primitives at rest, as the default ``d_hat`` does
-      (see the note below). A rigid body does not collide with itself.
+      continuous collision detection, between the pairs that Newton's
+      collision groups, worlds, collide flags and filter pairs let collide,
+      with the friction of the two materials (see **Contact** below). Each
+      connected group of tetrahedra or cloth triangles is one body and
+      collides with itself (as finite elements do in libuipc), so ``d_hat``
+      must stay below the spacing of non-adjacent surface primitives at rest,
+      as the default ``d_hat`` does (see the note below). A rigid body does
+      not collide with itself.
     - kinematic particles (zero mass or not :attr:`~newton.ParticleFlags.ACTIVE`)
       and kinematic bodies (:attr:`~newton.BodyFlags.KINEMATIC` or zero mass).
       They follow the poses written to ``state_in`` every step; the jump is not
-      swept by collision detection.
+      swept by collision detection. A particle that is not active and on no
+      cloth or tetrahedron collides with nothing, as in Newton.
     - external forces: :attr:`~newton.State.particle_f`, :attr:`~newton.State.body_f`
       and the :attr:`~newton.Control.joint_f` of free joints, held constant over
       the step as libuipc holds its external forces (a constant acceleration in
       the implicit-Euler prediction). A body wrench acts at the centre of mass;
       its torque does work on the rotations of the affine body and none on its
       stretch.
-    - one gravity vector, the same for all worlds.
-    - lagged friction on every contact, with one coefficient ``friction_mu``.
+    - gravity per world: a particle or body falls with the
+      :attr:`~newton.Model.gravity` of its world, a global one with the
+      global world's (the last entry).
+    - lagged friction on every contact.
 
     Not supported, and rejected when the solver is constructed:
-    :class:`NotImplementedError` for springs, particle-body attachments, mimic
+    :class:`NotImplementedError` for springs with damping (libuipc has no
+    damping element), a rest length of 0 or a negative stiffness,
+    particle-body attachments, mimic
     and equality constraints, tendons, muscles, non-zero triangle or
     tetrahedron activations, joints other than the free joints that
     :meth:`~newton.ModelBuilder.add_body` creates, drive targets on those free
     joints (only :class:`~newton.JointTargetMode` ``NONE`` and ``EFFORT``),
     gradients (``model.requires_grad``), content in more than one world (the
-    solver has one contact space and one Newton solve), contact filtering (a
-    collision group, a filter pair, or, in a model with particles, a shape that
-    collides only with shapes or only with particles: every colliding shape
-    collides with everything; in a model without particles, a shape that
-    collides with particles only collides with nothing),
+    solver has one contact space and one Newton solve), a
+    :attr:`~newton.Model.shape_contact_pairs` array assigned to the model, more
+    contact elements than the engine takes (see **Contact** below),
     collision meshes with a surface velocity (``Mesh.enable_surface_velocity``,
     which the solver's own contacts would ignore), and a CPU device.
-    Height-field and SDF shapes and planes attached to bodies raise when the
-    shapes are triangulated. The ``contacts`` argument of
+    Gaussian shapes and planes attached to bodies raise when the shapes are
+    triangulated. The ``contacts`` argument of
     :meth:`step` is not used: the solver detects its own contacts.
 
-    Not read: per-shape friction and contact stiffness and
-    :attr:`~newton.Model.particle_radius` (the arguments ``friction_mu``,
-    ``kappa`` and ``thickness`` hold for all of them), damping coefficients,
-    drag, lift, :attr:`~newton.Model.tri_poses` and
-    :attr:`~newton.Model.edge_rest_angle` (see below), the activations of a
-    :class:`~newton.Control`, and ``joint_q`` (not written).
+    Not read: the penalty contact parameters of shapes and particles
+    (``ke``, ``kd``, ``kf``, ``ka``, ``particle_cohesion`` and
+    ``particle_adhesion``: ``kappa`` holds for every pair), restitution,
+    torsional and rolling friction, ``shape_material_mu_static``,
+    ``shape_gap`` (``d_hat`` is the solver's detection distance), the
+    :attr:`~newton.Model.particle_radius` of cloth and tetrahedron vertices
+    (see **Contact** below), damping coefficients,
+    ``spring_control``, drag, lift, ``edge_rest_length`` (see below), the
+    activations of a :class:`~newton.Control`, and ``joint_q`` (not written).
 
     **Cloth parameters.** libuipc-warp's membrane energy per rest area is
 
@@ -665,11 +905,61 @@ class SolverIPC(SolverBase):
     :math:`\\bar h = (A_1 + A_2) / (3 L_0)` from the two rest triangle areas, so
     each hinge gets :math:`\\kappa = k_e \\bar h / 2`. Particle masses are used as
     they are. The damping coefficients ``tri_kd`` and ``edge_kd``, drag and
-    lift are ignored: implicit Euler supplies the only damping. Rest shapes
-    (the membrane's rest frames, rest lengths and rest angles) are taken from
-    :attr:`~newton.Model.particle_q`, as libuipc takes them from the rest
-    geometry; Newton's ``tri_poses`` and ``edge_rest_angle`` are not read, so a
-    cloth built in a deformed state rests in that state.
+    lift are ignored: implicit Euler supplies the only damping.
+
+    Rest shapes are Newton's. A membrane triangle's rest edges are the inverse
+    of its :attr:`~newton.Model.tri_poses` (the edges in the triangle's frame
+    whose first axis runs along its first edge), laid into the plane of the
+    triangle at :attr:`~newton.Model.particle_q`, first edge along first edge,
+    where it takes libuipc's material axes. A hinge's rest angle is its
+    :attr:`~newton.Model.edge_rest_angle`, the signed angle between the normals
+    of ``(o0, v1, v2)`` and ``(o1, v2, v1)`` for the row ``(o0, o1, v1, v2)``:
+    libuipc's angle by the winding of the two triangles where ``o0``'s
+    triangle runs ``v1 -> v2``, as in the rows Newton's cloth builders make,
+    and its negative where a row given by hand has ``o0``'s triangle run
+    ``v2 -> v1``. A row whose two triangles run the edge the same way raises
+    :class:`ValueError`. The hinges keep the rest lengths and areas of
+    ``particle_q`` (libuipc's :math:`L_0` and :math:`\\bar h`) where Newton's VBD
+    takes ``edge_rest_length``; for a rest shape equal to the start the two
+    agree.
+
+    **Contact.** Which pairs collide, and with which friction, is libuipc's
+    contact tabular: every vertex and half plane is in a contact element, and
+    every pair of elements has a friction coefficient and a switch. Shapes that
+    Newton's rules cannot tell apart share an element (the same collision
+    group, world, collide flags and friction coefficient); a shape in a filter
+    pair gets one of its own. Free particles (in no triangle and no
+    tetrahedron) are in one element, or in another one that collides with
+    nothing when they are not :attr:`~newton.ParticleFlags.ACTIVE`, and the
+    vertices of cloth and tetrahedra in a third. Two shapes collide as
+    :attr:`~newton.Model.shape_contact_pairs` says: both collide with shapes,
+    their collision groups and worlds are compatible and they are not a filter
+    pair; shapes of one body never collide, and the solver checks at
+    construction that its pairs are exactly the model's. A particle collides
+    with a shape that has :attr:`~newton.ShapeFlags.COLLIDE_PARTICLES`, two
+    free particles or a free particle and a cloth or tetrahedron vertex
+    collide when the model has more than one particle and a positive
+    :attr:`~newton.Model.particle_max_radius` (as Newton's particle solvers
+    decide), and cloth and tetrahedra always collide with themselves and with
+    each other. The friction of two shapes is the arithmetic mean of their
+    :attr:`~newton.Model.shape_material_mu`, of a particle and a shape the mean
+    of :attr:`~newton.Model.soft_contact_mu` and the shape's, and of two
+    particles :attr:`~newton.Model.particle_mu`, as in Newton's semi-implicit,
+    Featherstone and XPBD solvers. The engine takes at most 2048 elements.
+
+    Contact thickness, libuipc's distance at which the barrier diverges: a
+    free particle is a sphere of its :attr:`~newton.Model.particle_radius`, so
+    it rests its radius above a shape and two free particles rest the sum of
+    their radii apart; a shape's vertices take its
+    :attr:`~newton.Model.shape_margin` (a static plane's surface is moved out
+    by it), so that two shapes rest the sum of their margins apart, as
+    Newton's margins add up; and the vertices of cloth and tetrahedra take the
+    solver's ``thickness`` argument. libuipc gives a vertex's thickness to
+    every edge and triangle it is on, and finite elements collide with
+    themselves, so a cloth vertex of radius r would keep the cloth's
+    non-adjacent triangles and any other cloth 2r away: Newton's radii are
+    sphere radii, often larger than the spacing of a cloth, and Newton's cloth
+    solvers do not use them for cloth self-contact either.
 
     **Rigid bodies.** Each Newton body becomes a libuipc affine body with 12
     degrees of freedom :math:`q = (p, a_1, a_2, a_3)`, the translation and the
@@ -746,12 +1036,13 @@ class SolverIPC(SolverBase):
 
     Args:
         model: The model to simulate.
-        kappa: Barrier stiffness [Pa], libuipc's contact resistance.
+        kappa: Barrier stiffness [Pa], libuipc's contact resistance, of every contact pair.
         d_hat: Barrier activation distance [m]. ``None`` takes libuipc's
             0.01 m, or less for a model with small colliding features (see
             the note below).
-        thickness: Contact thickness of every particle [m]; rigid-body and
-            static-shape vertices have none, as in libuipc.
+        thickness: Contact thickness of the vertices of cloth and tetrahedra
+            [m]; free particles take their radius and shapes their margin
+            (see **Contact**).
         newton_max_iter: Maximum Newton iterations per step.
         newton_velocity_tol: Newton convergence tolerance on ``max |dx| / dt`` [m/s].
         newton_transrate_tol: Newton convergence tolerance on ``max |dA| / dt`` of
@@ -761,7 +1052,6 @@ class SolverIPC(SolverBase):
         semi_implicit: Enable libuipc's semi-implicit early exit after
             ``semi_implicit_k_min`` iterations of full feasible steps.
         semi_implicit_k_min: Newton iterations before the early exit applies.
-        friction_mu: Friction coefficient of every contact; 0 disables friction.
         eps_velocity: Friction smoothing velocity [m/s]; below it static friction becomes a stiff spring.
         cloth_strain_rate: Strain-limiting coefficient :math:`\\eta` of the cloth
             membrane (libuipc's default 100); 0 makes the membrane quadratic.
@@ -796,9 +1086,10 @@ class SolverIPC(SolverBase):
         bodies cross each other, or are at or inside their contact thickness (up
         to the rounding of float32 positions), in the model's state, the solver
         raises :class:`ValueError` at construction and names the closest pair,
-        as libuipc's sanity check rejects such a scene at init. Surfaces that
-        never move may touch or cross; the inside of a body is not checked, nor
-        two particles that are on no cloth or tetrahedron. A gap inside
+        as libuipc's sanity check rejects such a scene at init. The thickness of
+        a pair is the sum of its two sides' (see **Contact**). Surfaces that
+        never move may touch or cross, and pairs that do not collide may
+        overlap; the inside of a body is not checked. A gap inside
         ``d_hat`` is valid, but there the barrier starts compressed and pushes
         the surfaces apart in the first steps. The check compares the bodies
         whose bounding boxes come that close, every primitive of one against
@@ -904,7 +1195,6 @@ class SolverIPC(SolverBase):
         line_search_max_iter: int = 8,
         semi_implicit: bool = True,
         semi_implicit_k_min: int = 6,
-        friction_mu: float = 0.5,
         eps_velocity: float = 0.01,
         cloth_strain_rate: float = 100.0,
         body_kappa: float = 1.0e8,
@@ -926,7 +1216,6 @@ class SolverIPC(SolverBase):
             line_search_max_iter=line_search_max_iter,
             semi_implicit=semi_implicit,
             semi_implicit_k_min=semi_implicit_k_min,
-            friction_mu=friction_mu,
             eps_velocity=eps_velocity,
         )
         self._thickness = float(thickness)
@@ -947,14 +1236,25 @@ class SolverIPC(SolverBase):
         try:
             import uipc_warp  # noqa: PLC0415
             import uipc_warp.arrays  # noqa: PLC0415
+            import uipc_warp.validation  # noqa: PLC0415
             from uipc_warp.backend.external_force import external_acceleration  # noqa: PLC0415
         except ImportError as e:
             raise ImportError(
                 "SolverIPC requires the libuipc-warp package: pip install git+https://github.com/OrangeEarth15/libuipc-warp"
             ) from e
         version = getattr(uipc_warp, "__version__", "0")
-        if not hasattr(uipc_warp.arrays, "write_frame_status"):
-            raise ImportError(f"SolverIPC requires libuipc-warp 0.4 or newer; the installed one is {version}.")
+        # the newest calls of each kind the solver makes: the frame status, the contact tabular, the start check
+        needed = (
+            (uipc_warp.arrays, "write_frame_status"),
+            (uipc_warp.arrays.ArrayScene, "contact_model"),
+            (uipc_warp.validation.SurfaceChecker, "min_gap"),
+        )
+        missing = [f"{owner.__name__}.{name}" for owner, name in needed if not hasattr(owner, name)]
+        if missing:
+            raise ImportError(
+                f"SolverIPC requires libuipc-warp 0.4 or newer with {', '.join(f'{o.__name__}.{n}' for o, n in needed)};"
+                f" the installed one ({version}) lacks {', '.join(missing)}."
+            )
         # write_frame_status writes libuipc-warp's FrameStatusFlags into the status arrays: the same bits under the
         # same names, but for the CCD bit, which libuipc-warp names after the time of impact
         flags = {int(flag): flag.name for flag in uipc_warp.arrays.FrameStatusFlags}
@@ -984,28 +1284,31 @@ class SolverIPC(SolverBase):
         self._engine = self._frame_graph = self._forces = None
         if model.particle_count == 0 and model.body_count == 0:
             return
-        gravity = model.gravity.numpy().reshape(-1, 3).astype(np.float64)
-        if len(gravity) > 1 and not np.allclose(gravity, gravity[0]):
-            raise NotImplementedError("SolverIPC supports a single gravity vector for all worlds.")
-        self._config.gravity = tuple(gravity[0])
+        # the global world's gravity, which every part overrides with the gravity of its own world
+        self._config.gravity = tuple(model.gravity.numpy()[-1].astype(np.float64))
         if not self._d_hat_given:
             self._config.d_hat = _default_d_hat(model)
 
         scene = self._uipc_warp.arrays.ArrayScene()
-        tets = self._add_particles_and_tets(scene)
+        elements = _contact_elements(model)
+        for _ in range(1, elements.count):
+            scene.contact_element()
+        tets = self._add_particles_and_tets(scene, elements)
         self._add_cloth(scene, tets)
-        self._dyadic = self._add_shapes_and_bodies(scene)
+        self._add_springs(scene)
+        self._dyadic = self._add_shapes_and_bodies(scene, elements)
         self._planes = self._collect_planes()
-        for P, N in zip(*self._planes[:2], strict=True):
-            scene.add_half_plane(P, N)
+        for P, N, s in zip(*self._planes, strict=True):
+            scene.add_half_plane(P, N, contact_element=elements.shape[s])
+        if elements.count > 1:
+            # one model for every pair of the elements that hold vertices; the stiffness is the solver's kappa
+            a, b = np.triu_indices(elements.count - 1)
+            a, b = a + 1, b + 1
+            scene.contact_model(a, b, elements.mu[a, b], self._config.kappa, elements.enabled[a, b])
         self._scene = scene
-        self._shape_geometry = self._shape_geometry_now()
+        self._scene_inputs = self._scene_inputs_now()
 
         layout = scene.layout()
-        # gravity acts on the finite-element vertices and on the translation of a body (ArrayScene's layout)
-        self._gravity_scale = np.zeros(layout.n)
-        self._gravity_scale[: layout.n_fem] = 1.0
-        self._gravity_scale[layout.body_base] = 1.0
         # the external accelerations: one row per free particle, then four per dynamic body (p and the rows of A)
         free = np.flatnonzero(~self._fixed_particle).astype(np.int32)
         dynamic = np.flatnonzero(~self._kinematic_body).astype(np.int32)
@@ -1031,6 +1334,23 @@ class SolverIPC(SolverBase):
             self._forget_written()
         self._make_engine(None)
 
+    def _world_gravity(self) -> np.ndarray:
+        """``Model.gravity`` in float64: one row per world, the global world's last, so that the world of an entity
+        (-1 for a global one) indexes its row."""
+        return self.model.gravity.numpy().reshape(-1, 3).astype(np.float64)
+
+    def _vertex_gravity(self) -> np.ndarray:
+        """The gravity of every engine vertex, as the scene lays it out: a particle's world's on the particle, a
+        body's world's on its translation, none elsewhere (``SimEngine.set_gravity``)."""
+        layout = self._scene.layout()
+        g = self._world_gravity()
+        out = np.zeros((layout.n, 3))
+        if self.model.particle_count:
+            out[: layout.n_fem] = g[self.model.particle_world.numpy()]
+        if self.model.body_count:
+            out[layout.body_base] = g[self.model.body_world.numpy()]
+        return out
+
     def _check_start(self) -> None:
         """Raise ``ValueError`` when the surfaces of different bodies cross each other in the model's state, or start
         at or inside their contact thickness.
@@ -1040,16 +1360,19 @@ class SolverIPC(SolverBase):
         reports, and surfaces that cross without such a pair (an edge through a triangle, away from its vertices) step
         on with the barrier keeping them crossed. As libuipc's sanity check does at init, this tests the model's state
         once, without the surfaces that never move (static shapes, kinematic particles and bodies), whose contact the
-        solve skips. Every contact point that moves is tested against every half plane. Triangle meshes are tested body
-        pair by body pair, for the pairs whose bounding boxes come within their contact thickness of each other, with
-        libuipc-warp's brute-force ``SurfaceChecker``: its edge-triangle crossings and its point-triangle and edge-edge
-        distances. A distance above the thickness, also inside ``d_hat``, is a valid start, unless it is within a few
-        float32 steps of the thickness: Newton's positions are float32, and surfaces placed in touching contact come out
-        that far apart. Not tested: the inside of a body (contact ignores crossings inside a rigid body made of
-        overlapping shapes, and inside a cloth or a soft body the checker cannot tell the nearly coplanar triangles of a
-        flat sheet from crossing ones) and two particles that are on no cloth or tetrahedron (the checker has no
-        point-point distance). A body pair of more than ``_START_CHECK_PAIRS`` primitive pairs is skipped with a
-        warning.
+        solve skips, and without the pairs whose contact elements do not collide. The gap of a pair is its distance
+        less its contact thickness, the sum of its two primitives' thicknesses, each that of its vertices (a free
+        particle's radius, a shape's margin, the ``thickness`` of cloth and tetrahedra). Every contact point that moves
+        is tested against every half plane. Triangle meshes and particles are tested part pair by part pair, a part
+        being a contact body's primitives in one contact element, with the particles on no cloth or tetrahedron taken
+        together per element and also tested among themselves: for the pairs of parts whose bounding boxes come within
+        their thickness of each other, libuipc-warp's brute-force ``SurfaceChecker`` counts the edge-triangle crossings
+        and finds the smallest gap over the point-triangle, point-edge, edge-edge and point-point pairs. A gap above
+        0, also inside ``d_hat``, is a valid start, unless it is within a few float32 steps of 0: Newton's positions
+        are float32, and surfaces placed in touching contact come out that far apart. Not tested: the inside of a body
+        (contact ignores crossings inside a rigid body made of overlapping shapes, and inside a cloth or a soft body the
+        checker cannot tell the nearly coplanar triangles of a flat sheet from crossing ones). A pair of parts of more
+        than ``_START_CHECK_PAIRS`` primitive pairs is skipped with a warning.
         """
         eng = self._engine
         if eng is None:
@@ -1062,38 +1385,48 @@ class SolverIPC(SolverBase):
         for b in np.flatnonzero(self._kinematic_body):
             still[offsets[b] : offsets[b + 1]] = True
         x = eng.vm.x.numpy()
-        thickness = np.zeros(layout.n)
-        thickness[: layout.n_fem] = self._thickness
+        thickness = self._vertex_thickness
         points = np.asarray(eng.contact_points, np.int64)
         if len(points) == 0:
             return
         # the engine's contact bodies, with the particles on no surface (each a body of its own) taken as one
-        group = eng.body.numpy().astype(np.int64)
-        lone = np.setdiff1d(points, np.asarray(eng.surface["vertices"], np.int64))
-        if len(lone):
-            group[lone] = group.max() + 1
-        ids, point_group = np.unique(group[points], return_inverse=True)
+        body = eng.body.numpy().astype(np.int64)
+        surface_vertices = np.asarray(eng.surface["vertices"], np.int64)
+        lone = np.setdiff1d(points, surface_vertices)
+        group = body.copy()
+        lone_group = int(group.max()) + 1
+        group[lone] = lone_group
+        # parts: the groups split by contact element, compared only where their elements collide
+        cid, enabled = self._cids, self._enabled
+        key = group * len(enabled) + cid
+        ids, point_group = np.unique(key[points], return_inverse=True)
+        ids_group, ids_element = ids // len(enabled), ids % len(enabled)
         # Newton's positions are float32: surfaces placed in touching contact come out up to a few float32 steps
         # apart, which the barrier would take as a valid, nearly singular start. Such a gap counts as contact.
         slack = 4.0 * float(np.spacing(np.float32(np.abs(x[points]).max())))
-        # (crossings, gap, distance, pair thickness, contact body, the half plane (as -1 - plane) or contact body)
+        # (crossings, gap, distance, pair thickness, part, the half plane (as -1 - plane) or part, the pair's vertices)
         violations = []
 
-        # contact points against half planes
+        # contact points against half planes, each moved out by its shape's margin: the distance from the plane's own
+        # surface and the margin's share of the pair's thickness
         P, N, plane_shapes = self._planes
         moves = ~still[points]
         if moves.any() and len(P):
-            d = x[points[moves]] @ N.T - np.einsum("ij,ij->i", P, N)
-            gap = d - thickness[points[moves]][:, None]
+            moving = points[moves]
+            margin = self.model.shape_margin.numpy().astype(np.float64)[plane_shapes]
+            d = x[moving] @ N.T - np.einsum("ij,ij->i", P, N) + margin
+            t = thickness[moving][:, None] + margin
+            gap = d - t
+            meets = enabled[cid[moving][:, None], self._plane_cids[None, :]]
             owner = point_group[moves]
             for j in range(len(P)):
-                hit = np.flatnonzero(gap[:, j] <= slack)
+                hit = np.flatnonzero(meets[:, j] & (gap[:, j] <= slack))
                 for g in np.unique(owner[hit]):
                     k = hit[owner[hit] == g]
                     k = k[np.argmin(gap[k, j])]
-                    violations.append((0, gap[k, j], d[k, j], thickness[points[moves][k]], g, -1 - j))
+                    violations.append((0, gap[k, j], d[k, j], t[k, j], g, -1 - j, (int(moving[k]),)))
 
-        # triangle meshes, one pair of bodies at a time
+        # triangle meshes and particles, one pair of parts at a time
         lo = np.full((len(ids), 3), np.inf)
         hi = np.full((len(ids), 3), -np.inf)
         np.minimum.at(lo, point_group, x[points])
@@ -1104,40 +1437,65 @@ class SolverIPC(SolverBase):
         np.logical_and.at(all_still, point_group, still[points])
         tris = np.asarray(eng.surface["triangles"], np.int64).reshape(-1, 3)
         edges = np.asarray(eng.surface["edges"], np.int64).reshape(-1, 2)
-        # the primitives of each body, sorted by body: rows, whether they move, and where each body's rows start
+        # the primitives of each part, sorted by part: rows, whether they move, and where each part's rows start (a
+        # primitive's vertices are in one contact body and one element)
         prims = {}
-        for name, rows in (("vertices", points[:, None]), ("triangles", tris), ("edges", edges)):
-            body_of = np.searchsorted(ids, group[rows[:, 0]])
-            order = np.argsort(body_of, kind="stable")
+        kinds = (
+            ("vertices", surface_vertices[:, None]),
+            ("codim", lone[:, None]),
+            ("triangles", tris),
+            ("edges", edges),
+        )
+        for name, rows in kinds:
+            part_of = np.searchsorted(ids, key[rows[:, 0]])
+            order = np.argsort(part_of, kind="stable")
             prims[name] = (
                 rows[order],
                 ~still[rows[order]].all(axis=1),
-                np.searchsorted(body_of[order], np.arange(len(ids) + 1)),
+                np.searchsorted(part_of[order], np.arange(len(ids) + 1)),
             )
-        for a, b in self._near_boxes(lo, hi, reach, slack):
+        pairs = self._near_boxes(lo, hi, reach, slack)
+        # the particles on no surface meet each other where their element meets itself
+        lone_parts = np.flatnonzero((ids_group == lone_group) & enabled[ids_element, ids_element])
+        pairs = np.concatenate([pairs, np.stack([lone_parts, lone_parts], axis=1)])
+        device = self.model.device
+        arrays = (wp.array(body.astype(np.int32), device=device), wp.array(thickness, dtype=wp.float64, device=device))
+        for a, b in pairs:
             if all_still[a] and all_still[b]:
                 continue
-            result = self._body_pair(prims, group, a, b)
+            # the inside of a body is not tested, nor two parts whose elements do not collide
+            if (a != b and ids_group[a] == ids_group[b]) or not enabled[ids_element[a], ids_element[b]]:
+                continue
+            result = self._part_pair(prims, arrays, a, b)
             if result is None:
                 warnings.warn(
-                    f"SolverIPC does not check whether {self._describe_group(group, points, ids[a])} and "
-                    f"{self._describe_group(group, points, ids[b])} start in contact: their surfaces make more "
+                    f"SolverIPC does not check whether {self._describe_group(group, points, ids_group[a])} and "
+                    f"{self._describe_group(group, points, ids_group[b])} start in contact: their surfaces make more "
                     f"primitive pairs than the check tests ({_START_CHECK_PAIRS}).",
                     NewtonWarning,
                     stacklevel=3,
                 )
                 continue
-            found, distance = result
-            t = reach[a] + reach[b]
-            if found or distance - t <= slack:
-                violations.append((found, distance - t, distance, t, a, b))
+            found, gap = result
+            if found or gap.gap <= slack:
+                violations.append((found, gap.gap, gap.distance, gap.thickness, a, b, gap.vertices))
         if not violations:
             return
-        found, gap, distance, t, a, b = min(violations, key=lambda v: (-v[0], v[1]))
+        found, gap, distance, t, a, b, vertices = min(violations, key=lambda v: (-v[0], v[1]))
         n = len(violations) - 1
         more = f" ({n} more pair{'s' if n > 1 else ''} of bodies {'do' if n > 1 else 'does'} too)" if n else ""
-        one = self._describe_group(group, points, ids[a])
-        other = f"plane shape {plane_shapes[-1 - b]}" if b < 0 else self._describe_group(group, points, ids[b])
+        lone_set = set(lone.tolist())
+
+        def describe(part: int, other_than: int | None = None) -> tuple[str, int | None]:
+            """A part's name, and its particle in the closest pair when it is the particles on no surface."""
+            if ids_group[part] == lone_group:
+                v = next((v for v in vertices if v in lone_set and v != other_than), None)
+                if v is not None:
+                    return f"particle {v}", v
+            return self._describe_group(group, points, ids_group[part]), None
+
+        one, particle = describe(a)
+        other = f"plane shape {plane_shapes[-1 - b]}" if b < 0 else describe(b, particle if a == b else None)[0]
         if found:
             raise ValueError(
                 f"SolverIPC: the surfaces of {one} and {other} intersect in the model's state: {found} edges of one "
@@ -1169,13 +1527,14 @@ class SolverIPC(SolverBase):
         a, b = a[near], b[near]
         return np.stack([np.minimum(a, b), np.maximum(a, b)], axis=1)
 
-    def _body_pair(self, prims: dict, body: np.ndarray, a: int, b: int) -> tuple[int, float] | None:
-        """The edge-triangle crossings and the smallest distance between the surfaces of bodies ``a`` and ``b``
-        (indices into ``prims``), without the primitive pairs whose vertices never move: libuipc-warp's
-        ``SurfaceChecker`` on the primitives of ``a`` that move against all of ``b``, and on those of ``a`` that
-        never move against those of ``b`` that move. ``body`` (the contact body of every vertex) keeps the distance
-        query to pairs across the two. None when they make more than ``_START_CHECK_PAIRS`` primitive pairs."""
-        from uipc_warp.validation import SurfaceChecker  # noqa: PLC0415
+    def _part_pair(self, prims: dict, arrays: tuple, a: int, b: int):
+        """The edge-triangle crossings between parts ``a`` and ``b`` (indices into ``prims``, which may be one part)
+        and their primitive pair of the smallest gap (``uipc_warp.validation.Gap``), without the pairs whose vertices
+        never move: libuipc-warp's ``SurfaceChecker`` on the primitives of ``a`` that move against all of ``b``, and
+        on those of ``a`` that never move against those of ``b`` that move. ``arrays``: the engine's contact body of
+        every vertex (the checker compares no pair within one) and the vertices' thickness, on the device. None when
+        the parts make more than ``_START_CHECK_PAIRS`` primitive pairs."""
+        from uipc_warp.validation import Gap, SurfaceChecker  # noqa: PLC0415
 
         def rows(name: str, g: int, moves: bool | None) -> np.ndarray:
             all_rows, moving, starts = prims[name]
@@ -1188,32 +1547,35 @@ class SolverIPC(SolverBase):
         ]
         size = 0
         for one, other in halves:
-            v1, t1, e1 = (len(one[n]) for n in ("vertices", "triangles", "edges"))
-            v2, t2, e2 = (len(other[n]) for n in ("vertices", "triangles", "edges"))
-            size += v1 * t2 + v2 * t1 + e1 * e2 + e1 * t2 + e2 * t1
+            v1, c1, t1, e1 = (len(one[n]) for n in ("vertices", "codim", "triangles", "edges"))
+            v2, c2, t2, e2 = (len(other[n]) for n in ("vertices", "codim", "triangles", "edges"))
+            # point-triangle, point-edge, edge-edge and point-point pairs, and the crossings, edges against triangles
+            size += (v1 + c1) * t2 + (v2 + c2) * t1 + c1 * e2 + c2 * e1 + e1 * e2 + c1 * c2 + e1 * t2 + e2 * t1
         if size > _START_CHECK_PAIRS:
             return None
         x, device = self._engine.vm.x, self.model.device
-        chunk = 16384  # primitives of one side per launch: every launch stays below 2**31 threads
-        found, distance = 0, np.inf
+        chunk = 16384  # primitives of a kind on one side per launch: every launch stays below 2**31 threads
+
+        body, thickness = arrays
+
+        def checker(part: dict, k: int) -> SurfaceChecker:
+            surface = {n: part[n][k : k + chunk] for n in prims}
+            return SurfaceChecker(surface, body, device, thickness=thickness)
+
+        found, best = 0, Gap(np.inf, np.inf, 0.0, "", ())
         for one, other in halves:
-            for edges, tris in ((one["edges"], other["triangles"]), (other["edges"], one["triangles"])):
-                for i in range(0, len(edges), chunk):
-                    for j in range(0, len(tris), chunk):
-                        e, f = edges[i : i + chunk], tris[j : j + chunk]
-                        surface = {"edges": e, "triangles": f, "vertices": np.zeros(0, np.int32)}
-                        found += SurfaceChecker(surface, body, device).intersections(x)
+            for e, f in ((one["edges"], other["triangles"]), (other["edges"], one["triangles"])):
+                for i in range(0, len(e), chunk):
+                    for j in range(0, len(f), chunk):
+                        surface = {"edges": e[i : i + chunk], "triangles": f[j : j + chunk], "vertices": np.zeros(0)}
+                        found += SurfaceChecker(surface, body, device, thickness=thickness).intersections(x)
             pieces = [max(len(part[n]) for n in prims) for part in (one, other)]
-            if min(pieces) == 0:
-                continue
             for i in range(0, pieces[0], chunk):
                 for j in range(0, pieces[1], chunk):
-                    surface = {n: np.concatenate([one[n][i : i + chunk], other[n][j : j + chunk]]) for n in prims}
-                    surface["vertices"] = surface["vertices"].reshape(-1)
-                    surface["triangles"] = surface["triangles"].reshape(-1, 3)
-                    surface["edges"] = surface["edges"].reshape(-1, 2)
-                    distance = min(distance, SurfaceChecker(surface, body, device).min_distance(x))
-        return found, distance
+                    gap = checker(one, i).min_gap(x, checker(other, j))
+                    if gap.gap < best.gap:
+                        best = gap
+        return found, best
 
     def _describe_vertex(self, v: int) -> str:
         """The Newton particle, body or shape that engine vertex ``v`` belongs to."""
@@ -1259,11 +1621,24 @@ class SolverIPC(SolverBase):
             self._forces = self._external_acceleration("newton_forces", self._force_blocks, device)
             inputs["elements"].append(self._forces)
         self._engine = self._uipc_warp.make_engine(self._config, None, **inputs, device=device, capacity=capacity)
+        # what the start check needs of the tabular: the element of every vertex and half plane, and their pairs
+        self._vertex_thickness = np.asarray(inputs["thickness"], np.float64)
+        tabular = inputs["contact_tabular"]
+        if tabular is None:
+            self._cids, self._plane_cids = (
+                np.zeros(len(inputs["x"]), np.int64),
+                np.zeros(len(inputs["plane_P"]), np.int64),
+            )
+            self._enabled = np.ones((1, 1), bool)
+        else:
+            self._cids = np.asarray(tabular["cids"], np.int64)
+            self._plane_cids = np.asarray(tabular["plane_cids"], np.int64)
+            self._enabled = np.asarray(tabular["enabled"]) != 0
         if self.model.body_count:
             # notify_model_changed may have changed them since the scene was laid out
             self._engine.set_dyadic_mass(*self._dyadic)
 
-    def _add_particles_and_tets(self, scene) -> np.ndarray:
+    def _add_particles_and_tets(self, scene, elements: _ContactElements) -> np.ndarray:
         """Every particle as a finite-element vertex (engine index = particle index), and the tetrahedra."""
         model = self.model
         n = model.particle_count
@@ -1273,12 +1648,16 @@ class SolverIPC(SolverBase):
         mass = model.particle_mass.numpy().astype(np.float64)
         flags = model.particle_flags.numpy()
         self._fixed_particle = (mass <= 0.0) | ((flags & int(ParticleFlags.ACTIVE)) == 0)
+        # a free particle is a sphere of its radius; the vertices of cloth and tetrahedra take the solver's thickness
+        radius = model.particle_radius.numpy().astype(np.float64)
         scene.add_vertices(
             model.particle_q.numpy().astype(np.float64),
             model.particle_qd.numpy().astype(np.float64),
             mass,
             fixed=self._fixed_particle,
-            thickness=self._thickness,
+            thickness=np.where(elements.on_mesh, self._thickness, radius),
+            contact_element=elements.particle,
+            gravity=self._world_gravity()[model.particle_world.numpy()],
         )
         if model.tet_count == 0:
             return np.zeros((0, 4), np.int64)
@@ -1305,8 +1684,11 @@ class SolverIPC(SolverBase):
         k_mu, k_lambda = mat[:, 0], mat[:, 1]
         stretch = k_mu + 0.5 * k_lambda
         shear = 0.5 * k_mu
+        # Newton's tri_poses are the inverses of the rest edges in each triangle's edge frame, the frame add_shell
+        # takes them in
+        rest_edges = np.linalg.inv(model.tri_poses.numpy().astype(np.float64).reshape(-1, 2, 2)[cloth])
 
-        edges, kappa = np.zeros((0, 2), np.int64), np.zeros(0)
+        edges, kappa, angles = np.zeros((0, 2), np.int64), np.zeros(0), None
         if model.edge_count:
             x = model.particle_q.numpy().astype(np.float64)
             e = model.edge_indices.numpy().reshape(-1, 4).astype(np.int64)
@@ -1319,6 +1701,8 @@ class SolverIPC(SolverBase):
             keys = np.sort(e[:, 2:4], axis=1) @ [n, 1]
             sel = (e[:, 0] >= 0) & (e[:, 1] >= 0) & np.isin(keys, cloth_keys)
             e, ke = e[sel], ke[sel]
+            # Newton's rest angle of a row by the winding of its triangles (add_shell's convention)
+            angles = _winding_signs(tris, e, np.flatnonzero(sel)) * model.edge_rest_angle.numpy()[sel]
             x0, x1, x2, x3 = x[e[:, 0]], x[e[:, 1]], x[e[:, 2]], x[e[:, 3]]
             L0 = np.linalg.norm(x3 - x2, axis=1)
             area = 0.5 * (
@@ -1326,7 +1710,29 @@ class SolverIPC(SolverBase):
             )
             h_bar = area / (3.0 * np.maximum(L0, 1.0e-30))
             edges, kappa = e[:, 2:4], 0.5 * ke * h_bar
-        scene.add_shell(tris, stretch, stretch, shear, self._cloth_strain_rate, bending=kappa, bending_edges=edges)
+        scene.add_shell(
+            tris,
+            stretch,
+            stretch,
+            shear,
+            self._cloth_strain_rate,
+            bending=kappa,
+            bending_edges=edges,
+            rest_edges=rest_edges,
+            rest_angles=angles,
+        )
+
+    def _add_springs(self, scene) -> None:
+        """Newton's springs as libuipc's Hookean springs: ``0.5 ke (l - L0)^2`` each (``spring_kappa`` with a radius of
+        1 m, which only scales the energy, since a spring is no contact primitive)."""
+        model = self.model
+        if model.spring_count == 0:
+            return
+        edges = model.spring_indices.numpy().reshape(-1, 2).astype(np.int64)
+        rest = model.spring_rest_length.numpy().astype(np.float64)
+        ke = model.spring_stiffness.numpy().astype(np.float64)
+        kappa = self._uipc_warp.arrays.spring_kappa(ke, rest, 1.0)
+        scene.add_springs(edges, kappa, rest_lengths=rest, radius=1.0)
 
     def _body_mass_moments(self, stacklevel: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """The dyadic mass ``(m, sum m x_bar, sum m x_bar x_bar^T)`` of every body from Newton's mass properties,
@@ -1382,14 +1788,20 @@ class SolverIPC(SolverBase):
             start[child[free]] = qd_start[free]
         return start
 
-    def _shape_geometry_now(self) -> tuple:
-        """What the triangulated shapes are made of, to tell a change of geometry from one of materials."""
+    def _scene_inputs_now(self) -> tuple:
+        """What the scene was laid out from besides gravity and the bodies' mass properties, which change in place:
+        the triangulated shapes, the friction coefficients of the contact models, the contact thicknesses and the
+        springs."""
         model = self.model
-        if model.shape_count == 0:
-            return ()
-        return (model.shape_transform.numpy().copy(), model.shape_scale.numpy().copy())
+        materials = (float(model.soft_contact_mu), float(model.particle_mu))
+        arrays = [model.particle_radius] if model.particle_count else []
+        if model.spring_count:
+            arrays += [model.spring_rest_length, model.spring_stiffness, model.spring_damping]
+        if model.shape_count:
+            arrays += [model.shape_transform, model.shape_scale, model.shape_material_mu, model.shape_margin]
+        return (*materials, *(a.numpy().copy() for a in arrays))
 
-    def _add_shapes_and_bodies(self, scene) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _add_shapes_and_bodies(self, scene, elements: _ContactElements) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Static non-plane shapes as fixed triangle meshes; every body as an affine body. Returns the bodies'
         dyadic masses."""
         model = self.model
@@ -1400,6 +1812,7 @@ class SolverIPC(SolverBase):
             shape_body = model.shape_body.numpy()
             colliding = _colliding_shapes(model)
             shape_xform = model.shape_transform.numpy().astype(np.float64)
+            margin = model.shape_margin.numpy().astype(np.float64)
             for s in range(model.shape_count):
                 if not colliding[s]:
                     continue
@@ -1409,12 +1822,14 @@ class SolverIPC(SolverBase):
                         raise NotImplementedError(f"SolverIPC does not support the plane shape {s} on a body.")
                     continue
                 v, f = _shape_mesh(model, s, self._shape_segments)
+                if len(f) == 0:
+                    continue  # a height field without a cell
                 v = _quat_rotate_np(shape_xform[s, 3:7], v) + shape_xform[s, :3]
                 if b == -1:
-                    scene.add_obstacle(v, f)
+                    scene.add_obstacle(v, f, thickness=margin[s], contact_element=elements.shape[s])
                     self._obstacle_shapes.append(s)
                 else:
-                    meshes[b].append((v, f))
+                    meshes[b].append((v, f, s))
 
         mass, first, second = self._body_mass_moments(stacklevel=5)
         if model.body_count == 0:
@@ -1423,16 +1838,20 @@ class SolverIPC(SolverBase):
         body_qd = model.body_qd.numpy().astype(np.float64)
         body_com = model.body_com.numpy().astype(np.float64)
         body_mass = model.body_mass.numpy().astype(np.float64)
+        body_gravity = self._world_gravity()[model.body_world.numpy()]
         for b in range(model.body_count):
             parts = meshes[b]
-            offsets = np.cumsum([0] + [len(v) for v, _ in parts])
-            xbar = np.concatenate([v for v, _ in parts]) if parts else np.zeros((0, 3))
+            offsets = np.cumsum([0] + [len(v) for v, _, _ in parts])
+            xbar = np.concatenate([v for v, _, _ in parts]) if parts else np.zeros((0, 3))
             tris = (
-                np.concatenate([f + o for (_, f), o in zip(parts, offsets[:-1], strict=True)])
+                np.concatenate([f + o for (_, f, _), o in zip(parts, offsets[:-1], strict=True)])
                 if parts
                 else np.zeros((0, 3), np.int64)
             )
-            volume = sum(_closed_volume(v, f) for v, f in parts)
+            # every vertex in the element of its shape, with the shape's margin as its thickness
+            element = np.concatenate([np.full(len(v), elements.shape[s]) for v, _, s in parts]) if parts else 0
+            thickness = np.concatenate([np.full(len(v), margin[s]) for v, _, s in parts]) if parts else 0.0
+            volume = sum(_closed_volume(v, f) for v, f, _ in parts)
             if volume <= 0.0:
                 # no closed collision mesh: the volume of water of that mass
                 volume = max(body_mass[b], 1.0e-12) / 1000.0
@@ -1452,11 +1871,15 @@ class SolverIPC(SolverBase):
                 p_dot=body_qd[b, :3] - np.cross(w, R @ body_com[b]),
                 A_dot=W @ R,
                 fixed=bool(self._kinematic_body[b]),
+                thickness=thickness,
+                contact_element=element,
+                gravity=body_gravity[b],
             )
         return mass, first, second
 
     def _collect_planes(self) -> tuple[np.ndarray, np.ndarray, list[int]]:
-        """The points, normals and shapes of the static planes that collide."""
+        """The points, normals and shapes of the static planes that collide, each point moved out by the shape's
+        margin."""
         model = self.model
         if model.shape_count == 0:
             return np.zeros((0, 3)), np.zeros((0, 3)), []
@@ -1465,6 +1888,7 @@ class SolverIPC(SolverBase):
         colliding = _colliding_shapes(model)
         shape_xform = model.shape_transform.numpy()
         shape_scale = model.shape_scale.numpy()
+        margin = model.shape_margin.numpy().astype(np.float64)
         P, N, shapes = [], [], []
         for s in range(model.shape_count):
             if shape_type[s] != int(GeoType.PLANE) or shape_body[s] != -1:
@@ -1478,8 +1902,10 @@ class SolverIPC(SolverBase):
                     stacklevel=4,
                 )
             xf = shape_xform[s].astype(np.float64)
-            P.append(xf[:3])
-            N.append(_quat_rotate_np(xf[3:7], np.array([0.0, 0.0, 1.0])))
+            n = _quat_rotate_np(xf[3:7], np.array([0.0, 0.0, 1.0]))
+            # a half plane has no thickness: its margin moves its surface out along the normal
+            P.append(xf[:3] + margin[s] * n)
+            N.append(n)
             shapes.append(s)
         return np.asarray(P).reshape(-1, 3), np.asarray(N).reshape(-1, 3), shapes
 
@@ -1831,12 +2257,15 @@ class SolverIPC(SolverBase):
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
         """Take changed model properties.
 
-        Gravity (``MODEL_PROPERTIES``) and the bodies' mass, centre of mass and inertia
+        Gravity, of every world (``MODEL_PROPERTIES``), and the bodies' mass, centre of mass and inertia
         (``BODY_INERTIAL_PROPERTIES``) are updated in place: graphs captured before take them. A change of the
-        triangulated shapes (``SHAPE_PROPERTIES`` with new transforms or scales, ``SHAPE_TYPE_AND_SOURCE``) or of
-        which bodies are kinematic (``BODY_PROPERTIES``, ``BODY_INERTIAL_PROPERTIES``) builds the solve again: the
-        next step reads ``state_in`` in full, and graphs that hold :meth:`step` must be captured again. Shape
-        materials are not read (class docstring). Copies from the host: not inside a graph capture.
+        triangulated shapes (``SHAPE_PROPERTIES`` with new transforms or scales, ``SHAPE_TYPE_AND_SOURCE``), of the
+        friction coefficients and the contact thicknesses (``SHAPE_PROPERTIES`` with a new ``shape_material_mu`` or
+        ``shape_margin``, ``MODEL_PROPERTIES`` with a new ``soft_contact_mu``, ``particle_mu`` or
+        ``particle_radius``), of the springs (``MODEL_PROPERTIES`` with a new ``spring_rest_length``,
+        ``spring_stiffness`` or ``spring_damping``) or of which bodies are kinematic (``BODY_PROPERTIES``,
+        ``BODY_INERTIAL_PROPERTIES``) builds the solve again: the next step reads ``state_in`` in full, and graphs that
+        hold :meth:`step` must be captured again. Copies from the host: not inside a graph capture.
         """
         if self.model.device.is_capturing:
             raise RuntimeError("SolverIPC.notify_model_changed() copies from the host; call it outside graph capture.")
@@ -1844,10 +2273,10 @@ class SolverIPC(SolverBase):
             return
         model = self.model
         rebuild = bool(flags & ModelFlags.SHAPE_TYPE_AND_SOURCE)
-        if flags & ModelFlags.SHAPE_PROPERTIES:
-            now = self._shape_geometry_now()
-            rebuild |= len(now) != len(self._shape_geometry) or any(
-                not np.array_equal(a, b) for a, b in zip(now, self._shape_geometry, strict=True)
+        if flags & (ModelFlags.SHAPE_PROPERTIES | ModelFlags.MODEL_PROPERTIES):
+            now = self._scene_inputs_now()
+            rebuild |= len(now) != len(self._scene_inputs) or any(
+                not np.array_equal(a, b) for a, b in zip(now, self._scene_inputs, strict=True)
             )
         kinematic = self._kinematic_body
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES) and model.body_count:
@@ -1858,11 +2287,8 @@ class SolverIPC(SolverBase):
             self._build_engine()
             return
         if flags & ModelFlags.MODEL_PROPERTIES:
-            gravity = model.gravity.numpy().reshape(-1, 3).astype(np.float64)
-            if len(gravity) > 1 and not np.allclose(gravity, gravity[0]):
-                raise NotImplementedError("SolverIPC supports a single gravity vector for all worlds.")
-            self._config.gravity = tuple(gravity[0])
-            self._engine.set_gravity(self._gravity_scale[:, None] * gravity[0])
+            self._config.gravity = tuple(self._world_gravity()[-1])
+            self._engine.set_gravity(self._vertex_gravity())
         if flags & ModelFlags.BODY_INERTIAL_PROPERTIES and model.body_count:
             self._dyadic = dyadic
             self._engine.set_dyadic_mass(*dyadic)

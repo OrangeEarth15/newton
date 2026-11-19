@@ -183,8 +183,9 @@ Supported Features
 | :sup:`4` Simulated as MuJoCo flexes; particles that belong to no spring,
   triangle, or tetrahedron are not simulated. See :ref:`mujoco-flexes`.
 | :sup:`5` Incremental Potential Contact: barrier contact with continuous collision detection between
-  soft bodies, cloth (with self-collision), near-rigid affine bodies, static shapes and planes;
-  requires the optional ``libuipc-warp`` package.
+  soft bodies, cloth (with self-collision), particles, near-rigid affine bodies, static shapes, planes and
+  height fields, between the pairs that the collision groups, worlds and filter pairs let collide; springs
+  without damping; one world besides the global one; requires the optional ``libuipc-warp`` package.
 
 .. experimental::
     :class:`~newton.solvers.SolverSteel`'s public API and behavior may change without prior notice.
@@ -208,7 +209,9 @@ may use different subsets or interpret these fields according to their own
 formulation.
 
 - ``mu``: :class:`~newton.solvers.SolverSteel` (arithmetic mean of the two
-  shapes, scaled by ``contact_friction_scale``), :class:`~newton.solvers.SolverFeatherstone`,
+  shapes, scaled by ``contact_friction_scale``), :class:`~newton.solvers.SolverIPC`
+  (arithmetic mean of the two shapes; ``Model.soft_contact_mu`` stands for a
+  particle and ``Model.particle_mu`` holds between particles), :class:`~newton.solvers.SolverFeatherstone`,
   :class:`~newton.solvers.SolverSemiImplicit`,
   :class:`~newton.solvers.SolverXPBD`, :class:`~newton.solvers.SolverMuJoCo`,
   :class:`~newton.solvers.SolverVBD`, :class:`~newton.solvers.SolverKamino`,
@@ -240,6 +243,13 @@ formulation.
   :class:`~newton.solvers.SolverSemiImplicit`, and
   :class:`~newton.solvers.SolverMuJoCo` when ``use_mujoco_contacts=False``. See
   :ref:`Hydroelastic Contacts`.
+
+:class:`~newton.solvers.SolverIPC` finds its own contacts and reads ``mu`` only:
+its contact stiffness is the barrier's, the solver's ``kappa`` for every pair.
+It takes ``margin`` as the contact thickness of a shape's surface and
+:attr:`~newton.Model.particle_radius` as that of a particle on no cloth or
+tetrahedron, so that two shapes rest the sum of their margins apart; ``gap`` is
+not read, the solver's ``d_hat`` being its detection distance.
 
 .. _Joint feature support:
 

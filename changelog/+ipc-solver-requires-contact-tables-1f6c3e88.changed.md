@@ -1,0 +1,1 @@
+Make ``SolverIPC`` raise ``ImportError`` naming the missing calls when the installed ``libuipc-warp`` lacks ``ArrayScene.contact_model`` or ``SurfaceChecker.min_gap``, the newest calls it makes, and document its contact materials, thickness and supported content in the solver feature and contact material tables.
