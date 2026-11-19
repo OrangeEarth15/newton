@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import re
 import unittest
+import warnings
 
 import numpy as np
 import warp as wp
@@ -2275,6 +2277,105 @@ def test_drive_targets_change_inside_a_captured_graph(test, device):
     np.testing.assert_allclose(captured, eager, atol=1e-6)
 
 
+def _libuipc_corridor(model, dt, d_hat):
+    """libuipc's contact stiffness range of a model of particles over a plane through the origin, from the particles'
+    positions and masses: every particle and the plane's point are libuipc's vertices, and the plane has no mass."""
+    from uipc_warp.backend.contact_system.contact_stiffness import scene_diagonal  # noqa: PLC0415
+    from uipc_warp.backend.contact_system.global_contact_manager import kappa_corridor  # noqa: PLC0415
+
+    points = np.vstack([model.particle_q.numpy().astype(np.float64), np.zeros((1, 3))])
+    mean_mass = model.particle_mass.numpy().astype(np.float64).sum() / len(points)
+    return kappa_corridor(scene_diagonal(points), mean_mass, d_hat, dt, 1.0e-16)
+
+
+def test_kappa_is_taken_as_given(test, device):
+    """By default every pair takes kappa as given, at every step size, also outside libuipc's range, without a
+    warning; kappa=None, libuipc's default, needs adaptive_kappa."""
+    model = _soft_cube(device, height=0.05)
+    lo = _libuipc_corridor(model, 0.01, D_HAT)[0]
+    for kappa in (1.0e9, 0.1 * lo):
+        solver = newton.solvers.SolverIPC(model, d_hat=D_HAT, kappa=kappa)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _run(model, solver, 3)
+        for dt in (0.01, 1.0 / 600.0):
+            test.assertEqual(solver.contact_stiffness(dt), kappa)
+        np.testing.assert_array_equal(solver._engine.contact.table.kappa.numpy(), kappa)
+    with test.assertRaisesRegex(ValueError, "kappa=None, libuipc's default stiffness, needs adaptive_kappa=True"):
+        newton.solvers.SolverIPC(model, kappa=None)
+
+
+def test_adaptive_kappa_is_libuipcs(test, device):
+    """adaptive_kappa=True: kappa=None takes the lower bound of libuipc's range for the model and the step, which
+    scales with 1/dt^2; a kappa inside the range is used as given and one outside it is clamped, with one
+    NewtonWarning that names both values, at the first step that clamps it."""
+    model = _soft_cube(device, height=0.05)
+    adaptive = {"d_hat": D_HAT, "adaptive_kappa": True}
+    for dt in (0.01, 1.0 / 600.0):
+        lo, hi = _libuipc_corridor(model, dt, D_HAT)
+        default = newton.solvers.SolverIPC(model, kappa=None, **adaptive).contact_stiffness(dt)
+        test.assertAlmostEqual(default / lo, 1.0, places=12)
+    lo, hi = _libuipc_corridor(model, 0.01, D_HAT)
+    inside = newton.solvers.SolverIPC(model, kappa=3.0 * lo, **adaptive)
+    test.assertEqual(inside.contact_stiffness(0.01), 3.0 * lo)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _run(model, inside, 2)
+    above = newton.solvers.SolverIPC(model, kappa=1.0e3 * hi, **adaptive)
+    test.assertAlmostEqual(above.contact_stiffness(0.01) / hi, 1.0, places=12)
+    s0, s1 = model.state(), model.state()
+    given, used = re.escape(f"{1.0e3 * hi:g}"), re.escape(f"{hi:.6g}")
+    with test.assertWarnsRegex(newton.NewtonWarning, rf"kappa={given} is outside .* the steps use {used} Pa"):
+        above.step(s0, s1, None, None, 0.01)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        above.step(s1, s0, None, None, 0.01)
+        above.step(s0, s1, None, None, 0.005)  # clamped again, at another value: not repeated
+    for kappa in (0.0, -1.0e9, float("nan"), float("inf")):
+        with test.assertRaisesRegex(ValueError, "kappa must be a finite positive stiffness"):
+            newton.solvers.SolverIPC(model, kappa=kappa, **adaptive)
+
+
+def test_adaptive_kappa_follows_dt_in_captured_steps(test, device):
+    """adaptive_kappa=True: every pair takes the stiffness of its step's dt: steps captured at two step sizes, replayed
+    in turn and between eager steps of a third, each run with their own, as eager steps of those sizes do (to rounding:
+    the solver adds with float atomics)."""
+    tight = {"newton_velocity_tol": 1e-7, "linear_tol_rate": 1e-12, "semi_implicit": False}
+    model = _soft_cube(device, height=0.012)
+    captured, eager = (
+        newton.solvers.SolverIPC(model, d_hat=D_HAT, kappa=None, adaptive_kappa=True, **tight) for _ in range(2)
+    )
+    states = {solver: (model.state(), model.state()) for solver in (captured, eager)}
+
+    def table(solver):
+        return solver._engine.contact.table.kappa.numpy()
+
+    graphs = {}
+    for dt in (0.01, 0.005):
+        s0, s1 = model.state(), model.state()
+        with wp.ScopedCapture(device=device) as cap:
+            captured.step(s0, s1, None, None, dt)
+        graphs[dt] = (cap.graph, s0, s1)
+    for k, dt in enumerate((0.01, 0.005, 0.02, 0.01, 0.02, 0.005, 0.01)):
+        for solver in (captured, eager):
+            a, b = states[solver]
+            if solver is captured and dt in graphs:
+                graph, g0, g1 = graphs[dt]
+                g0.assign(a)
+                wp.capture_launch(graph)
+                b.assign(g1)
+            else:
+                solver.step(a, b, None, None, dt)
+            states[solver] = (b, a)
+        np.testing.assert_array_equal(table(captured), table(eager), err_msg=f"step {k}, dt {dt}")
+        test.assertEqual(float(table(eager).max()), eager.contact_stiffness(dt))
+        test.assertEqual(float(table(eager).min()), eager.contact_stiffness(dt))
+        np.testing.assert_allclose(
+            states[captured][0].particle_q.numpy(), states[eager][0].particle_q.numpy(), rtol=0.0, atol=1e-6
+        )
+    test.assertLess(states[eager][0].particle_q.numpy()[:, 2].min(), D_HAT)  # the cube reached the ground
+
+
 @requires("uipc_warp")
 class TestSolverIPC(unittest.TestCase):
     pass
@@ -2463,6 +2564,9 @@ for name, func in (
     ("test_rest_heights_follow_radius_and_margin", test_rest_heights_follow_radius_and_margin),
     ("test_springs_oscillate_as_implicit_euler", test_springs_oscillate_as_implicit_euler),
     ("test_heightfield_triangles_and_rest", test_heightfield_triangles_and_rest),
+    ("test_kappa_is_taken_as_given", test_kappa_is_taken_as_given),
+    ("test_adaptive_kappa_is_libuipcs", test_adaptive_kappa_is_libuipcs),
+    ("test_adaptive_kappa_follows_dt_in_captured_steps", test_adaptive_kappa_follows_dt_in_captured_steps),
     ("test_rest_shapes_from_tri_poses_and_edge_rest_angle", test_rest_shapes_from_tri_poses_and_edge_rest_angle),
     (
         "test_tet_lame_parameters_reach_the_engine_as_libuipc_stores_them",

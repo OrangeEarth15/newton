@@ -1299,6 +1299,26 @@ class SolverIPC(SolverBase):
     sphere radii, often larger than the spacing of a cloth, and Newton's cloth
     solvers do not use them for cloth self-contact either.
 
+    Contact stiffness, the barrier's :math:`\\kappa`, is ``kappa`` for every
+    pair, taken as given. libuipc does not take a stiffness as given: its
+    contact manager keeps it in a range :math:`[\\kappa_{lo}, 100\\,\\kappa_{lo}]`
+    with :math:`\\kappa_{lo} = c\\,\\bar m / \\Delta t^2`, :math:`\\bar m` the mean
+    mass of libuipc's vertices and :math:`c` a factor of the scene's diagonal
+    and ``d_hat`` (Stiff-GIPC's estimate); a scene whose default contact model
+    the user has not set takes :math:`\\kappa_{lo}`, and a stiffness the user
+    gives is clamped into the range. libuipc-warp's pyuipc front end does the
+    same. With ``adaptive_kappa=True`` the solver does too: ``kappa=None``
+    takes :math:`\\kappa_{lo}`, a given ``kappa`` is clamped into the range and
+    the first step that clamps it warns with :class:`~newton.NewtonWarning`.
+    The vertices are then every particle, every vertex of the triangulated
+    surfaces of bodies and static shapes, and one per plane; each body's mass
+    counts once, static shapes and planes have none. The range follows the
+    ``dt`` of each step, also of a captured one, and is computed from the
+    masses when the solve is built: a change of mass in place
+    (:meth:`notify_model_changed`) keeps it, as libuipc computes it once at
+    init. Every contact pair takes one value, which :meth:`contact_stiffness`
+    gives for a step of any ``dt``.
+
     **Rigid bodies.** Each Newton body becomes a libuipc affine body with 12
     degrees of freedom :math:`q = (p, a_1, a_2, a_3)`, the translation and the
     rows of :math:`A`, in Newton's body frame: a point with body-frame
@@ -1451,7 +1471,14 @@ class SolverIPC(SolverBase):
 
     Args:
         model: The model to simulate.
-        kappa: Barrier stiffness [Pa], libuipc's contact resistance, of every contact pair.
+        kappa: Barrier stiffness [Pa] of every contact pair, taken as given:
+            libuipc's contact resistance, which libuipc and its pyuipc front
+            end would clamp into libuipc's range (see ``adaptive_kappa``).
+            ``None``, with ``adaptive_kappa``, takes the range's lower bound,
+            libuipc's default.
+        adaptive_kappa: Take the contact stiffness as libuipc and its pyuipc
+            front end do: inside libuipc's scene-adaptive range, which
+            follows each step's ``dt`` (see **Contact**).
         d_hat: Barrier activation distance [m]. ``None`` takes libuipc's
             0.01 m, or less for a model with small colliding features (see
             the note below).
@@ -1602,7 +1629,8 @@ class SolverIPC(SolverBase):
         self,
         model: Model,
         *,
-        kappa: float = 1.0e9,
+        kappa: float | None = 1.0e9,
+        adaptive_kappa: bool = False,
         d_hat: float | None = None,
         thickness: float = 0.0,
         newton_max_iter: int = 1024,
@@ -1622,6 +1650,10 @@ class SolverIPC(SolverBase):
             raise NotImplementedError(f"SolverIPC runs on CUDA devices only; the model is on {model.device}.")
         super().__init__(model)
         _check_supported(model)
+        if kappa is None and not adaptive_kappa:
+            raise ValueError("SolverIPC: kappa=None, libuipc's default stiffness, needs adaptive_kappa=True.")
+        if kappa is not None and not (np.isfinite(kappa) and kappa > 0.0):
+            raise ValueError(f"SolverIPC: kappa must be a finite positive stiffness, got {kappa}.")
         uipc_warp = self._import_uipc_warp()
         self._d_hat_given = d_hat is not None
         self._config = uipc_warp.SimConfig(
@@ -1636,12 +1668,15 @@ class SolverIPC(SolverBase):
             semi_implicit_k_min=semi_implicit_k_min,
             eps_velocity=eps_velocity,
         )
+        self._adaptive_kappa = bool(adaptive_kappa)
         self._thickness = float(thickness)
         self._cloth_strain_rate = float(cloth_strain_rate)
         self._body_kappa = float(body_kappa)
         self._joint_strength_ratio = float(joint_strength_ratio)
         self._shape_segments = int(shape_segments)
         self._dt = self._config.dt  # of the last step, which grow() solves again
+        self._clamp_checked_dt = None  # the step size whose stiffness the clamp warning was last checked for
+        self._clamp_reported = False
         self._engine = None
         self._build_engine()
         self._check_start()
@@ -1662,11 +1697,12 @@ class SolverIPC(SolverBase):
                 "SolverIPC requires the libuipc-warp package: pip install git+https://github.com/OrangeEarth15/libuipc-warp"
             ) from e
         version = getattr(uipc_warp, "__version__", "0")
-        # the newest calls of each kind the solver makes: the frame status, the contact tabular, the start check, the
-        # joints
+        # the newest calls of each kind the solver makes: the frame status, the contact tabular and its stiffness
+        # policy, the start check, the joints
         needed = (
             (uipc_warp.arrays, "write_frame_status"),
             (uipc_warp.arrays.ArrayScene, "contact_model"),
+            (uipc_warp.backend.contact_system, "contact_stiffness"),
             (uipc_warp.validation.SurfaceChecker, "min_gap"),
             (uipc_warp.arrays, "joint_groups"),
         )
@@ -1710,7 +1746,7 @@ class SolverIPC(SolverBase):
         if not self._d_hat_given:
             self._config.d_hat = _default_d_hat(model)
 
-        scene = self._uipc_warp.arrays.ArrayScene()
+        scene = self._uipc_warp.arrays.ArrayScene(kappa_corridor=self._adaptive_kappa)
         elements = _contact_elements(model)
         for _ in range(1, elements.count):
             scene.contact_element()
@@ -1723,10 +1759,11 @@ class SolverIPC(SolverBase):
         for P, N, s in zip(*self._planes, strict=True):
             scene.add_half_plane(P, N, contact_element=elements.shape[s])
         if elements.count > 1:
-            # one model for every pair of the elements that hold vertices; the stiffness is the solver's kappa
+            # one model for every pair of the elements that hold vertices, with the default model's stiffness: the
+            # solver's kappa, as given or as libuipc's policy resolves it (adaptive_kappa), one value for every pair
             a, b = np.triu_indices(elements.count - 1)
             a, b = a + 1, b + 1
-            scene.contact_model(a, b, elements.mu[a, b], self._config.kappa, elements.enabled[a, b])
+            scene.contact_model(a, b, elements.mu[a, b], None, elements.enabled[a, b])
         self._scene = scene
         self._scene_inputs = self._scene_inputs_now()
         self._joint_inputs = self._joint_inputs_now()
@@ -2445,6 +2482,7 @@ class SolverIPC(SolverBase):
         if control is None:
             control = self.model.control(clone_variables=False)
         self._dt, self._control = dt, control
+        self._report_clamp(dt)
         self._load(state_in)
         self._write_forces(state_in, control)
         self._write_joint_controls(control, dt)
@@ -2460,6 +2498,26 @@ class SolverIPC(SolverBase):
                 raise RuntimeError(self._failure(status))
         self._store(state_in.body_q, state_in.body_qd, state_out)
         self._write_observables(observables)
+
+    def _report_clamp(self, dt: float) -> None:
+        """Warn once when a step's ``dt`` clamps the given ``kappa`` into libuipc's stiffness range."""
+        kappa = self._config.kappa
+        if not self._adaptive_kappa or self._clamp_reported or kappa is None or self._engine is None:
+            return
+        if dt == self._clamp_checked_dt:
+            return
+        self._clamp_checked_dt = dt
+        _, used, lo, hi, _ = self._engine.contact_stiffness.resolve(dt)
+        if used != kappa:
+            self._clamp_reported = True
+            warnings.warn(
+                f"SolverIPC: kappa={kappa:g} is outside libuipc's contact stiffness range [{lo:.6g}, {hi:.6g}] Pa of "
+                f"this model at dt={dt:g} s; the steps use {used:.6g} Pa, as libuipc clamps a stiffness it is given. "
+                "The range scales with the mean vertex mass and with 1/dt^2 (contact_stiffness(dt) gives the stiffness "
+                "of any dt); kappa=None takes its lower bound, libuipc's default. Not repeated.",
+                NewtonWarning,
+                stacklevel=3,
+            )
 
     def _load(self, state_in: State) -> None:
         """The engine's state from ``state_in`` where it differs from what the solver wrote (class docstring)."""
@@ -2971,6 +3029,16 @@ class SolverIPC(SolverBase):
             self._body_mass_inv.assign(self._mass_inverse(*dyadic))
             for kind in self._joint_bodies:  # the joints' penalties follow the masses
                 self._joint_strength[kind].assign(self._joint_strengths(kind, dyadic[0])[1])
+
+    def contact_stiffness(self, dt: float) -> float:
+        """The contact stiffness [Pa] of every contact pair in a step of length ``dt`` [s]: ``kappa``, or with
+        ``adaptive_kappa`` ``kappa`` clamped into libuipc's stiffness range for this model and ``dt``, the range's lower
+        bound when ``kappa`` is None (see **Contact** in the class docstring). 0 for a model without particles and
+        bodies, which has no contact."""
+        if self._engine is None:
+            return 0.0
+        policy = self._engine.contact_stiffness
+        return float(self._config.kappa if policy is None else policy.resolve(dt)[1])
 
     def frame_stats(self) -> dict:
         """Solver counters of the last step: Newton/PCG iterations, line-search trials, convergence.
