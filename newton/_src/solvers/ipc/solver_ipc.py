@@ -1665,7 +1665,10 @@ class SolverIPC(SolverBase):
         Dm_inv = model.tet_poses.numpy().astype(np.float64).reshape(-1, 3, 3)
         volume = 1.0 / (6.0 * np.abs(np.linalg.det(Dm_inv)))
         materials = model.tet_materials.numpy().astype(np.float64).reshape(-1, 3)
-        scene.add_tetrahedra(tets, Dm_inv, volume, materials[:, 0], materials[:, 1])
+        # k_mu and k_lambda are Lame parameters; libuipc's StableNeoHookean.apply_to stores mu and lambda + mu, the
+        # SNK1 parameters whose linearization is Hooke's law with those Lame parameters (stable_neo_hookean.cpp)
+        k_mu, k_lambda = materials[:, 0], materials[:, 1]
+        scene.add_tetrahedra(tets, Dm_inv, volume, k_mu, k_lambda + k_mu)
         return tets
 
     def _add_cloth(self, scene, tets: np.ndarray) -> None:

@@ -1628,6 +1628,37 @@ def _newton_angles(model, x):
     return _dihedral_angles(x[e[:, 0]], x[e[:, 1]], x[e[:, 2]], x[e[:, 3]], x[e[:, 2]], x[e[:, 3]])
 
 
+def test_tet_lame_parameters_reach_the_engine_as_libuipc_stores_them(test, device):
+    """k_mu and k_lambda are Lame parameters. libuipc's StableNeoHookean.apply_to stores mu and lambda + mu, the SNK1
+    parameters that linearize to Hooke's law with those Lame parameters; the engine gets the same pair, so a block
+    with k_mu = k_lambda has Poisson's ratio 0.25, not 0."""
+    from uipc_warp.backend.finite_element.constitutions.stable_neo_hookean_3d import (  # noqa: PLC0415
+        StableNeoHookean3D,
+    )
+
+    builder = newton.ModelBuilder()
+    builder.add_soft_grid(
+        pos=wp.vec3(0.0, 0.0, 0.5),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(0.0),
+        dim_x=2,
+        dim_y=2,
+        dim_z=2,
+        cell_x=0.1,
+        cell_y=0.1,
+        cell_z=0.1,
+        density=1000.0,
+        k_mu=2.0e5,
+        k_lambda=5.0e5,
+        k_damp=0.0,
+    )
+    solver = newton.solvers.SolverIPC(builder.finalize(device=device))
+    elements = solver._scene.engine_inputs(solver._config, solver.model.device)["elements"]
+    snk = next(g for g in elements if isinstance(g, StableNeoHookean3D))
+    np.testing.assert_allclose(snk.mu.numpy(), 2.0e5)
+    np.testing.assert_allclose(snk.lam.numpy(), 7.0e5)
+
+
 def _rest_angles(solver):
     """The rest angles of the solver's hinges, in its own (winding) convention."""
     from uipc_warp.backend.finite_element.constitutions.discrete_shell_bending import (  # noqa: PLC0415
@@ -1938,6 +1969,10 @@ for name, func in (
     ("test_springs_oscillate_as_implicit_euler", test_springs_oscillate_as_implicit_euler),
     ("test_heightfield_triangles_and_rest", test_heightfield_triangles_and_rest),
     ("test_rest_shapes_from_tri_poses_and_edge_rest_angle", test_rest_shapes_from_tri_poses_and_edge_rest_angle),
+    (
+        "test_tet_lame_parameters_reach_the_engine_as_libuipc_stores_them",
+        test_tet_lame_parameters_reach_the_engine_as_libuipc_stores_them,
+    ),
 ):
     add_function_test(TestSolverIPCContact, name, func, devices=devices)
 for name, func in (

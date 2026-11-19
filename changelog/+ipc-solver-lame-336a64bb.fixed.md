@@ -1,0 +1,1 @@
+Fix ``SolverIPC`` passing ``k_lambda`` of ``Model.tet_materials`` to the stable Neo-Hookean energy as its own lambda: the energy, as libuipc stores it, takes ``k_lambda + k_mu``, so a tetrahedral body simulated a Lamé lambda lower by ``k_mu`` (Poisson ratio 0 instead of 0.25 when ``k_mu`` equals ``k_lambda``).
