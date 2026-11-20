@@ -14,19 +14,49 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntFlag
 from types import SimpleNamespace
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import warp as wp
 
-from ...core.types import MAXVAL, Axis, override
-from ...exceptions import NewtonWarning
-from ...geometry import GeoType, Mesh, ParticleFlags, ShapeFlags
+from newton import (
+    MAXVAL,
+    Axis,
+    BodyFlags,
+    Contacts,
+    Control,
+    GeoType,
+    JointTargetMode,
+    JointType,
+    Mesh,
+    Model,
+    ModelFlags,
+    NewtonWarning,
+    ParticleFlags,
+    ShapeFlags,
+    State,
+    StateFlags,
+    eval_fk,
+)
+from newton.math import velocity_at_point
+from newton.solvers import SolverBase
+
 from ...geometry.rest_shape import _dihedral_angles, _triangle_rest_geometry
-from ...math import velocity_at_point
-from ...sim import BodyFlags, Contacts, Control, JointTargetMode, JointType, Model, ModelFlags, State, StateFlags
-from ...sim.articulation import eval_fk
-from ..solver import SolverBase
+
+# typing.override from Python 3.12, typing_extensions' on Python 3.11, else no check, as Newton takes it
+if TYPE_CHECKING:
+    from typing_extensions import override
+else:
+    try:
+        from typing import override
+    except ImportError:
+        try:
+            from typing_extensions import override
+        except ImportError:
+
+            def override(method, /):
+                return method
+
 
 # libuipc-warp releases the solver is written for: from the first to before the second
 _UIPC_WARP_RELEASES = ((0, 4), (0, 5))
@@ -1806,7 +1836,7 @@ class SolverIPC(SolverBase):
         .. experimental::
         """
 
-        status: wp.array[wp.int32] | None = SolverBase.Observables.field(  # noqa: RUF009
+        status: wp.array[wp.int32] | None = SolverBase.Observables.field(
             dtype=wp.int32, frequency=Model.AttributeFrequency.WORLD
         )
         """Per-world :class:`SolverIPC.StatusBits` of the latest step, shape ``(world_count + 1,)``.
