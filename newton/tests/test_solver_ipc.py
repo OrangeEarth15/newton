@@ -3025,6 +3025,218 @@ def test_adaptive_kappa_follows_dt_in_captured_steps(test, device):
     test.assertLess(states[eager][0].particle_q.numpy()[:, 2].min(), D_HAT)  # the cube reached the ground
 
 
+# ---------------------------------------------------------------------------- libuipc's options
+
+
+def _bdf2_from_rest(n, h, a):
+    """``(x_n - x_0, v_n)`` of BDF2 from rest under a constant acceleration ``a``, its history started by an implicit
+    Euler step: ``v_n = n h a`` exactly and ``x_n - x_0 = a h^2 (n^2 / 2 + 3/4 (1 - 3^-n))``."""
+    n = np.asarray(n, np.float64)
+    return a * h * h * (n * n / 2.0 + 0.75 * (1.0 - 3.0**-n)), n * h * a
+
+
+def _drive_recurrence_bdf2(
+    inertia, h, steps, q0=0.0, qd0=0.0, ke=0.0, kd=0.0, ks=0.0, c=0.0, q_target=0.0, qd_target=0.0, q_rest=0.0, f=0.0
+):
+    """q_1 .. q_steps of BDF2 for inertia q'' = ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd + f after an
+    implicit Euler step (``_drive_recurrence``): ``I (q' - q~) = 4/9 h^2 tau(q', qd')`` with
+    ``q~ = 4/3 q - 1/3 q_prev + 2/9 h (4 qd - qd_prev)`` and ``qd' = (3 q' - 4 q + q_prev) / (2 h)``."""
+    q1 = _drive_recurrence(inertia, h, 1, q0, qd0, ke, kd, ks, c, q_target, qd_target, q_rest, f)[0]
+    q_prev, qd_prev, q, qd = q0, qd0, q1, (q1 - q0) / h
+    out = [q1]
+    for _ in range(steps - 1):
+        predicted = 4.0 / 3.0 * q - q_prev / 3.0 + 2.0 / 9.0 * h * (4.0 * qd - qd_prev)
+        a, b = 1.5 / h, (4.0 * q - q_prev) / (2.0 * h)  # qd' = a q' - b
+        load = ke * q_target + kd * qd_target + ks * q_rest + f + (kd + c) * b
+        w = 4.0 / 9.0 * h * h
+        q_next = (inertia * predicted + w * load) / (inertia + w * (ke + ks + (kd + c) * a))
+        q_prev, qd_prev, q, qd = q, qd, q_next, a * q_next - b
+        out.append(q)
+    return np.array(out)
+
+
+def test_bdf2_falls_from_an_implicit_euler_step(test, device):
+    """With integrator="bdf2" (libuipc's integrator/type; BDF1 by default, other values refused) a soft cube and a
+    rigid box fall from rest, eagerly and captured, as BDF2 does after a first implicit Euler step: ``v_n = -g n h`` and
+    ``z_n - z_0 = -g h^2 (n^2 / 2 + 3/4 (1 - 3^-n))``, to the float32 output. (A history started at rest, libuipc's,
+    would give the first step two thirds of the impulse.)"""
+    builder = newton.ModelBuilder()
+    builder.add_soft_grid(
+        pos=wp.vec3(-0.1, -0.1, 1.0), rot=wp.quat_identity(), vel=wp.vec3(0.0, 0.0, 0.0), dim_x=2, dim_y=2,
+        dim_z=2, cell_x=0.05, cell_y=0.05, cell_z=0.05, density=1000.0, k_mu=3.4e4, k_lambda=1.6e5, k_damp=0.0,
+    )  # fmt: skip
+    _box_body(builder, (0.5, 0.0, 1.0), (0.1, 0.1, 0.1))
+    model = builder.finalize(device=device)
+    h, g = 0.01, 9.81
+    z_particles, z_body = model.particle_q.numpy()[:, 2].astype(np.float64), float(model.body_q.numpy()[0, 2])
+
+    with test.assertRaisesRegex(ValueError, "integrator"):
+        newton.solvers.SolverIPC(model, integrator="bdf3")
+    test.assertIsNone(newton.solvers.SolverIPC(model)._engine.bdf1_frame)  # BDF1 by default
+
+    def check(state, n):
+        dz, v = _bdf2_from_rest(n, h, -g)
+        np.testing.assert_allclose(state.particle_q.numpy()[:, 2], z_particles + dz, rtol=0.0, atol=2e-6)
+        np.testing.assert_allclose(state.particle_qd.numpy()[:, 2], v, rtol=0.0, atol=1e-5)
+        test.assertAlmostEqual(float(state.body_q.numpy()[0, 2]), z_body + dz, delta=2e-6)
+        test.assertAlmostEqual(float(state.body_qd.numpy()[0, 2]), v, delta=1e-5)
+
+    for capture in (False, True):
+        with test.subTest(capture=capture):
+            solver = newton.solvers.SolverIPC(model, integrator="bdf2", **_CONVERGED)
+            test.assertEqual(solver._engine.options.bdf2_start, "bdf1")
+            s0, s1 = model.state(), model.state()
+            solver.step(s0, s1, None, None, h)
+            s0, s1 = s1, s0
+            check(s0, 1)
+            if capture:  # steps 2 and 3 in one graph, replayed
+                with wp.ScopedCapture(device=device) as cap:
+                    solver.step(s0, s1, None, None, h)
+                    solver.step(s1, s0, None, None, h)
+                for n in (3, 5, 7):
+                    wp.capture_launch(cap.graph)
+                    check(s0, n)
+            else:
+                for n in range(2, 8):
+                    solver.step(s0, s1, None, None, h)
+                    s0, s1 = s1, s0
+                    check(s0, n)
+
+
+def test_bdf2_turns_a_body_by_the_impulse_of_its_first_step(test, device):
+    """A torque from rest turns a free box in one step of 0.1 s to tau dt / I with integrator="bdf2" as with implicit
+    Euler, to 1%: the first step starts the history. Newton's body-force test turns a cube so; a BDF2 history started
+    at rest gives two thirds of it."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    b = _box_body(builder, (0.0, 0.0, 1.0), (0.5, 0.5, 0.5))
+    model = builder.finalize(device=device)
+    I_zz = float(model.body_inertia.numpy()[b][2, 2])
+    dt, alpha = 0.1, 6.0  # 0.6 rad/s after the step
+    for integrator in ("bdf1", "bdf2"):
+        with test.subTest(integrator=integrator):
+            solver = newton.solvers.SolverIPC(model, integrator=integrator, **_CONVERGED)
+            s0, s1 = model.state(), model.state()
+            s0.body_f.assign(np.array([[0.0, 0.0, 0.0, 0.0, 0.0, alpha * I_zz]], np.float32))
+            solver.step(s0, s1, None, None, dt)
+            test.assertAlmostEqual(float(s1.body_qd.numpy()[b, 5]), alpha * dt, delta=0.01 * alpha * dt)
+
+
+def test_bdf2_is_second_order_on_a_spring(test, device):
+    """Two particles on a spring, started 1 cm beyond its rest length, oscillate as u'' = -omega^2 u. At t = 0.4 s
+    (four radians) halving dt divides the error of integrator="bdf2" by about four, second order, and that of implicit
+    Euler by about two; BDF2's error is the smaller."""
+    m, k, L0 = 1.0, 50.0, 0.1
+    omega, T = np.sqrt(2.0 * k / m), 0.4
+
+    def error(integrator, h):
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        for x in (0.0, L0 + 0.01):
+            builder.add_particle(wp.vec3(x, 0.0, 1.0), wp.vec3(0.0, 0.0, 0.0), m, radius=0.001)
+        builder.add_spring(0, 1, k, 0.0, 0.0)
+        builder.spring_rest_length[0] = L0
+        model = builder.finalize(device=device)
+        solver = newton.solvers.SolverIPC(model, integrator=integrator, **_TIGHT)
+        rest = float(model.spring_rest_length.numpy()[0])
+        x = solver._engine.positions()[:2, 0]
+        u0 = x[1] - x[0] - rest
+        s0, s1 = model.state(), model.state()
+        for _ in range(round(T / h)):
+            solver.step(s0, s1, None, None, h)
+            s0, s1 = s1, s0
+        x = solver._engine.positions()[:2, 0]
+        return abs(x[1] - x[0] - rest - u0 * np.cos(omega * T))
+
+    e1 = [error("bdf1", h) for h in (0.01, 0.005)]
+    e2 = [error("bdf2", h) for h in (0.01, 0.005)]
+    test.assertGreater(e1[0] / e1[1], 1.7)
+    test.assertLess(e1[0] / e1[1], 2.3)
+    test.assertGreater(e2[0] / e2[1], 3.4)
+    test.assertLess(e2[0], 0.5 * e1[0])
+
+
+def test_bdf2_history_starts_anew(test, device):
+    """With integrator="bdf2" a state written between graph replays, and a reset, continue as a solver started from
+    that state does, to 1e-6: the step from it is an implicit Euler step whose start becomes the history, where a BDF2
+    step from the history the solver holds would move the bodies elsewhere."""
+    tight = {"newton_velocity_tol": 1e-6, "linear_tol_rate": 1e-12, "semi_implicit": False}
+
+    def scene():
+        builder = newton.ModelBuilder()
+        builder.add_soft_grid(
+            pos=wp.vec3(-0.25, -0.05, 0.002), rot=wp.quat_identity(), vel=wp.vec3(0.0, 0.0, 0.0), dim_x=2, dim_y=2,
+            dim_z=2, cell_x=0.05, cell_y=0.05, cell_z=0.05, density=1000.0, k_mu=3.4e4, k_lambda=1.6e5, k_damp=0.0,
+        )  # fmt: skip
+        _box_body(builder, (0.2, 0.0, 0.1005), (0.1, 0.1, 0.1))
+        builder.add_ground_plane()
+        return builder.finalize(device=device)
+
+    for case in ("new state", "reset"):
+        with test.subTest(case=case):
+            model = scene()
+            solver = newton.solvers.SolverIPC(model, integrator="bdf2", **tight)
+            s0, s1 = model.state(), model.state()
+            solver.step(s0, s1, None, None, 0.01)
+            s0, s1 = s1, s0
+            with wp.ScopedCapture(device=device) as capture:
+                solver.step(s0, s1, None, None, 0.01)
+                solver.step(s1, s0, None, None, 0.01)
+            for _ in range(3):
+                wp.capture_launch(capture.graph)
+            q, qd = s0.particle_q.numpy(), s0.particle_qd.numpy()
+            bq, bqd = s0.body_q.numpy(), s0.body_qd.numpy()
+            if case == "new state":
+                q[:, 2] += 0.03
+                qd[:] = (0.2, 0.0, -0.1)
+                bq[0, 2] += 0.02
+                bqd[0] = (0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+                for array, value in ((s0.particle_q, q), (s0.particle_qd, qd), (s0.body_q, bq), (s0.body_qd, bqd)):
+                    array.assign(value)
+            else:
+                solver.reset(s0)
+            continued = []
+            for _ in range(4):
+                wp.capture_launch(capture.graph)
+                continued.append((s0.particle_q.numpy(), s0.body_q.numpy()))
+            model = scene()
+            fresh = newton.solvers.SolverIPC(model, integrator="bdf2", **tight)
+            f0, f1 = model.state(), model.state()
+            for array, value in ((f0.particle_q, q), (f0.particle_qd, qd), (f0.body_q, bq), (f0.body_qd, bqd)):
+                array.assign(value)
+            for step in range(8):
+                fresh.step(f0, f1, None, None, 0.01)
+                f0, f1 = f1, f0
+                if step % 2:
+                    np.testing.assert_allclose(continued[step // 2][0], f0.particle_q.numpy(), rtol=0.0, atol=1e-6)
+                    np.testing.assert_allclose(continued[step // 2][1], f0.body_q.numpy(), rtol=0.0, atol=1e-6)
+
+
+def test_bdf2_drives(test, device):
+    """With integrator="bdf2" a revolute and a prismatic joint driven from rest by target gains, a passive spring and
+    passive damping follow BDF2's recurrence of I q'' = ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd after an
+    implicit Euler step, step by step to 1e-4 of their motion; implicit Euler's recurrence is farther off."""
+    for kind, length, scale in (("revolute", 0.1, 1.0), ("prismatic", 1.0, 10.0)):
+        with test.subTest(kind):
+            gains = {"target_ke": 40.0, "target_kd": 2.0, "stiffness": 10.0, "damping": 1.0}
+            gains = {name: scale * value for name, value in gains.items()}
+            targets = {"target_q": 0.5 * length, "target_qd": 0.1 * length, "rest_q": -0.2 * length}
+            model, state, _ = _hinged(device, kind, axis=newton.Axis.X, radius=0.5, **targets, **gains)
+            solver = newton.solvers.SolverIPC(model, integrator="bdf2", **_CONVERGED)
+            m = float(model.body_mass.numpy()[0])
+            inertia = float(model.body_inertia.numpy()[0][0, 0]) if kind == "revolute" else m
+            h, steps = 0.01, 100
+            q, _ = _steps(model, solver, state, steps, h, model.control())
+            args = {
+                "ke": gains["target_ke"], "kd": gains["target_kd"], "ks": gains["stiffness"], "c": gains["damping"],
+                "q_target": targets["target_q"], "qd_target": targets["target_qd"], "q_rest": targets["rest_q"],
+            }  # fmt: skip
+            expected = _drive_recurrence_bdf2(inertia, h, steps, **args)
+            scale_q = np.abs(expected).max()
+            test.assertGreater(scale_q, 0.1 * length)
+            np.testing.assert_allclose(q[:, 0], expected, rtol=0.0, atol=1e-4 * scale_q)
+            euler = _drive_recurrence(inertia, h, steps, **args)
+            test.assertGreater(np.abs(euler - expected).max(), 1e-3 * scale_q)
+
+
 @requires("uipc_warp")
 class TestSolverIPC(unittest.TestCase):
     pass
@@ -3305,6 +3517,11 @@ class TestSolverIPCJoints(unittest.TestCase):
     built without a pose start."""
 
 
+@requires("uipc_warp")
+class TestSolverIPCOptions(unittest.TestCase):
+    """libuipc's options: BDF2."""
+
+
 devices = get_cuda_test_devices()
 add_function_test(TestSolverIPC, "test_drop_on_ground", test_drop_on_ground, devices=devices)
 add_function_test(
@@ -3437,6 +3654,17 @@ for name, func in (
     ("test_unplaced_links_start_at_forward_kinematics", test_unplaced_links_start_at_forward_kinematics),
 ):
     add_function_test(TestSolverIPCJoints, name, func, devices=devices)
+for name, func in (
+    ("test_bdf2_falls_from_an_implicit_euler_step", test_bdf2_falls_from_an_implicit_euler_step),
+    (
+        "test_bdf2_turns_a_body_by_the_impulse_of_its_first_step",
+        test_bdf2_turns_a_body_by_the_impulse_of_its_first_step,
+    ),
+    ("test_bdf2_is_second_order_on_a_spring", test_bdf2_is_second_order_on_a_spring),
+    ("test_bdf2_history_starts_anew", test_bdf2_history_starts_anew),
+    ("test_bdf2_drives", test_bdf2_drives),
+):
+    add_function_test(TestSolverIPCOptions, name, func, devices=devices)
 
 
 if __name__ == "__main__":

@@ -101,7 +101,7 @@ Supported Features
      - ❌
      - ❌
    * - :class:`~newton.solvers.SolverIPC`
-     - Implicit (BDF1)
+     - Implicit (BDF1, BDF2)
      - 🟨 affine bodies :sup:`5`
      - 🟨 penalty joints :sup:`5`
      - ✅

@@ -383,8 +383,12 @@ def _joint_terms(
     strength: wp.array[wp.float64],
     mass_sum: wp.array[wp.float64],
     current: wp.array[wp.float64],
+    q_prev: wp.array[wp.float64],
+    bdf2: int,
+    restart: wp.array[wp.int32],
     dt: wp.float64,
     drive_scale: wp.float64,
+    q_start: wp.array[wp.float64],
     ratio: wp.array[wp.float64],
     drv_on: wp.array[wp.int32],
     drv_ratio: wp.array[wp.float64],
@@ -400,8 +404,11 @@ def _joint_terms(
     **Joints**): the strength ratio of its penalty ``strength`` (0 when disabled) for the engine's ``mass_sum``, the
     masses the joint was built with; the drive, passive spring and passive damping as one quadratic potential of the
     step (libuipc's driving term, ``drive_scale`` 1 for a revolute joint, 1/2 for a prismatic one, whose driving
-    energy counts its distance twice); the limit as libuipc's cubic penalty with Newton's limit stiffness at
-    ``_LIMIT_OVERSHOOT``; ``joint_f`` as libuipc's external torque or force."""
+    energy counts its distance twice), with the velocity at the step's end of the step's integrator: BDF1, or with
+    ``bdf2`` BDF2 from the coordinate ``q_prev`` at the start of the step before, unless the engine's frame starts its
+    history (``restart[0]``) with an implicit Euler step; the limit as libuipc's cubic penalty with Newton's limit
+    stiffness at ``_LIMIT_OVERSHOOT``; ``joint_f`` as libuipc's external torque or force. ``q_start`` takes the
+    coordinate at the step's start."""
     e = wp.tid()
     j = joints[e]
     d = joint_qd_start[j]
@@ -428,14 +435,24 @@ def _joint_terms(
     qd_target = zero
     if has_target_qd != 0:
         qd_target = wp.float64(target_qd[d])
+    q_n = current[e]
+    q_start[e] = q_n
     # implicit Euler: ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd at the step's end, qd = (q - q_n) / dt, is
-    # minus the gradient of K/2 (q - q_hat)^2
+    # minus the gradient of K/2 (q - q_hat)^2; BDF2: qd = 3/2 (q - (4 q_n - q_nm1) / 3) / dt
     K = ke + ks + (kd + c) / dt
+    q_aim = zero
+    if bdf2 != 0 and restart[0] == 0:
+        w = wp.float64(1.5) / dt
+        K = ke + ks + (kd + c) * w
+        q_bar = (wp.float64(4.0) * q_n - q_prev[e]) / wp.float64(3.0)
+        if K > zero:
+            q_aim = (ke * q_target + ks * q_rest + kd * w * (q_bar + qd_target / w) + c * w * q_bar) / K
+    elif K > zero:
+        q_aim = (ke * q_target + ks * q_rest + (kd / dt) * (q_n + dt * qd_target) + (c / dt) * q_n) / K
     drive = on and K > zero and m > zero
     drv_on[e] = wp.where(drive, 1, 0)
     if drive:
-        q_n = current[e]
-        drv_aim[e] = (ke * q_target + ks * q_rest + (kd / dt) * (q_n + dt * qd_target) + (c / dt) * q_n) / K
+        drv_aim[e] = q_aim
         drv_ratio[e] = drive_scale * K * dt * dt / m
     lo = limit_lower[d]
     hi = limit_upper[d]
@@ -706,6 +723,12 @@ def _warp_requirement() -> str | None:
         if match:
             return match.group(1).strip() or None
     return None
+
+
+def _check_choice(name: str, value: str, accepted: tuple) -> None:
+    """``ValueError`` unless ``value`` is one of ``accepted``, the values of libuipc's config key that ``name`` sets."""
+    if value not in accepted:
+        raise ValueError(f"SolverIPC: {name} must be one of {', '.join(map(repr, accepted))}, got {value!r}.")
 
 
 def _colliding_shapes(model: Model) -> np.ndarray:
@@ -1393,13 +1416,14 @@ class SolverIPC(SolverBase):
 
     Wraps the `libuipc-warp <https://github.com/OrangeEarth15/libuipc-warp>`_ engine,
     a Warp implementation of libuipc, through its array interface (no libuipc
-    build is needed). Each :meth:`step` is one implicit-Euler (BDF1) time step:
-    a Newton iteration with a backtracking line search, a block-Jacobi PCG
-    linear solve, barrier contact and continuous collision detection. The
-    Newton loop, the PCG loop and the line search run on the device under
-    ``wp.capture_while``, so a step never synchronizes with the host when it is
-    captured in a CUDA graph. A step that is not captured captures the solve
-    itself and checks how it ended (see below).
+    build is needed). Each :meth:`step` is one implicit time step, by default
+    of implicit Euler (BDF1): a Newton iteration with a backtracking line
+    search, a block-Jacobi PCG linear solve, barrier contact and continuous
+    collision detection. ``integrator="bdf2"`` takes libuipc's BDF2 instead
+    (see **BDF2** below). The Newton loop, the PCG loop and the line search run
+    on the device under ``wp.capture_while``, so a step never synchronizes with
+    the host when it is captured in a CUDA graph. A step that is not captured
+    captures the solve itself and checks how it ended (see below).
 
     Supported model content:
 
@@ -1598,6 +1622,39 @@ class SolverIPC(SolverBase):
     init. Every contact pair takes one value, which :meth:`contact_stiffness`
     gives for a step of any ``dt``.
 
+    **BDF2.** ``integrator="bdf2"`` is libuipc's BDF2 (its ``integrator/type``,
+    taken as libuipc and its pyuipc front end take it): the step predicts
+
+    .. math::
+
+        \\tilde x = \\tfrac{4}{3} x_n - \\tfrac{1}{3} x_{n-1}
+            + \\tfrac{2}{9} \\Delta t (4 v_n - v_{n-1}) + \\tfrac{4}{9} \\Delta t^2 a,
+
+    weighs the inertia :math:`\\tfrac{9}{4}` times as much against the potentials
+    as implicit Euler does, and ends at
+    :math:`v_{n+1} = (3 x_{n+1} - 4 x_n + x_{n-1}) / (2 \\Delta t)`: second order,
+    with less numerical damping than implicit Euler. Contact so loses less
+    energy and bodies take longer to settle: a cube dropped onto the ground in
+    steps of 1/1800 s rebounds at 0.93 of its impact speed, at 0.47 under
+    implicit Euler, as in libuipc. The history :math:`(x_{n-1}, v_{n-1})` is
+    the solver's, not the state's: a step from the state the solver wrote last
+    continues it, and every other step is an implicit Euler step whose start
+    becomes the history: the first step, a step from a state the solver did not
+    write last (also one it wrote earlier) and the step after :meth:`reset`. A
+    step from a new state so applies the whole impulse of its forces, as in
+    Newton's other solvers. (libuipc starts the history from rest, without
+    acceleration: a constant force from rest gets two thirds of its impulse in
+    the first step, and the velocity lags half a step's impulse behind for
+    good.) Within a history the velocity lags the same way behind a force that
+    jumps: gravity changed by :math:`\\Delta g` through
+    :meth:`notify_model_changed` leaves it :math:`\\Delta t \\, \\Delta g / 2`
+    behind. With ``coupled_worlds`` a new state in one world makes the step an
+    implicit Euler step in every world. As in libuipc the coefficients assume
+    one ``dt`` for consecutive steps: a step of another ``dt`` is taken as it
+    is. The drives, passive springs and damping of joints take BDF2's velocity
+    at the end of the step (see **Joints**); the default body stiffness follows
+    the rule of **Rigid bodies**.
+
     **Worlds.** Particles, bodies and colliding shapes in more than one local
     world are refused unless ``coupled_worlds=True``. With it every local world
     is a libuipc subscene of its own and the global entities (world -1) one
@@ -1712,12 +1769,13 @@ class SolverIPC(SolverBase):
     makes the linear system stiffer.
 
     Drives, passive springs and passive damping of a revolute or prismatic
-    joint are exact for implicit Euler: the joint's
+    joint are exact for the step's integrator: the joint's
     :math:`\\tau = k_e (q^* - q) + k_d (\\dot q^* - \\dot q) - k_s (q - q_r) - c \\dot q`
     (``joint_target_ke``, ``joint_target_kd``, ``joint_stiffness``,
     ``joint_rest_q``, ``joint_damping``; targets from
     :attr:`~newton.Control.joint_target_q` and ``joint_target_qd``), taken at
-    the end of the step with :math:`\\dot q = (q - q_n)/\\Delta t`, is minus the
+    the end of the step with :math:`\\dot q = (q - q_n)/\\Delta t` (BDF2:
+    :math:`(3 q - 4 q_n + q_{n-1}) / (2 \\Delta t)`), is minus the
     gradient of one quadratic potential in :math:`q`, which the solver gives
     libuipc's driving term every step. The gains act whatever
     ``joint_target_mode`` says, as in the other maximal-coordinate solvers.
@@ -1857,6 +1915,7 @@ class SolverIPC(SolverBase):
         coupled_worlds: Simulate content in more than one world as one solve
             in which no world collides with another (see **Worlds**); without
             it such a model is refused.
+        integrator: ``"bdf1"`` (implicit Euler) or ``"bdf2"`` (see **BDF2**).
 
     Note:
         A step ends once the Newton update moves no vertex by more than
@@ -2003,12 +2062,14 @@ class SolverIPC(SolverBase):
         joint_strength_ratio: float = _JOINT_STRENGTH_RATIO,
         shape_segments: int = 24,
         coupled_worlds: bool = False,
+        integrator: str = "bdf1",
     ):
         if not model.device.is_cuda:
             raise NotImplementedError(f"SolverIPC runs on CUDA devices only; the model is on {model.device}.")
         super().__init__(model)
         self._coupled_worlds = bool(coupled_worlds)
         _check_supported(model, self._coupled_worlds)
+        _check_choice("integrator", integrator, ("bdf1", "bdf2"))
         if kappa is None and not adaptive_kappa:
             raise ValueError("SolverIPC: kappa=None, libuipc's default stiffness, needs adaptive_kappa=True.")
         if kappa is not None and not (np.isfinite(kappa) and kappa > 0.0):
@@ -2028,7 +2089,11 @@ class SolverIPC(SolverBase):
             semi_implicit=semi_implicit,
             semi_implicit_k_min=semi_implicit_k_min,
             eps_velocity=eps_velocity,
+            integrator=integrator,
         )
+        # a BDF2 history starts with an implicit Euler step: at the first step, and at every step from a state the
+        # solver did not write (class docstring, **BDF2**)
+        self._options = uipc_warp.EngineOptions(bdf2_start="bdf1") if integrator == "bdf2" else None
         self._adaptive_kappa = bool(adaptive_kappa)
         self._thickness = float(thickness)
         self._cloth_strain_rate = float(cloth_strain_rate)
@@ -2063,7 +2128,8 @@ class SolverIPC(SolverBase):
             ) from e
         version = getattr(uipc_warp, "__version__", "0")
         # the newest calls of each kind the solver makes: the frame status, the contact and subscene tabulars and the
-        # stiffness policy, the start check, the joints, the iterations of captured steps
+        # stiffness policy, the start check, the joints, the iterations of captured steps, the restart of a BDF2
+        # history
         needed = (
             (uipc_warp.arrays, "write_frame_status"),
             (uipc_warp.arrays.ArrayScene, "contact_model"),
@@ -2073,6 +2139,7 @@ class SolverIPC(SolverBase):
             (uipc_warp.arrays, "joint_groups"),
             (uipc_warp.arrays, "add_frame_iterations"),
             (uipc_warp.SimEngine, "prepare_capture"),
+            (uipc_warp.SimEngine, "restart_history"),
         )
         missing = [f"{owner.__name__}.{name}" for owner, name in needed if not hasattr(owner, name)]
         if missing:
@@ -2162,6 +2229,7 @@ class SolverIPC(SolverBase):
         self._world_entries_device = wp.array(self._world_entries, dtype=wp.int32, device=device)
         self._status_scratch = wp.zeros(1, dtype=wp.int32, device=device)
         self._residual_scratch = wp.zeros(1, dtype=wp.float32, device=device)
+        self._no_restart = wp.zeros(1, dtype=wp.int32, device=device)  # BDF1: no history to restart
         nb = model.body_count
         if nb:
             self._body_base = wp.array(layout.body_base.astype(np.int32), dtype=wp.int32, device=device)
@@ -2467,7 +2535,9 @@ class SolverIPC(SolverBase):
         if len(self._force_blocks):
             self._forces = self._external_acceleration("newton_forces", self._force_blocks, device)
             inputs["elements"].append(self._forces)
-        self._engine = self._uipc_warp.make_engine(self._config, None, **inputs, device=device, capacity=capacity)
+        self._engine = self._uipc_warp.make_engine(
+            self._config, self._options, **inputs, device=device, capacity=capacity
+        )
         # the Newton and PCG iterations of the captured steps since the last graph_outdated()
         self._iterations = wp.zeros(2, dtype=wp.int64, device=device)
         # what the start check needs of the tabular: the element of every vertex and half plane, and their pairs
@@ -2831,7 +2901,7 @@ class SolverIPC(SolverBase):
         ``joint_f`` acts through the bodies' wrenches."""
         model, device = self.model, self.model.device
         self._world_body = -1
-        self._joint_rows, self._joint_strength = {}, {}
+        self._joint_rows, self._joint_strength, self._joint_history = {}, {}, {}
         if model.joint_count == 0:
             return
         joint_type = model.joint_type.numpy()
@@ -2888,6 +2958,12 @@ class SolverIPC(SolverBase):
                 scene.add_spherical_joints(bodies, p_p, p_c, strength_ratio=ratio)
             self._joint_rows[kind] = wp.array(rows.astype(np.int32), dtype=wp.int32, device=device)
             self._joint_strength[kind] = wp.array(strength, dtype=wp.float64, device=device)
+            if kind in ("revolute", "prismatic"):
+                # the coordinate at the start of this step, of the step before (BDF2's drives), and the one before
+                # that step's, which grow() takes back when it solves that step again
+                self._joint_history[kind] = tuple(
+                    wp.zeros(len(rows), dtype=wp.float64, device=device) for _ in range(3)
+                )
         self._no_joint_state = wp.zeros(1, dtype=wp.float64, device=device)  # the state of a kind without joints
         self._joint_element = wp.array(element, dtype=wp.int32, device=device)
         self._joint_q_written = wp.full(model.joint_coord_count, np.nan, dtype=wp.float32, device=device)
@@ -2979,6 +3055,7 @@ class SolverIPC(SolverBase):
                 self._write_observables(observables)
                 self._forget_written()  # the engine holds the failed solve: the next step takes state_in
                 raise RuntimeError(self._failure(status))
+        self._shift_joint_history()
         self._store(state_in.body_q, state_in.body_qd, state_out)
         self._write_observables(observables)
 
@@ -2992,6 +3069,15 @@ class SolverIPC(SolverBase):
         ):
             control = self._default_control = model.control(clone_variables=False)
         return control
+
+    def _shift_joint_history(self) -> None:
+        """BDF2: the joint coordinates at the start of this step become those of the step before, whose own are kept
+        for grow() (on the device, also inside a captured graph)."""
+        if self._config.integrator != "bdf2":
+            return
+        for q_start, q_prev, q_kept in self._joint_history.values():
+            wp.copy(q_kept, q_prev)
+            wp.copy(q_prev, q_start)
 
     def _report_clamp(self, dt: float) -> None:
         """Warn once when a step's ``dt`` clamps the given ``kappa`` into libuipc's stiffness range."""
@@ -3045,6 +3131,7 @@ class SolverIPC(SolverBase):
             self._uipc_warp.arrays.update_body_vertices(eng)  # surface vertices x = A x_bar + p
             self._load_joints(state_in)
         eng.discard_friction(where=self._changed)
+        eng.restart_history(where=self._changed)  # BDF2: the step is an implicit Euler step (BDF1: nothing)
 
     def _write_forces(self, state_in: State, control: Control) -> None:
         """The external accelerations of the step, on the device."""
@@ -3130,9 +3217,12 @@ class SolverIPC(SolverBase):
             return
         springs = all(a is not None for a in (model.joint_stiffness, model.joint_rest_q, model.joint_damping))
         target_q, target_qd, joint_f = control.joint_target_q, control.joint_target_qd, control.joint_f
+        bdf2 = self._config.integrator == "bdf2"
+        restart = self._engine.bdf1_frame[0:1] if bdf2 else self._no_restart
         for kind, group, scale in (("revolute", groups.revolute, 1.0), ("prismatic", groups.prismatic, 0.5)):
             if group is None:
                 continue
+            q_start, q_prev, _ = self._joint_history[kind]
             force_on, force = (group.tq_on, group.tq) if kind == "revolute" else (group.f_on, group.f)
             wp.launch(
                 _joint_terms,
@@ -3160,10 +3250,14 @@ class SolverIPC(SolverBase):
                     self._joint_strength[kind],
                     group.mass_sum,
                     group.current,
+                    q_prev,
+                    int(bdf2),
+                    restart,
                     wp.float64(dt),
                     wp.float64(scale),
                 ],
                 outputs=[
+                    q_start,
                     group.ratio,
                     group.drv_on,
                     group.drv_ratio,
@@ -3363,6 +3457,9 @@ class SolverIPC(SolverBase):
             raise RuntimeError("SolverIPC.grow() synchronizes with the device; call it outside graph capture.")
         if not self._uipc_warp.arrays.frame_status(self._engine).overflowed:
             return
+        if self._config.integrator == "bdf2":  # the joints' history of the last step, which is solved again
+            for _, q_prev, q_kept in self._joint_history.values():
+                wp.copy(q_prev, q_kept)
         for _ in range(_MAX_REGROWS):
             self._regrow()
             if not self._solve_frame(self._dt).overflowed:
@@ -3498,9 +3595,10 @@ class SolverIPC(SolverBase):
         """Make the next step start as the first step of a new solver.
 
         Besides its float64 state, which the next step compares with ``state_in`` (see the class docstring), the
-        solver carries the friction of the last step's contacts from one step to the next; this discards it. The
-        contacts themselves are reused only where nothing moved, where they are the ones a new solver finds.
-        Launched on the device without synchronization, so it can be captured.
+        solver carries the friction of the last step's contacts from one step to the next, and with
+        ``integrator="bdf2"`` the integrator's history; this discards them, so that the next step is an implicit
+        Euler step without friction. The contacts themselves are reused only where nothing moved, where they are
+        the ones a new solver finds. Launched on the device without synchronization, so it can be captured.
 
         Args:
             state: Unused; the next step reads its own ``state_in``.
@@ -3517,6 +3615,7 @@ class SolverIPC(SolverBase):
             return
         if world_mask is None:
             self._engine.discard_friction()
+            self._engine.restart_history()
             return
         wp.launch(
             _any_selected,
@@ -3526,6 +3625,7 @@ class SolverIPC(SolverBase):
             device=self.model.device,
         )
         self._engine.discard_friction(where=self._selected)
+        self._engine.restart_history(where=self._selected)
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
