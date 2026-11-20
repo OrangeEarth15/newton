@@ -1831,6 +1831,92 @@ def test_rest_shapes_from_tri_poses_and_edge_rest_angle(test, device):
         newton.solvers.SolverIPC(builder.finalize(device=device))
 
 
+def _flat_sheet(device, rot=None):
+    """A 6 x 6 cloth grid of 3 cm cells built at rest at 0.9 m: flat, and Newton measures its rest angles as 0."""
+    builder = newton.ModelBuilder()
+    builder.add_cloth_grid(
+        pos=wp.vec3(-0.1, -0.1, 0.9),
+        rot=wp.quat_identity() if rot is None else rot,
+        vel=wp.vec3(0.0, 0.0, 0.0),
+        dim_x=6,
+        dim_y=6,
+        cell_x=0.03,
+        cell_y=0.03,
+        mass=0.01,
+        tri_ke=1.0e3,
+        tri_ka=1.0e3,
+        tri_kd=0.0,
+        edge_ke=5.0e-3,
+        edge_kd=0.0,
+    )
+    return builder.finalize(device=device)
+
+
+def test_cloth_at_rest_starts_without_bending_force(test, device):
+    """A cloth built at rest starts at its rest angles as the engine measures them, so that no hinge pushes it out of
+    its plane. Newton measures the angle of every hinge of this flat sheet as 0; libuipc's dihedral angle, the
+    arccosine of the normals' cosine, reads 1.5e-8 rad on some of them, and it is the angle the engine's bending
+    energy takes. The engine's rest angles are its own of the start positions (as libuipc takes them from its rest
+    geometry), and its bending gradient at the start is 0. A rest angle other than the start's is Newton's
+    (test_rest_shapes_from_tri_poses_and_edge_rest_angle)."""
+    from uipc_warp.backend.finite_element.constitutions.discrete_shell_bending import (  # noqa: PLC0415
+        DiscreteShellBending,
+        hinge_rest_shape,
+    )
+    from uipc_warp.backend.types import mat33d, vec3d  # noqa: PLC0415
+
+    model = _flat_sheet(device)
+    test.assertFalse(np.any(model.edge_rest_angle.numpy()))
+    engine = newton.solvers.SolverIPC(model)._engine
+    bending = next(g for g in engine.elements if isinstance(g, DiscreteShellBending))
+    stencils = bending.stencils.numpy()
+    measured = hinge_rest_shape(model.particle_q.numpy().astype(np.float64), stencils)[2]
+    test.assertGreater(np.count_nonzero(measured), 0)  # libuipc's angle of some flat hinges is not 0
+    np.testing.assert_array_equal(bending.params[3].numpy(), measured)
+    n = len(stencils)
+    grad = wp.zeros(4 * n, dtype=vec3d, device=device)
+    hess = wp.zeros(10 * n, dtype=mat33d, device=device)
+    bending.gradient_hessian(engine.vm.x, engine.state.fs, grad, hess)
+    test.assertFalse(np.any(grad.numpy()))
+
+
+def test_cloth_at_rest_takes_its_rest_triangles_from_particle_q(test, device):
+    """Newton's builders compute a cloth triangle's rest shape in float64 from particle_q and keep its inverse in float32
+    (tri_poses). For a cloth built at rest the engine's membrane takes the rest shapes of particle_q, as libuipc
+    computes them from its rest geometry: its inverse rest matrices and rest areas are libuipc's of the start, bit for
+    bit, while those of the float32 tri_poses are off by their rounding, a strain the sheet would start with. A
+    triangle whose tri_poses were changed keeps them; the others then take the rest shapes of particle_q to
+    round-off."""
+    from uipc_warp.backend.finite_element.constitutions.strain_limiting_baraff_witkin_shell_2d import (  # noqa: PLC0415
+        StrainLimitingBaraffWitkinShell2D,
+        slbws_rest_matrices,
+        slbws_rest_shape,
+    )
+
+    def membrane(model):
+        engine = newton.solvers.SolverIPC(model)._engine
+        return next(g for g in engine.elements if isinstance(g, StrainLimitingBaraffWitkinShell2D))
+
+    model = _flat_sheet(device, rot=wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.3))
+    x = model.particle_q.numpy().astype(np.float64)
+    tris = model.tri_indices.numpy().reshape(-1, 3)
+    IB, area = slbws_rest_shape(x, tris)
+    shell = membrane(model)
+    np.testing.assert_array_equal(shell.IB.numpy(), IB)
+    np.testing.assert_array_equal(shell.area.numpy(), area)
+    poses = model.tri_poses.numpy()
+    rounded = slbws_rest_matrices(x, tris, np.linalg.inv(poses.astype(np.float64)))
+    entries = IB != 0.0
+    test.assertGreater(np.abs(rounded[entries] / IB[entries] - 1.0).max(), 1e-8)  # the float32 tri_poses are not it
+
+    poses[0] /= 1.2
+    model.tri_poses.assign(poses)
+    shell = membrane(model)
+    stretched = slbws_rest_matrices(x[tris[0]], np.array([[0, 1, 2]]), np.linalg.inv(poses[:1].astype(np.float64)))
+    np.testing.assert_allclose(shell.IB.numpy()[0], stretched[0], rtol=0.0, atol=1e-12 * np.abs(IB).max())
+    np.testing.assert_allclose(shell.IB.numpy()[1:], IB[1:], rtol=0.0, atol=1e-12 * np.abs(IB).max())
+
+
 def test_gravity_per_world(test, device):
     """A global particle and body fall with the global world's gravity (the last entry of Model.gravity) and a
     particle and body of world 0 with world 0's, as implicit Euler from rest. New gravities of both worlds, set with
@@ -2568,6 +2654,11 @@ for name, func in (
     ("test_adaptive_kappa_is_libuipcs", test_adaptive_kappa_is_libuipcs),
     ("test_adaptive_kappa_follows_dt_in_captured_steps", test_adaptive_kappa_follows_dt_in_captured_steps),
     ("test_rest_shapes_from_tri_poses_and_edge_rest_angle", test_rest_shapes_from_tri_poses_and_edge_rest_angle),
+    ("test_cloth_at_rest_starts_without_bending_force", test_cloth_at_rest_starts_without_bending_force),
+    (
+        "test_cloth_at_rest_takes_its_rest_triangles_from_particle_q",
+        test_cloth_at_rest_takes_its_rest_triangles_from_particle_q,
+    ),
     (
         "test_tet_lame_parameters_reach_the_engine_as_libuipc_stores_them",
         test_tet_lame_parameters_reach_the_engine_as_libuipc_stores_them,

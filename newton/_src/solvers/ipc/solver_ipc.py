@@ -21,6 +21,7 @@ import warp as wp
 from ...core.types import MAXVAL, Axis, override
 from ...exceptions import NewtonWarning
 from ...geometry import GeoType, Mesh, ParticleFlags, ShapeFlags
+from ...geometry.rest_shape import _dihedral_angles, _triangle_rest_geometry
 from ...math import velocity_at_point
 from ...sim import BodyFlags, Contacts, Control, JointTargetMode, JointType, Model, ModelFlags, State, StateFlags
 from ..solver import SolverBase
@@ -1116,6 +1117,28 @@ def _winding_signs(tris: np.ndarray, rows: np.ndarray, names: np.ndarray) -> np.
     return np.where(forward0, 1.0, -1.0)
 
 
+def _rest_edges(x: np.ndarray, tris: np.ndarray, poses: np.ndarray) -> np.ndarray | None:
+    """``ArrayScene.add_shell``'s ``rest_edges`` of the cloth triangles ``tris`` from Newton's ``tri_poses`` ``poses``.
+
+    Newton's builders compute a triangle's rest edges in float64 from ``particle_q`` (``_triangle_rest_geometry``, in
+    the edge frame ``add_shell`` takes) and store their inverse in float32. A triangle whose ``poses`` are the float32
+    rounding of the inverse of its rest edges at ``x`` (``particle_q`` in float64) takes those rest edges, any other
+    the inverse of its ``poses``. None when every triangle has the rest shape of ``x``: the engine then takes the rest
+    shapes from the rest positions, as libuipc takes them from its rest geometry.
+    """
+    p = x[tris[:, 0]]
+    edges, area = _triangle_rest_geometry(x[tris[:, 1]] - p, x[tris[:, 2]] - p)
+    start = area > 0.0
+    inverse = np.zeros_like(edges)
+    inverse[start] = np.linalg.inv(edges[start])
+    start &= np.all(inverse.astype(np.float32) == poses, axis=(1, 2))
+    if start.all():
+        return None
+    rest = np.linalg.inv(poses.astype(np.float64))
+    rest[start] = edges[start]
+    return rest
+
+
 def _closed_volume(v: np.ndarray, f: np.ndarray) -> float:
     """Enclosed volume of a closed triangle mesh (divergence theorem), either orientation."""
     if len(f) == 0:
@@ -1249,17 +1272,28 @@ class SolverIPC(SolverBase):
     of its :attr:`~newton.Model.tri_poses` (the edges in the triangle's frame
     whose first axis runs along its first edge), laid into the plane of the
     triangle at :attr:`~newton.Model.particle_q`, first edge along first edge,
-    where it takes libuipc's material axes. A hinge's rest angle is its
-    :attr:`~newton.Model.edge_rest_angle`, the signed angle between the normals
-    of ``(o0, v1, v2)`` and ``(o1, v2, v1)`` for the row ``(o0, o1, v1, v2)``:
-    libuipc's angle by the winding of the two triangles where ``o0``'s
-    triangle runs ``v1 -> v2``, as in the rows Newton's cloth builders make,
-    and its negative where a row given by hand has ``o0``'s triangle run
-    ``v2 -> v1``. A row whose two triangles run the edge the same way raises
-    :class:`ValueError`. The hinges keep the rest lengths and areas of
-    ``particle_q`` (libuipc's :math:`L_0` and :math:`\\bar h`) where Newton's VBD
-    takes ``edge_rest_length``; for a rest shape equal to the start the two
-    agree.
+    where it takes libuipc's material axes. Newton's builders compute
+    ``tri_poses`` in float64 from ``particle_q`` and store them in float32: a
+    triangle whose ``tri_poses`` are that rounding takes its rest edges at
+    ``particle_q`` in float64, and when every triangle does, as for a cloth
+    built at rest, the engine takes them from ``particle_q`` as libuipc takes
+    them from its rest geometry, so that the membrane starts without strain.
+    A hinge's rest angle is its :attr:`~newton.Model.edge_rest_angle`, the
+    signed angle between the normals of ``(o0, v1, v2)`` and ``(o1, v2, v1)``
+    for the row ``(o0, o1, v1, v2)``: libuipc's angle by the winding of the
+    two triangles where ``o0``'s triangle runs ``v1 -> v2``, as in the rows
+    Newton's cloth builders make, and its negative where a row given by hand
+    has ``o0``'s triangle run ``v2 -> v1``. A row whose two triangles run the edge the same way raises
+    :class:`ValueError`. Where every hinge's ``edge_rest_angle`` is the angle
+    Newton's builders measure at ``particle_q``, as for a cloth built at rest,
+    the engine takes the rest angles from ``particle_q`` as libuipc takes them
+    from its rest geometry, with the dihedral angle its bending energy
+    evaluates, so that every hinge starts at its rest angle: libuipc's angle,
+    the arccosine of the normals' cosine, reads up to 1.5e-8 rad on a flat
+    hinge that Newton measures as 0. The hinges keep the rest lengths and
+    areas of ``particle_q`` (libuipc's :math:`L_0` and :math:`\\bar h`) where
+    Newton's VBD takes ``edge_rest_length``; for a rest shape equal to the
+    start the two agree.
 
     **Contact.** Which pairs collide, and with which friction, is libuipc's
     contact tabular: every vertex and half plane is in a contact element, and
@@ -2152,12 +2186,13 @@ class SolverIPC(SolverBase):
         stretch = k_mu + 0.5 * k_lambda
         shear = 0.5 * k_mu
         # Newton's tri_poses are the inverses of the rest edges in each triangle's edge frame, the frame add_shell
-        # takes them in
-        rest_edges = np.linalg.inv(model.tri_poses.numpy().astype(np.float64).reshape(-1, 2, 2)[cloth])
+        # takes them in, computed by Newton's builders in float64 from particle_q and stored in float32: a triangle
+        # whose tri_poses are the rounding of the rest edges of particle_q takes those in float64 (_rest_edges)
+        x = model.particle_q.numpy().astype(np.float64)
+        rest_edges = _rest_edges(x, tris, model.tri_poses.numpy().reshape(-1, 2, 2)[cloth])
 
         edges, kappa, angles = np.zeros((0, 2), np.int64), np.zeros(0), None
         if model.edge_count:
-            x = model.particle_q.numpy().astype(np.float64)
             e = model.edge_indices.numpy().reshape(-1, 4).astype(np.int64)
             ke = model.edge_bending_properties.numpy().astype(np.float64).reshape(-1, 2)[:, 0]
             # hinges: both opposite vertices present, the edge on the cloth
@@ -2169,8 +2204,16 @@ class SolverIPC(SolverBase):
             sel = (e[:, 0] >= 0) & (e[:, 1] >= 0) & np.isin(keys, cloth_keys)
             e, ke = e[sel], ke[sel]
             # Newton's rest angle of a row by the winding of its triangles (add_shell's convention)
-            angles = _winding_signs(tris, e, np.flatnonzero(sel)) * model.edge_rest_angle.numpy()[sel]
+            signs = _winding_signs(tris, e, np.flatnonzero(sel))
             x0, x1, x2, x3 = x[e[:, 0]], x[e[:, 1]], x[e[:, 2]], x[e[:, 3]]
+            # Newton's builders measure a row's rest angle at particle_q in float64 and store it in float32. When every
+            # edge_rest_angle is that measure, the rest angles are those of the start, and the engine takes them from
+            # the rest positions, as libuipc takes them from its rest geometry, with the dihedral angle its bending
+            # energy evaluates: libuipc's arccosine of the normals' cosine reads up to 1.5e-8 rad on a flat hinge,
+            # which Newton measures as 0, so that a rest angle of 0 would push a flat cloth out of its plane
+            rest = model.edge_rest_angle.numpy()[sel]
+            at_start = _dihedral_angles(x0, x1, x2, x3, x2, x3).astype(np.float32) == rest
+            angles = None if at_start.all() else signs * rest
             L0 = np.linalg.norm(x3 - x2, axis=1)
             area = 0.5 * (
                 np.linalg.norm(np.cross(x2 - x0, x3 - x0), axis=1) + np.linalg.norm(np.cross(x2 - x1, x3 - x1), axis=1)
