@@ -13,6 +13,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntFlag
+from types import SimpleNamespace
 from typing import ClassVar
 
 import numpy as np
@@ -24,6 +25,7 @@ from ...geometry import GeoType, Mesh, ParticleFlags, ShapeFlags
 from ...geometry.rest_shape import _dihedral_angles, _triangle_rest_geometry
 from ...math import velocity_at_point
 from ...sim import BodyFlags, Contacts, Control, JointTargetMode, JointType, Model, ModelFlags, State, StateFlags
+from ...sim.articulation import eval_fk
 from ..solver import SolverBase
 
 # libuipc-warp releases the solver is written for: from the first to before the second
@@ -1661,6 +1663,18 @@ class SolverIPC(SolverBase):
     :meth:`reset` does the same without a new state. Output is written to
     ``state_out`` in float32.
 
+    The solve is built at, and the start is checked on (see the note below),
+    the model's state: :attr:`~newton.Model.body_q` and ``body_qd``, but a
+    body whose pose there is the identity, where
+    :meth:`~newton.ModelBuilder.add_link` and
+    :meth:`~newton.ModelBuilder.add_body` put a body given no transform,
+    starts where :func:`newton.eval_fk` puts it from
+    :attr:`~newton.Model.joint_q` and :attr:`~newton.Model.joint_qd`. As for
+    Newton's other maximal-coordinate solvers, the caller writes those poses
+    into the state before the first step, also after building the solver;
+    the model of an articulation built without poses keeps the identity
+    until then, and its links may cross each other or the ground there.
+
     **Status.** Request :attr:`SolverIPC.ObservableKind.STATUS` and
     ``ObservableKind.SOLVER_RESIDUAL`` with :meth:`observables` and pass the
     container to :meth:`step`: the step writes a :class:`SolverIPC.StatusBits` mask and
@@ -1757,7 +1771,8 @@ class SolverIPC(SolverBase):
 
         The barrier needs a gap at the start. When the surfaces of different
         bodies cross each other, or are at or inside their contact thickness (up
-        to the rounding of float32 positions), in the model's state, the solver
+        to the rounding of float32 positions), in the model's state (with
+        forward kinematics for bodies at the identity, see **State**), the solver
         raises :class:`ValueError` at construction and names the closest pair,
         as libuipc's sanity check rejects such a scene at init. The thickness of
         a pair is the sum of its two sides' (see **Contact**). Surfaces that
@@ -2626,8 +2641,7 @@ class SolverIPC(SolverBase):
         mass, first, second = self._body_mass_moments(stacklevel=5)
         if model.body_count == 0:
             return mass, first, second
-        body_q = model.body_q.numpy().astype(np.float64)
-        body_qd = model.body_qd.numpy().astype(np.float64)
+        body_q, body_qd = self._start_bodies()
         body_com = model.body_com.numpy().astype(np.float64)
         body_mass = model.body_mass.numpy().astype(np.float64)
         body_gravity = self._world_gravity()[model.body_world.numpy()]
@@ -2674,6 +2688,24 @@ class SolverIPC(SolverBase):
                 gravity=body_gravity[b],
             )
         return mass, first, second
+
+    def _start_bodies(self) -> tuple[np.ndarray, np.ndarray]:
+        """The poses and twists the bodies are built at and the start check tests (class docstring, **State**):
+        ``model.body_q`` and ``model.body_qd``, but for a body whose pose there is the identity, where
+        ``ModelBuilder.add_link`` and ``add_body`` put a body given no transform: it starts where ``newton.eval_fk``
+        puts it from ``model.joint_q`` and ``model.joint_qd``, the pose with which a maximal-coordinate solver starts
+        once the caller has written forward kinematics into the state."""
+        model = self.model
+        body_q = model.body_q.numpy().astype(np.float64)
+        body_qd = model.body_qd.numpy().astype(np.float64)
+        unplaced = np.all(model.body_q.numpy() == np.array([0, 0, 0, 0, 0, 0, 1], np.float32), axis=1)
+        if not unplaced.any() or model.articulation_count == 0:
+            return body_q, body_qd
+        fk = SimpleNamespace(body_q=wp.clone(model.body_q), body_qd=wp.clone(model.body_qd))
+        eval_fk(model, model.joint_q, model.joint_qd, fk)
+        body_q[unplaced] = fk.body_q.numpy().astype(np.float64)[unplaced]
+        body_qd[unplaced] = fk.body_qd.numpy().astype(np.float64)[unplaced]
+        return body_q, body_qd
 
     def _add_joints(self, scene) -> None:
         """Newton's revolute, prismatic, fixed and ball joints as libuipc's (class docstring, **Joints**), joint frames

@@ -2249,6 +2249,65 @@ def _drive_recurrence(
     return np.array(out)
 
 
+def test_unplaced_links_start_at_forward_kinematics(test, device):
+    """A double pendulum built as Newton's basic_pendulum example builds it: links added without a pose, so that the
+    model holds both at the origin, through the ground plane, and the forward kinematics written into the state only
+    after the solver is built. The solver is built at, and checks, the poses newton.eval_fk computes from the model's
+    joint coordinates, and steps captured from that state run as those of a solver built from a model that holds the
+    poses. A link that the joint coordinates put into the ground is refused at construction, by name."""
+
+    def pendulum(height=5.0, angle=0.0, posed=False):
+        builder = newton.ModelBuilder()
+        links = [builder.add_link(label=f"link_{k}") for k in range(2)]
+        for link in links:
+            builder.add_shape_box(link, hx=1.0, hy=0.1, hz=0.1)
+        rot = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), -wp.pi * 0.5)
+        end = wp.transform(wp.vec3(-1.0, 0.0, 0.0), wp.quat_identity())
+        joints = [
+            builder.add_joint_revolute(-1, links[0], axis=wp.vec3(0.0, 1.0, 0.0),
+                                       parent_xform=wp.transform(wp.vec3(0.0, 0.0, height), rot), child_xform=end),
+            builder.add_joint_revolute(links[0], links[1], axis=wp.vec3(0.0, 1.0, 0.0),
+                                       parent_xform=wp.transform(wp.vec3(1.0, 0.0, 0.0), wp.quat_identity()),
+                                       child_xform=end),
+        ]  # fmt: skip
+        builder.add_articulation(joints)
+        builder.add_ground_plane()
+        builder.joint_q[0] = angle
+        model = builder.finalize(device=device)
+        if posed:
+            newton.eval_fk(model, model.joint_q, model.joint_qd, model)
+        return model
+
+    model = pendulum()
+    np.testing.assert_array_equal(model.body_q.numpy(), [[0, 0, 0, 0, 0, 0, 1]] * 2)
+    solver = newton.solvers.SolverIPC(model)  # refused before: the links crossed the ground at the origin
+    state = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+    base = solver._scene.layout().body_base[:2]
+    np.testing.assert_allclose(solver._engine.positions()[base], state.body_q.numpy()[:, :3], atol=1e-6)
+    test.assertAlmostEqual(float(state.body_q.numpy()[1, 2]), 5.0, places=5)  # the links lie level at the pivot
+
+    def captured(model, solver, state, frames=20):
+        s0, s1 = state, model.state()
+        solver.step(s0, s1, None, None, 0.001)
+        with wp.ScopedCapture(device=device) as capture:
+            solver.step(s1, s0, None, None, 0.001)
+            solver.step(s0, s1, None, None, 0.001)
+        for _ in range(frames):
+            wp.capture_launch(capture.graph)
+        return s1.body_q.numpy()
+
+    swung = captured(model, solver, state)
+    posed = pendulum(posed=True)
+    state = posed.state()
+    reference = captured(posed, newton.solvers.SolverIPC(posed), state)
+    test.assertLess(float(swung[1, 2]), 5.0 - 1e-3)  # the pendulum swings down
+    np.testing.assert_allclose(swung, reference, atol=1e-6)
+    # turned down from a pivot 3 m up, the outer link reaches 1 m into the ground
+    with test.assertRaisesRegex(ValueError, "body 1 \\('link_1'\\) and plane shape 2 start"):
+        newton.solvers.SolverIPC(pendulum(height=3.0, angle=0.5 * np.pi))
+
+
 def test_pendulum_is_implicit_euler(test, device):
     """A pendulum of 2 cm per metre swings as implicit Euler integrates the linearized pendulum, step by step to
     1e-3 of its amplitude, with the period of the closed form 2 pi sqrt(I / (m g L)) to 0.1%."""
@@ -2967,7 +3026,8 @@ class TestSolverIPCWorlds(unittest.TestCase):
 
 @requires("uipc_warp")
 class TestSolverIPCJoints(unittest.TestCase):
-    """Revolute, prismatic, fixed and ball joints: how they hold, forces, coordinates, drives and limits."""
+    """Revolute, prismatic, fixed and ball joints: how they hold, forces, coordinates, drives and limits, and where links
+    built without a pose start."""
 
 
 devices = get_cuda_test_devices()
@@ -3095,6 +3155,7 @@ for name, func in (
     ("test_drives_are_implicit_euler", test_drives_are_implicit_euler),
     ("test_joint_limits_hold", test_joint_limits_hold),
     ("test_drive_targets_change_inside_a_captured_graph", test_drive_targets_change_inside_a_captured_graph),
+    ("test_unplaced_links_start_at_forward_kinematics", test_unplaced_links_start_at_forward_kinematics),
 ):
     add_function_test(TestSolverIPCJoints, name, func, devices=devices)
 
