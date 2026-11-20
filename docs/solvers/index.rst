@@ -185,8 +185,9 @@ Supported Features
 | :sup:`5` Incremental Potential Contact: barrier contact, or on request libuipc's augmented-Lagrangian contact, with
   continuous collision detection between
   soft bodies, cloth (with self-collision), particles, near-rigid affine bodies, static shapes, planes and
-  height fields, between the pairs that the collision groups, worlds and filter pairs let collide; springs
-  without damping; revolute, prismatic, fixed and ball joints as penalty energies; one world besides the global
+  height fields, between the pairs that the collision groups, worlds and filter pairs let collide; springs and
+  particle-body attachments without damping; revolute, prismatic, fixed and ball joints as penalty energies; one
+  world besides the global
   one, or several with ``coupled_worlds=True``, which keeps them apart in contact but solves them together, so that
   a world's result depends on the others' iterations; requires the optional ``libuipc-warp`` package.
 
@@ -602,6 +603,13 @@ the path is independent of contact, so it stays active without penetration.
 Both endpoints must be integrated by the same solver, so
 :class:`~newton.solvers.SolverVBD` rejects attachments when it is constructed
 with ``integrate_with_external_rigid_solver=True``.
+
+:class:`~newton.solvers.SolverIPC` applies an attachment as libuipc's soft
+vertex stitch: a spring of the attachment's ``stiffness`` between the particle
+and the body point, a term of each step's implicit solve, so a finite
+attachment is the spring of implicit Euler and its forces are equal and
+opposite. A hard attachment takes the penalty of SolverIPC's ball joint, and an
+attachment with damping is rejected, since libuipc's stitch has no damping.
 
 When the endpoints of a finite-stiffness attachment belong to two different solvers in a coupled simulation,
 :class:`~newton.solvers.experimental.coupled.SolverCoupledADMM` turns the same

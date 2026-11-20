@@ -487,6 +487,35 @@ def _enable_anchor_joints(
 
 
 @wp.kernel
+def _stitch_stiffness(
+    source: wp.array[wp.int32],
+    stiffness: wp.array[wp.float32],
+    enabled: wp.array[wp.bool],
+    hard: wp.array[wp.float64],
+    spring_stiffness: wp.array[wp.float32],
+    inv_dt2: wp.float64,
+    kappa: wp.array[wp.float64],
+):
+    """The stiffness [N/m] of every row of a stitch group for the next step (class docstring, **Attachments**):
+    ``source`` holds the row's attachment, or -1 less its spring. An attachment takes its stiffness, 0 when it is
+    disabled, and a hard one (infinite stiffness) the penalty ``hard`` of a ball joint over ``dt^2``; a spring of
+    rest length 0 takes its ``spring_stiffness``."""
+    r = wp.tid()
+    s = source[r]
+    k = wp.float64(0.0)
+    if s >= 0:
+        if enabled[s]:
+            ks = stiffness[s]
+            if wp.isinf(ks):
+                k = hard[s] * inv_dt2
+            else:
+                k = wp.float64(ks)
+    else:
+        k = wp.float64(spring_stiffness[-1 - s])
+    kappa[r] = k
+
+
+@wp.kernel
 def _adopt_joint_angles(
     joints: wp.array[wp.int32],
     joint_q_start: wp.array[wp.int32],
@@ -788,7 +817,6 @@ def _check_supported(model: Model, coupled_worlds: bool = False) -> None:
     if model.requires_grad:
         raise NotImplementedError("SolverIPC does not support gradients (model.requires_grad=True).")
     for name, count in (
-        ("particle-body attachments", model.attachment_particle_body_count),
         ("tendons", model.tendon_count + model.custom_frequency_counts.get("mujoco:tendon", 0)),
         ("muscles", model.muscle_count),
     ):
@@ -813,19 +841,20 @@ def _check_supported(model: Model, coupled_worlds: bool = False) -> None:
             raise NotImplementedError(f"SolverIPC does not take {name} activations; the model has non-zero ones.")
     _check_joints(model)
     _check_springs(model)
+    _check_attachments(model)
     if not coupled_worlds:
         _check_one_world(model)
     _check_surface_velocity(model)
 
 
 def _check_springs(model: Model) -> None:
-    """Springs that libuipc's Hookean spring represents: no damping (libuipc has no damping element), a rest length
-    above 0 (its energy divides by the rest length) and a stiffness that is not negative."""
+    """Springs that libuipc represents: no damping (libuipc has no damping element), a rest length that is not
+    negative (above 0 libuipc's Hookean spring, 0 its soft vertex stitch) and a stiffness that is not negative."""
     if model.spring_count == 0:
         return
     for name, array, bad, why in (
-        ("damping", model.spring_damping, lambda v: v != 0.0, "libuipc's springs have no damping"),
-        ("rest length", model.spring_rest_length, lambda v: ~(v > 0.0), "libuipc's spring energy divides by it"),
+        ("damping", model.spring_damping, lambda v: v != 0.0, "libuipc's springs and stitches have no damping"),
+        ("rest length", model.spring_rest_length, lambda v: ~(v >= 0.0), "it must not be negative"),
         ("stiffness", model.spring_stiffness, lambda v: ~(v >= 0.0), "it must not be negative"),
     ):
         values = array.numpy()
@@ -834,6 +863,33 @@ def _check_springs(model: Model) -> None:
             k = int(found[0])
             raise NotImplementedError(
                 f"SolverIPC does not simulate spring {k}, whose {name} is {float(values[k])!r}: {why}."
+            )
+    ends = model.spring_indices.numpy().reshape(-1, 2)
+    same = np.flatnonzero(ends[:, 0] == ends[:, 1])
+    if len(same):
+        k = int(same[0])
+        raise NotImplementedError(
+            f"SolverIPC does not simulate spring {k}, which joins particle {int(ends[k, 0])} to itself."
+        )
+
+
+def _check_attachments(model: Model) -> None:
+    """Particle-body attachments that libuipc's soft vertex stitch represents: no damping (libuipc's stitch has none,
+    and an implicit damping cannot be folded into it the way the joint drives fold theirs, since it has no rest
+    offset to carry it) and a stiffness that is not negative, finite or infinite (hard)."""
+    if model.attachment_particle_body_count == 0:
+        return
+    for name, array, bad, why in (
+        ("damping", model.attachment_particle_body_damping, lambda v: v != 0.0, "libuipc's stitch has no damping"),
+        ("stiffness", model.attachment_particle_body_stiffness, lambda v: ~(v >= 0.0), "it must not be negative"),
+    ):
+        values = array.numpy()
+        found = np.flatnonzero(bad(values))
+        if len(found):
+            k = int(found[0])
+            raise NotImplementedError(
+                f"SolverIPC does not simulate particle-body attachment {k}, whose {name} is {float(values[k])!r}: "
+                f"{why}."
             )
 
 
@@ -1440,8 +1496,11 @@ class SolverIPC(SolverBase):
       discrete-shell hinges (see the mapping below).
     - springs between particles: libuipc's Hookean springs with Newton's
       energy :math:`\\tfrac{1}{2} k_e (l - L_0)^2` (``spring_stiffness``,
-      ``spring_rest_length``). A spring adds no contact primitive: the
-      particles it joins collide as other particles do.
+      ``spring_rest_length``), and libuipc's soft vertex stitch for a rest
+      length of 0. A spring adds no contact primitive: the particles it joins
+      collide as other particles do.
+    - particle-body attachments: libuipc's soft vertex stitch between the
+      particle and a point of the body (see **Attachments** below).
     - rigid bodies with box, sphere, capsule, cylinder, cone, ellipsoid or mesh
       collision shapes become affine bodies (see below).
     - contact against static plane shapes, each treated as an infinite half
@@ -1478,9 +1537,9 @@ class SolverIPC(SolverBase):
     - lagged friction on every contact.
 
     Not supported, and rejected when the solver is constructed:
-    :class:`NotImplementedError` for springs with damping (libuipc has no
-    damping element), a rest length of 0 or a negative stiffness,
-    particle-body attachments, mimic
+    :class:`NotImplementedError` for springs and particle-body attachments
+    with damping (libuipc has no damping element), springs of a negative
+    rest length or stiffness or that join a particle to itself, mimic
     and equality constraints, tendons, muscles, non-zero triangle or
     tetrahedron activations, the joint types and properties that **Joints**
     below rejects,
@@ -1712,6 +1771,33 @@ class SolverIPC(SolverBase):
     ``adaptive_kappa`` the stiffness range is that of the whole scene. A model
     with content in one local world is solved as without the option. The
     engine takes at most 2048 contact elements times subscenes.
+
+    **Attachments.** A particle-body attachment
+    (:meth:`~newton.ModelBuilder.add_attachment_particle_body`) is libuipc's
+    soft vertex stitch (constitution 22) of rest length 0 between the particle
+    and an anchor of the body's affine body at ``attachment_particle_body_body_point``
+    in Newton's body frame: a point that moves with the body and is no contact
+    primitive, as the interior vertices of an affine-body mesh are in libuipc;
+    attachments at one point of one body share it. Its energy in the step's
+    incremental potential is :math:`\\tfrac{1}{2} k \\Delta t^2 |x_p - x_a|^2`, the
+    spring :math:`\\tfrac{1}{2} k |x_p - x_a|^2` of implicit Euler with
+    :math:`k` = ``attachment_particle_body_stiffness``, so that the particle
+    and the body take equal and opposite forces, the body with the torque the
+    anchor's offset gives, and a disabled attachment
+    (``attachment_particle_body_enabled``) takes none. A hard attachment
+    (infinite stiffness), which libuipc has no constitution for, takes the
+    penalty of a ball joint (see **Joints**): :math:`K/\\Delta t^2` with
+    :math:`K` = ``joint_strength_ratio`` times the masses of the particle,
+    if it is not fixed, and of the body, if it is dynamic, so that it holds a
+    load :math:`F` within :math:`F \\Delta t^2 / K`. The stiffness and the
+    enabled flags are read at every step: a captured step takes new values at
+    its next replay. A spring of rest length 0 is the same stitch between its
+    two particles, with ``spring_stiffness``. Damping is rejected: libuipc's
+    stitch has none, and an implicit damping cannot be folded into it the way
+    the joint drives fold theirs. An attachment does not change which pairs
+    collide: an attached particle collides with its body as with any other,
+    so a particle attached on the body's surface starts in contact (see the
+    note on the start below); place it a gap away.
 
     **Rigid bodies.** Each Newton body becomes a libuipc affine body with 12
     degrees of freedom :math:`q = (p, a_1, a_2, a_3)`, the translation and the
@@ -2192,7 +2278,7 @@ class SolverIPC(SolverBase):
         version = getattr(uipc_warp, "__version__", "0")
         # the newest calls of each kind the solver makes: the frame status, the contact and subscene tabulars and the
         # stiffness policy, the start check, the joints, the iterations of captured steps, the restart of a BDF2
-        # history
+        # history, the stitches (with the anchors and stitch_groups of the same release)
         needed = (
             (uipc_warp.arrays, "write_frame_status"),
             (uipc_warp.arrays.ArrayScene, "contact_model"),
@@ -2203,6 +2289,7 @@ class SolverIPC(SolverBase):
             (uipc_warp.arrays, "add_frame_iterations"),
             (uipc_warp.SimEngine, "prepare_capture"),
             (uipc_warp.SimEngine, "restart_history"),
+            (uipc_warp.arrays.ArrayScene, "add_stitches"),
         )
         missing = [f"{owner.__name__}.{name}" for owner, name in needed if not hasattr(owner, name)]
         if missing:
@@ -2258,6 +2345,7 @@ class SolverIPC(SolverBase):
         tets = self._add_particles_and_tets(scene, elements)
         self._add_cloth(scene, tets)
         self._add_springs(scene)
+        self._plan_attachments()
         self._dyadic = self._add_shapes_and_bodies(scene, elements)
         if self._config.contact_constitution == "al-ipc":
             self._check_al_ipc(elements)
@@ -2271,6 +2359,8 @@ class SolverIPC(SolverBase):
             a, b = np.triu_indices(elements.count - 1)
             a, b = a + 1, b + 1
             scene.contact_model(a, b, elements.mu[a, b], None, elements.enabled[a, b])
+        self._attachment_hard = wp.array(self._attachment_penalties(self._dyadic[0]), dtype=wp.float64, device=device)
+        self._add_stitches(scene)
         self._scene = scene
         self._scene_inputs = self._scene_inputs_now()
         self._joint_inputs = self._joint_inputs_now()
@@ -2295,6 +2385,8 @@ class SolverIPC(SolverBase):
         self._status_scratch = wp.zeros(1, dtype=wp.int32, device=device)
         self._residual_scratch = wp.zeros(1, dtype=wp.float32, device=device)
         self._no_restart = wp.zeros(1, dtype=wp.int32, device=device)  # BDF1: no history to restart
+        self._no_float32 = wp.zeros(1, dtype=wp.float32, device=device)  # a model array the model does not have
+        self._no_bool = wp.zeros(1, dtype=wp.bool, device=device)
         nb = model.body_count
         if nb:
             self._body_base = wp.array(layout.body_base.astype(np.int32), dtype=wp.int32, device=device)
@@ -2336,6 +2428,11 @@ class SolverIPC(SolverBase):
     def _subscene_of_shape(self, s: int) -> int:
         """The subscene of shape ``s``'s vertices: its world's (``coupled_worlds``), else the one subscene, 0."""
         return 0 if self._worlds is None else int(self._worlds.subscene(self.model.shape_world.numpy()[s]))
+
+    def _subscene_of_body(self, b: int) -> int:
+        """The subscene of body ``b``, for the anchors of a body without shapes: its world's (``coupled_worlds``),
+        else the one subscene, 0."""
+        return 0 if self._worlds is None else int(self._worlds.subscene(self.model.body_world.numpy()[b]))
 
     def _world_gravity(self) -> np.ndarray:
         """``Model.gravity`` in float64: one row per world, the global world's last, so that the world of an entity
@@ -2657,6 +2754,11 @@ class SolverIPC(SolverBase):
             # notify_model_changed may have changed them since the scene was laid out (AL-IPC: it builds it again)
             self._engine.set_dyadic_mass(*self._engine_dyadic(self._dyadic))
         self._joint_groups = self._uipc_warp.arrays.joint_groups(self._engine)
+        # the stiffness of every stitch group and the attachment or spring of each of its rows (_stitch_stiffness)
+        self._stitch_rows = [
+            (g.kappa, wp.array(self._stitch_source[g.rows], dtype=wp.int32, device=device))
+            for g in self._uipc_warp.arrays.stitch_groups(self._engine)
+        ]
         self._find_body_stiffness()
 
     def _find_body_stiffness(self) -> None:
@@ -2807,16 +2909,119 @@ class SolverIPC(SolverBase):
         )
 
     def _add_springs(self, scene) -> None:
-        """Newton's springs as libuipc's Hookean springs: ``0.5 ke (l - L0)^2`` each (``spring_kappa`` with a radius of
-        1 m, which only scales the energy, since a spring is no contact primitive)."""
+        """Newton's springs of positive rest length as libuipc's Hookean springs: ``0.5 ke (l - L0)^2`` each
+        (``spring_kappa`` with a radius of 1 m, which only scales the energy, since a spring is no contact
+        primitive). Those of rest length 0 become stitches (``_add_stitches``)."""
         model = self.model
+        self._zero_springs = np.zeros(0, np.int64)
         if model.spring_count == 0:
             return
         edges = model.spring_indices.numpy().reshape(-1, 2).astype(np.int64)
         rest = model.spring_rest_length.numpy().astype(np.float64)
         ke = model.spring_stiffness.numpy().astype(np.float64)
-        kappa = self._uipc_warp.arrays.spring_kappa(ke, rest, 1.0)
-        scene.add_springs(edges, kappa, rest_lengths=rest, radius=1.0)
+        self._zero_springs = np.flatnonzero(rest == 0.0)
+        hookean = rest > 0.0
+        if not hookean.any():
+            return
+        kappa = self._uipc_warp.arrays.spring_kappa(ke[hookean], rest[hookean], 1.0)
+        scene.add_springs(edges[hookean], kappa, rest_lengths=rest[hookean], radius=1.0)
+
+    def _plan_attachments(self) -> None:
+        """The anchors of every body that attachments hold (class docstring, **Attachments**): the distinct
+        ``attachment_particle_body_body_point`` of its attachments in the order they first appear, and for every
+        attachment its anchor among its body's."""
+        model = self.model
+        count = model.attachment_particle_body_count
+        self._body_anchors = {}
+        self._attachment_anchor = np.zeros(count, np.int64)
+        self._attachment_inputs = ()
+        if count == 0:
+            return
+        body = model.attachment_particle_body_body.numpy().astype(np.int64)
+        particle = model.attachment_particle_body_particle.numpy().astype(np.int64)
+        point = model.attachment_particle_body_body_point.numpy()
+        self._attachment_inputs = (body, particle, point.copy())
+        for b in np.unique(body):
+            rows = np.flatnonzero(body == b)
+            points, first, inverse = np.unique(point[rows], axis=0, return_index=True, return_inverse=True)
+            order = np.argsort(first)
+            rank = np.empty_like(order)
+            rank[order] = np.arange(len(order))
+            self._body_anchors[int(b)] = points[order].astype(np.float64)
+            self._attachment_anchor[rows] = rank[inverse.reshape(-1)]
+
+    def _attachment_penalties(self, mass: np.ndarray) -> np.ndarray:
+        """The penalty of every attachment if it is hard (infinite stiffness): a ball joint's, ``joint_strength_ratio``
+        times the dynamic masses it joins (a particle that is not fixed, a dynamic body), in the units of the
+        incremental potential, so that its stiffness is that over ``dt^2``."""
+        model = self.model
+        count = model.attachment_particle_body_count
+        if count == 0:
+            return np.zeros(1)
+        body = model.attachment_particle_body_body.numpy().astype(np.int64)
+        particle = model.attachment_particle_body_particle.numpy().astype(np.int64)
+        particle_mass = np.where(self._fixed_particle, 0.0, model.particle_mass.numpy().astype(np.float64))
+        body_mass = np.where(self._kinematic_body, 0.0, mass)
+        return self._joint_strength_ratio * (particle_mass[particle] + body_mass[body])
+
+    def _add_stitches(self, scene) -> None:
+        """Newton's particle-body attachments and springs of rest length 0 as libuipc's soft vertex stitches of rest
+        length 0 (class docstring, **Attachments**): an attachment between its particle and its body's anchor, a
+        spring between its two particles. Keeps the attachment of every stitch, or -1 less its spring, for the
+        stiffness written at every step."""
+        model = self.model
+        pairs, source = [], []
+        if model.attachment_particle_body_count:
+            body, particle, _ = self._attachment_inputs
+            anchor = scene.layout().body_anchor_offsets[body] + self._attachment_anchor
+            pairs.append(np.stack([particle, anchor], axis=1))
+            source.append(np.arange(len(body)))
+        if len(self._zero_springs):
+            pairs.append(model.spring_indices.numpy().reshape(-1, 2).astype(np.int64)[self._zero_springs])
+            source.append(-1 - self._zero_springs)
+        self._stitch_source = np.concatenate(source).astype(np.int32) if source else np.zeros(0, np.int32)
+        if pairs:
+            scene.add_stitches(np.concatenate(pairs), self._stitch_kappa(self._config.dt), 0.0)
+
+    def _stitch_kappa(self, dt: float) -> np.ndarray:
+        """The stiffness of every stitch for a step of ``dt``, as ``_stitch_stiffness`` writes it, on the host."""
+        model, source = self.model, self._stitch_source
+        kappa = np.zeros(len(source))
+        attached = source >= 0
+        if attached.any():
+            k = model.attachment_particle_body_stiffness.numpy().astype(np.float64)
+            hard = np.isinf(k)
+            k[hard] = self._attachment_hard.numpy()[hard] / (dt * dt)
+            k[~model.attachment_particle_body_enabled.numpy()] = 0.0
+            kappa[attached] = k[source[attached]]
+        if (~attached).any():
+            kappa[~attached] = model.spring_stiffness.numpy().astype(np.float64)[-1 - source[~attached]]
+        return kappa
+
+    def _write_stitch_stiffness(self, dt: float) -> None:
+        """The stiffness of every stitch for a step of ``dt`` (``_stitch_stiffness``), on the device, so that a
+        captured step takes the attachments' stiffness and enabled flags of its replay, and the hard ones' penalty
+        for its own ``dt``."""
+        if not self._stitch_rows:
+            return
+        model = self.model
+        attached = model.attachment_particle_body_count > 0
+        springs = model.spring_count > 0
+        for kappa, source in self._stitch_rows:
+            wp.launch(
+                _stitch_stiffness,
+                source.shape[0],
+                inputs=[
+                    source,
+                    model.attachment_particle_body_stiffness if attached else self._no_float32,
+                    model.attachment_particle_body_enabled if attached else self._no_bool,
+                    self._attachment_hard,
+                    model.spring_stiffness if springs else self._no_float32,
+                    wp.float64(1.0 / (dt * dt)),
+                ],
+                outputs=[kappa],
+                device=model.device,
+            )
 
     def _body_mass_moments(self, stacklevel: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """The dyadic mass ``(m, sum m x_bar, sum m x_bar x_bar^T)`` of every body from Newton's mass properties,
@@ -2939,7 +3144,9 @@ class SolverIPC(SolverBase):
             # every vertex in the element and the subscene of its shape, with the shape's margin as its thickness
             element = np.concatenate([np.full(len(v), elements.shape[s]) for v, _, s in parts]) if parts else 0
             subscene = (
-                np.concatenate([np.full(len(v), self._subscene_of_shape(s)) for v, _, s in parts]) if parts else 0
+                np.concatenate([np.full(len(v), self._subscene_of_shape(s)) for v, _, s in parts])
+                if parts
+                else self._subscene_of_body(b)
             )
             thickness = np.concatenate([np.full(len(v), margin[s]) for v, _, s in parts]) if parts else 0.0
             volume = sum(_closed_volume(v, f) for v, f, _ in parts)
@@ -2967,6 +3174,7 @@ class SolverIPC(SolverBase):
                 contact_element=element,
                 subscene_element=subscene,
                 gravity=body_gravity[b],
+                anchors=self._body_anchors.get(b),
             )
         return mass, first, second
 
@@ -3138,6 +3346,7 @@ class SolverIPC(SolverBase):
         self._load(state_in)
         self._write_forces(state_in, control)
         self._write_joint_controls(control, dt)
+        self._write_stitch_stiffness(dt)
         self._write_body_stiffness(dt)
         if self.model.device.is_capturing:
             # the solve joins the caller's graph; it cannot synchronize, grow or raise (see the class docstring)
@@ -3487,6 +3696,7 @@ class SolverIPC(SolverBase):
             wp.copy(self._forces.a, forces)
         self._engine.solver.pcg.loop = loop  # the PCG loop the steps so far chose, as FrameRunner carries it
         self._write_joint_controls(self._control or self._control_of_model(), self._dt)
+        self._write_stitch_stiffness(self._dt)
         self._write_body_stiffness(self._dt)
 
     def _failure(self, status) -> str:
@@ -3736,9 +3946,11 @@ class SolverIPC(SolverBase):
         axes (``JOINT_PROPERTIES``) or of which bodies are kinematic (``BODY_PROPERTIES``,
         ``BODY_INERTIAL_PROPERTIES``) builds the solve again: the next step reads ``state_in`` in full, and graphs that
         hold :meth:`step` must be captured again. The joints' other data are read at every step; the joint flags only
-        check them again against what **Joints** in the class docstring rejects. Copies from the host: not inside a
-        graph capture. With ``contact_constitution="al-ipc"`` new masses build the solve again too, since the AL-IPC
-        penalty follows the masses it was built with.
+        check them again against what **Joints** in the class docstring rejects. So are the stiffness and the enabled
+        flags of the particle-body attachments (``CONSTRAINT_PROPERTIES``), which that flag checks again against what
+        **Attachments** rejects; a new body, particle or point of an attachment builds the solve again. Copies from
+        the host: not inside a graph capture. With ``contact_constitution="al-ipc"`` new masses build the solve again
+        too, since the AL-IPC penalty follows the masses it was built with.
         """
         if self.model.device.is_capturing:
             raise RuntimeError("SolverIPC.notify_model_changed() copies from the host; call it outside graph capture.")
@@ -3764,6 +3976,15 @@ class SolverIPC(SolverBase):
         )
         if flags & dof_flags:
             _check_joints(model)  # the other joint data are read at every step
+        if flags & ModelFlags.CONSTRAINT_PROPERTIES and model.attachment_particle_body_count:
+            _check_attachments(model)  # their stiffness and enabled flags are read at every step
+            body, particle, point = self._attachment_inputs or (None, None, None)
+            rebuild |= (
+                body is None
+                or not np.array_equal(model.attachment_particle_body_body.numpy(), body)
+                or not np.array_equal(model.attachment_particle_body_particle.numpy(), particle)
+                or not np.array_equal(model.attachment_particle_body_body_point.numpy(), point)
+            )
         kinematic = self._kinematic_body
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES) and model.body_count:
             dyadic = self._body_mass_moments(stacklevel=3)
@@ -3784,6 +4005,7 @@ class SolverIPC(SolverBase):
             self._body_mass_inv.assign(self._mass_inverse(*dyadic))
             for kind in self._joint_bodies:  # the joints' penalties follow the masses
                 self._joint_strength[kind].assign(self._joint_strengths(kind, dyadic[0])[1])
+            self._attachment_hard.assign(self._attachment_penalties(dyadic[0]))  # and so do the hard attachments'
             if self._ortho is not None:  # and the default body stiffness the inertia
                 self._ortho_inertia.assign(self._ortho_ratios())
 
