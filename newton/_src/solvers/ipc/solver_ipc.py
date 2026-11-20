@@ -573,6 +573,117 @@ def _joint_terms(
 
 
 @wp.kernel
+def _joint_option_terms(
+    joints: wp.array[wp.int32],
+    joint_q_start: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_enabled: wp.array[wp.bool],
+    target_ke: wp.array[wp.float32],
+    target_kd: wp.array[wp.float32],
+    stiffness: wp.array[wp.float32],
+    rest_q: wp.array[wp.float32],
+    damping: wp.array[wp.float32],
+    has_springs: int,
+    limit_lower: wp.array[wp.float32],
+    limit_upper: wp.array[wp.float32],
+    limit_ke: wp.array[wp.float32],
+    limit_kd: wp.array[wp.float32],
+    limit_damping: int,
+    target_q: wp.array[wp.float32],
+    has_target_q: int,
+    target_qd: wp.array[wp.float32],
+    has_target_qd: int,
+    mass_sum: wp.array[wp.float64],
+    current: wp.array[wp.float64],
+    q_prev: wp.array[wp.float64],
+    bdf2: int,
+    restart: wp.array[wp.int32],
+    restart_rows: wp.array[wp.int32],
+    per_row: int,
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    body_base: wp.array[wp.int32],
+    dt: wp.float64,
+    drive_scale: wp.float64,
+    drv_on: wp.array[wp.int32],
+    drv_ratio: wp.array[wp.float64],
+    drv_aim: wp.array[wp.float64],
+):
+    """The driving term of a revolute or prismatic joint with the terms SolverIPC adds on request (class docstring,
+    **Joints**), launched after ``_joint_terms`` and in place of its driving term: the drive, passive spring and
+    passive damping as ``_joint_terms`` computes them (the same expressions, so that terms of 0 leave its values bit
+    for bit), and with ``limit_damping`` the damping ``-joint_limit_kd qd`` of a joint whose coordinate is past one
+    of its limits at the step's start, a passive damping of the step's velocity (BDF1 or BDF2, as ``_joint_terms``
+    takes it) folded into the same quadratic potential."""
+    e = wp.tid()
+    j = joints[e]
+    d = joint_qd_start[j]
+    i = joint_q_start[j]
+    on = joint_enabled[j]
+    zero = wp.float64(0.0)
+    m = mass_sum[e]
+    ke = wp.float64(target_ke[d])
+    kd = wp.float64(target_kd[d])
+    ks = zero
+    c = zero
+    q_rest = zero
+    if has_springs != 0:
+        ks = wp.float64(stiffness[d])
+        c = wp.float64(damping[d])
+        q_rest = wp.float64(rest_q[i])
+    q_target = zero
+    if has_target_q != 0:
+        q_target = wp.float64(target_q[i])
+    qd_target = zero
+    if has_target_qd != 0:
+        qd_target = wp.float64(target_qd[d])
+    q_n = current[e]
+    restarted = restart[0] != 0
+    if per_row != 0:
+        if restart_rows[body_base[joint_child[j]]] != 0:
+            restarted = True
+        p = joint_parent[j]
+        if p >= 0:
+            if restart_rows[body_base[p]] != 0:
+                restarted = True
+    second = bdf2 != 0 and not restarted
+    # _joint_terms' potential K/2 (q - N/K)^2
+    K = ke + ks + (kd + c) / dt
+    N = zero
+    w = wp.float64(1.5) / dt
+    q_bar = q_n
+    if second:
+        K = ke + ks + (kd + c) * w
+        q_bar = (wp.float64(4.0) * q_n - q_prev[e]) / wp.float64(3.0)
+        N = ke * q_target + ks * q_rest + kd * w * (q_bar + qd_target / w) + c * w * q_bar
+    else:
+        N = ke * q_target + ks * q_rest + (kd / dt) * (q_n + dt * qd_target) + (c / dt) * q_n
+    K_add = zero
+    N_add = zero
+    if limit_damping != 0:
+        # Featherstone's and SemiImplicit's -limit_kd qd while the coordinate is past a limit, decided at the step's
+        # start, at the step's velocity: BDF1 (q - q_n) / dt, BDF2 w (q - q_bar)
+        lo = limit_lower[d]
+        hi = limit_upper[d]
+        limit_k = wp.float64(limit_ke[d])
+        limited = on and limit_k > zero and (lo > -_MAXVAL or hi < _MAXVAL)
+        if limited and (q_n < wp.float64(lo) or q_n > wp.float64(hi)):
+            kl = wp.float64(limit_kd[d])
+            if second:
+                K_add += kl * w
+                N_add += kl * w * q_bar
+            else:
+                K_add += kl / dt
+                N_add += (kl / dt) * q_n
+    K = K + K_add
+    drive = on and K > zero and m > zero
+    drv_on[e] = wp.where(drive, 1, 0)
+    if drive:
+        drv_aim[e] = (N + N_add) / K
+        drv_ratio[e] = drive_scale * K * dt * dt / m
+
+
+@wp.kernel
 def _enable_anchor_joints(
     joints: wp.array[wp.int32],
     joint_enabled: wp.array[wp.bool],
@@ -1416,10 +1527,16 @@ def _default_d_hat(model: Model) -> float:
 class _JointOptions:
     """The joints SolverIPC maps beyond revolute, prismatic, fixed, ball and free joints, on request (class
     docstring, **Joints**): ``d6``, D6 joints that lock what one of libuipc's joints locks; ``distance``, distance
-    joints of one length or none."""
+    joints of one length or none; ``limit_damping``, ``joint_limit_kd`` past a limit."""
 
     d6: bool = False
     distance: bool = False
+    limit_damping: bool = False
+
+    @property
+    def drive_terms(self) -> bool:
+        """Whether the driving terms take a term beyond ``_joint_terms``' (``_joint_option_terms``)."""
+        return self.limit_damping
 
 
 @dataclass(frozen=True)
@@ -2297,7 +2414,8 @@ class SolverIPC(SolverBase):
     (see **Contact** below), damping coefficients,
     ``spring_control``, drag, lift, ``edge_rest_length`` (see below), the
     activations of a :class:`~newton.Control`, ``joint_target_mode``,
-    ``joint_velocity_limit``, ``joint_limit_kd`` and ``joint_act``.
+    ``joint_velocity_limit``, ``joint_limit_kd`` (but with
+    ``enable_joint_limit_damping``) and ``joint_act``.
 
     **Cloth parameters.** libuipc-warp's membrane energy per rest area is
 
@@ -2690,7 +2808,17 @@ class SolverIPC(SolverBase):
     :math:`\\delta_r` and harder beyond it; a load :math:`F` rests at
     :math:`\\sqrt{F \\delta_r / k_l}` past the limit. ``joint_limit_kd`` is not
     read (libuipc's limit has no damping), a ``joint_limit_ke`` of 0 holds
-    nothing, and a bound at :data:`newton.MAXVAL` is no bound.
+    nothing, and a bound at :data:`newton.MAXVAL` is no bound. With
+    ``enable_joint_limit_damping=True`` a joint whose coordinate is past one
+    of its limits at the start of a step takes the damping
+    :math:`-k_{ld} \\dot q` of Featherstone and SemiImplicit,
+    :math:`k_{ld}` = ``joint_limit_kd``, in the same quadratic potential as
+    ``joint_damping``: exact for the step's integrator, with the velocity at
+    the end of the step, and decided at its start, as those solvers decide it
+    (they also switch the drive off past a limit, which SolverIPC does not,
+    as MuJoCo does not). A joint that reaches its limit within a step is
+    damped from the next step on; a limit of ``joint_limit_ke`` 0 damps
+    nothing.
 
     :attr:`~newton.Control.joint_f` of a revolute or prismatic joint is
     libuipc's joint torque or force between the two bodies; of a ball joint a
@@ -2942,6 +3070,10 @@ class SolverIPC(SolverBase):
             libuipc's soft vertex stitch of that rest length, and those of
             none (see **Distance joints**); without it every distance joint is
             rejected.
+        enable_joint_limit_damping: Damp a revolute or prismatic joint that
+            starts a step past one of its limits with ``joint_limit_kd``, as
+            Featherstone and SemiImplicit do (see **Joints**); without it
+            ``joint_limit_kd`` is not read.
 
     Note:
         A step ends once the Newton update moves no vertex by more than
@@ -3098,12 +3230,17 @@ class SolverIPC(SolverBase):
         kinematic_strength_ratio: float = 100.0,
         enable_d6_joints: bool = False,
         enable_distance_joints: bool = False,
+        enable_joint_limit_damping: bool = False,
     ):
         if not model.device.is_cuda:
             raise NotImplementedError(f"SolverIPC runs on CUDA devices only; the model is on {model.device}.")
         super().__init__(model)
         self._coupled_worlds = bool(coupled_worlds)
-        self._joint_options = _JointOptions(d6=bool(enable_d6_joints), distance=bool(enable_distance_joints))
+        self._joint_options = _JointOptions(
+            d6=bool(enable_d6_joints),
+            distance=bool(enable_distance_joints),
+            limit_damping=bool(enable_joint_limit_damping),
+        )
         _check_supported(model, self._coupled_worlds, self._joint_options)
         _check_choice("integrator", integrator, ("bdf1", "bdf2"))
         _check_choice("contact_constitution", contact_constitution, ("ipc", "al-ipc"))
@@ -4800,7 +4937,8 @@ class SolverIPC(SolverBase):
             groups.prismatic.compute_current_distances(x)
 
     def _write_joint_controls(self, control: Control, dt: float) -> None:
-        """The joints' terms of the step from the model and ``control``, on the device (``_joint_terms``)."""
+        """The joints' terms of the step from the model and ``control``, on the device (``_joint_terms``), and with the
+        joint options that add to the driving term their terms (``_joint_option_terms``)."""
         model, groups = self.model, self._joint_groups
         if self._engine is None or model.joint_count == 0:
             return
@@ -4868,6 +5006,46 @@ class SolverIPC(SolverBase):
                 ],
                 device=model.device,
             )
+            if self._joint_options.drive_terms:
+                wp.launch(
+                    _joint_option_terms,
+                    group.n,
+                    inputs=[
+                        self._joint_rows[kind],
+                        model.joint_q_start,
+                        model.joint_qd_start,
+                        model.joint_enabled,
+                        model.joint_target_ke,
+                        model.joint_target_kd,
+                        model.joint_stiffness,
+                        model.joint_rest_q,
+                        model.joint_damping,
+                        int(springs),
+                        model.joint_limit_lower,
+                        model.joint_limit_upper,
+                        model.joint_limit_ke,
+                        model.joint_limit_kd,
+                        int(self._joint_options.limit_damping),
+                        target_q,
+                        int(target_q is not None),
+                        target_qd,
+                        int(target_qd is not None),
+                        group.mass_sum,
+                        group.current,
+                        q_prev,
+                        int(bdf2),
+                        restart,
+                        restart_rows,
+                        int(rows is not None),
+                        model.joint_parent,
+                        model.joint_child,
+                        self._body_base,
+                        wp.float64(dt),
+                        wp.float64(scale),
+                    ],
+                    outputs=[group.drv_on, group.drv_ratio, group.drv_aim],
+                    device=model.device,
+                )
         for kind, group in (("fixed", groups.fixed), ("spherical", groups.spherical)):
             if group is not None:
                 wp.launch(

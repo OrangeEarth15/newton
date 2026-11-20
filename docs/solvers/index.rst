@@ -470,7 +470,9 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
 | :sup:`15` SolverIPC raises ``NotImplementedError`` instead of ignoring the property: for non-zero armature or
   friction, and for an effort limit below 1e6 on a degree of freedom with a drive.
 | :sup:`16` SolverIPC enforces a limit as libuipc's cubic penalty, set to push back with ``joint_limit_ke`` times
-  the overshoot at an overshoot of 1e-3 rad or m, more steeply beyond; ``joint_limit_kd`` is not read.
+  the overshoot at an overshoot of 1e-3 rad or m, more steeply beyond; ``joint_limit_kd`` is not read unless
+  ``enable_joint_limit_damping=True``, which damps a joint that starts a step past a limit by ``joint_limit_kd``, as
+  Featherstone and SemiImplicit do.
 
 SemiImplicit angular springs use principal coordinates in [-pi, pi). Crossing
 that boundary produces a force jump of ``2*pi*stiffness`` and can destabilize

@@ -5030,6 +5030,79 @@ def test_distance_joint_between_bodies(test, device):
             np.testing.assert_allclose(x[:, 1], [-20 * h, 20 * h], rtol=0.0, atol=1e-5)
 
 
+def _limit_recurrence(m, h, steps, g, lower, limit_ke, damping=0.0, at_start=True):
+    """q_1 .. q_steps of implicit Euler for a slider of mass m falling from rest at 0 under gravity g onto its lower
+    limit, held by libuipc's cubic limit as SolverIPC sets it (the force limit_ke (lower - q)^2 / delta_r below the
+    limit, delta_r = 1e-3) and damped by ``damping`` (q' - q) / h in the steps that start below the limit
+    (``at_start``) or end below it: one scalar Newton solve per step."""
+    q, v, out = 0.0, 0.0, []
+    for _ in range(steps):
+        x = q + h * v
+        for _ in range(100):
+            below = x < lower
+            active = (q < lower) if at_start else below
+            d = damping if active else 0.0
+            f_lim = limit_ke * (lower - x) ** 2 / 1.0e-3 if below else 0.0
+            df_lim = -2.0 * limit_ke * (lower - x) / 1.0e-3 if below else 0.0
+            r = m * (x - q - h * v) / (h * h) + m * g - f_lim + d * (x - q) / h
+            step = r / (m / (h * h) - df_lim + d / h)
+            x -= step
+            if abs(step) < 1e-15:
+                break
+        q, v = x, (x - q) / h
+        out.append(q)
+    return np.array(out)
+
+
+def test_limit_damping_is_implicit_euler(test, device):
+    """With enable_joint_limit_damping=True a slider that falls under gravity onto its lower limit takes the damping
+    -joint_limit_kd qd of Featherstone and SemiImplicit in the steps that start past the limit, at the step's end
+    velocity: it follows the implicit-Euler recurrence of the cubic limit with that damping step by step to 1e-4 m,
+    and stays at the limit where the undamped slider (the option off, kd ignored as before) bounces 5 cm off it,
+    which follows the recurrence without damping. A recurrence that switches the damping on in the steps that end
+    past the limit is farther off."""
+    g, lower, limit_ke, kd, h, steps = 10.0, -0.1, 1.0e3, 200.0, 2.0e-3, 300
+    runs = {}
+    for option in (False, True):
+        model, state, _ = _hinged(
+            device, "prismatic", gravity=g, axis=newton.Axis.Y, limit_lower=lower, limit_upper=1.0,
+            limit_ke=limit_ke, limit_kd=kd,
+        )  # fmt: skip
+        solver = newton.solvers.SolverIPC(model, enable_joint_limit_damping=option, **_CONVERGED)
+        runs[option] = _steps(model, solver, state, steps, h)[0][:, 0]
+    m = float(model.body_mass.numpy()[0])
+    damped = _limit_recurrence(m, h, steps, g, lower, limit_ke, kd)
+    undamped = _limit_recurrence(m, h, steps, g, lower, limit_ke)
+    np.testing.assert_allclose(runs[True], damped, rtol=0.0, atol=1e-4)
+    np.testing.assert_allclose(runs[False], undamped, rtol=0.0, atol=1e-4)
+    hit = int(np.argmax(damped < lower))
+    test.assertGreater(runs[False][hit:].max() - lower, 0.02)  # the undamped slider bounces
+    test.assertLess(runs[True][hit:].max() - lower, 0.001)  # the damped one does not
+    at_end = _limit_recurrence(m, h, steps, g, lower, limit_ke, kd, at_start=False)
+    test.assertGreater(np.abs(at_end - damped).max(), 5e-4)
+
+
+def test_joint_options_change_nothing_unused(test, device):
+    """The enable_* options leave a model that does not use them as it is: a revolute and a prismatic joint driven
+    within their limits, with joint_limit_kd that never acts, step bit for bit as without the options."""
+    runs = []
+    for option in (False, True):
+        steps = []
+        for kind, length in (("revolute", 0.1), ("prismatic", 1.0)):
+            model, state, _ = _hinged(
+                device, kind, axis=newton.Axis.X, radius=0.5, target_ke=40.0, target_kd=2.0, stiffness=10.0,
+                damping=1.0, target_q=0.5 * length, limit_lower=-length, limit_upper=length, limit_ke=1.0e4,
+                limit_kd=10.0,
+            )  # fmt: skip
+            solver = newton.solvers.SolverIPC(model, enable_joint_limit_damping=option)
+            test.assertEqual(solver._joint_options.drive_terms, option)
+            steps.append(_steps(model, solver, state, 50, 0.01, None, lambda s: s.body_q.numpy().copy())[0])
+        runs.append(steps)
+    for before, after in zip(*runs, strict=True):
+        test.assertGreater(np.abs(before[-1] - before[0]).max(), 1e-3)
+        np.testing.assert_array_equal(after, before)
+
+
 def test_rejects_d6_joints_libuipc_lacks(test, device):
     """With enable_d6_joints=True the D6 joints that lock what no libuipc joint locks are refused, naming what they
     lock: two angular axes, three linear axes, one linear and one angular; and three angular axes that are not
@@ -5600,6 +5673,8 @@ for name, func in (
     ("test_rejects_d6_joints_libuipc_lacks", test_rejects_d6_joints_libuipc_lacks),
     ("test_distance_joint_swings_as_a_pendulum", test_distance_joint_swings_as_a_pendulum),
     ("test_distance_joint_between_bodies", test_distance_joint_between_bodies),
+    ("test_limit_damping_is_implicit_euler", test_limit_damping_is_implicit_euler),
+    ("test_joint_options_change_nothing_unused", test_joint_options_change_nothing_unused),
 ):
     add_function_test(TestSolverIPCJointOptions, name, func, devices=devices)
 
