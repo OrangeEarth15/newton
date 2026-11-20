@@ -5127,10 +5127,69 @@ def test_armature_is_implicit_euler(test, device):
         newton.solvers.SolverIPC(builder.finalize(device=device), enable_joint_armature=True)
 
 
+def _bounded_drive_recurrence(inertia, h, steps, ke, kd, q_target, bound, forces=None):
+    """q_1 .. q_steps of implicit Euler for inertia q'' = clamp(ke (q* - q) - kd qd) from rest, the drive's force
+    bounded by ``bound`` as decided at the start of every step (SolverIPC's enable_joint_effort_limit): a step that
+    starts with |ke (q* - q_n) - kd qd_n| > bound takes the constant force of that sign, another the drive. With
+    ``bound`` None the drive is not bounded. ``forces`` collects the drive's force at every step's start."""
+    q, qd, out = 0.0, 0.0, []
+    for _ in range(steps):
+        tau = ke * (q_target - q) - kd * qd
+        if forces is not None:
+            forces.append(tau)
+        if bound is not None and abs(tau) > bound:
+            q_next = q + h * qd + h * h * np.sign(tau) * bound / inertia
+        else:
+            q_next = (inertia * (q + h * qd) / h**2 + ke * q_target + kd * q / h) / (inertia / h**2 + ke + kd / h)
+        q, qd = q_next, (q_next - q) / h
+        out.append(q)
+    return np.array(out)
+
+
+def test_effort_limit_bounds_the_drive(test, device):
+    """With enable_joint_effort_limit=True a hinge driven through a step of its target by gains whose force exceeds
+    its joint_effort_limit takes the bound as a constant torque in the steps that start above it, and the drive in the
+    others: it follows that recurrence step by step to 1e-4 of its motion (through the bound, the drive, and the bound
+    again as it brakes), where the unbounded drive's recurrence is far off; under BDF2 its saturated steps from rest
+    follow BDF2's recurrence of the constant torque. Without the option the limit is refused, and a negative one with
+    it."""
+    ke, kd, q_target, bound, h, steps = 400.0, 100.0, 0.05, 2.0, 0.01, 300
+    model, state, _ = _hinged(
+        device, axis=newton.Axis.X, radius=0.5, target_ke=ke, target_kd=kd, target_q=q_target, effort_limit=bound
+    )
+    with test.assertRaisesRegex(NotImplementedError, "enable_joint_effort_limit=True.*joint_effort_limit 2.0"):
+        newton.solvers.SolverIPC(model)
+    inertia = float(model.body_inertia.numpy()[0][0, 0])
+    forces = []
+    expected = _bounded_drive_recurrence(inertia, h, steps, ke, kd, q_target, bound, forces)
+    saturated = np.abs(np.array(forces)) > bound
+    test.assertTrue(saturated[0] and not saturated.all())  # the bound, the drive, and the bound again
+    test.assertGreater(np.count_nonzero(np.diff(saturated.astype(int))), 1)
+    solver = newton.solvers.SolverIPC(model, enable_joint_effort_limit=True, **_CONVERGED)
+    q, _ = _steps(model, solver, state, steps, h, model.control())
+    motion = np.abs(expected).max()
+    np.testing.assert_allclose(q[:, 0], expected, rtol=0.0, atol=1e-4 * motion)
+    unbounded = _bounded_drive_recurrence(inertia, h, steps, ke, kd, q_target, None)
+    test.assertGreater(np.abs(unbounded - expected).max(), 0.1 * motion)
+
+    model, state, _ = _hinged(
+        device, axis=newton.Axis.X, radius=0.5, target_ke=ke, target_kd=kd, target_q=q_target, effort_limit=bound
+    )
+    solver = newton.solvers.SolverIPC(model, integrator="bdf2", enable_joint_effort_limit=True, **_CONVERGED)
+    first = int(np.argmin(saturated))  # the steps from rest that start above the bound
+    q, _ = _steps(model, solver, state, first, h, model.control())
+    torque = _drive_recurrence_bdf2(inertia, h, first, f=bound)
+    np.testing.assert_allclose(q[:, 0], torque, rtol=0.0, atol=1e-4 * np.abs(torque).max())
+
+    model, _, _ = _hinged(device, axis=newton.Axis.X, target_ke=ke, effort_limit=-1.0)
+    with test.assertRaisesRegex(NotImplementedError, "takes no negative effort limit"):
+        newton.solvers.SolverIPC(model, enable_joint_effort_limit=True)
+
+
 def test_joint_options_change_nothing_unused(test, device):
     """The enable_* options leave a model that does not use them as it is: a revolute and a prismatic joint driven
-    within their limits, with joint_limit_kd that never acts and no armature, step bit for bit as without the
-    options."""
+    within their limits, with joint_limit_kd that never acts, no armature and Newton's default effort limit, step bit
+    for bit as without the options."""
     runs = []
     for option in (False, True):
         steps = []
@@ -5140,7 +5199,12 @@ def test_joint_options_change_nothing_unused(test, device):
                 damping=1.0, target_q=0.5 * length, limit_lower=-length, limit_upper=length, limit_ke=1.0e4,
                 limit_kd=10.0,
             )  # fmt: skip
-            solver = newton.solvers.SolverIPC(model, enable_joint_limit_damping=option, enable_joint_armature=option)
+            solver = newton.solvers.SolverIPC(
+                model,
+                enable_joint_limit_damping=option,
+                enable_joint_armature=option,
+                enable_joint_effort_limit=option,
+            )
             test.assertEqual(solver._joint_options.drive_terms, option)
             steps.append(_steps(model, solver, state, 50, 0.01, None, lambda s: s.body_q.numpy().copy())[0])
         runs.append(steps)
@@ -5721,6 +5785,7 @@ for name, func in (
     ("test_distance_joint_between_bodies", test_distance_joint_between_bodies),
     ("test_limit_damping_is_implicit_euler", test_limit_damping_is_implicit_euler),
     ("test_armature_is_implicit_euler", test_armature_is_implicit_euler),
+    ("test_effort_limit_bounds_the_drive", test_effort_limit_bounds_the_drive),
     ("test_joint_options_change_nothing_unused", test_joint_options_change_nothing_unused),
 ):
     add_function_test(TestSolverIPCJointOptions, name, func, devices=devices)

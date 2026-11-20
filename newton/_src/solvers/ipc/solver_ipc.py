@@ -89,6 +89,7 @@ _LIMIT_OVERSHOOT = wp.constant(wp.float64(1.0e-3))
 _MAXVAL = wp.constant(wp.float32(MAXVAL))
 # Newton's default joint_effort_limit, which bounds no drive
 _EFFORT_LIMIT = 1.0e6
+_EFFORT_BOUND = wp.constant(wp.float64(_EFFORT_LIMIT))
 # why libuipc has no joint for a joint type SolverIPC refuses
 _UNMAPPED_JOINTS = {
     JointType.DISTANCE: "libuipc has no distance joint; its affine-body joints are revolute, prismatic, fixed and ball "
@@ -631,6 +632,10 @@ def _joint_option_terms(
     armature: int,
     rate_start: wp.array[wp.float64],
     rate_prev: wp.array[wp.float64],
+    effort_limit: wp.array[wp.float32],
+    effort: int,
+    joint_f: wp.array[wp.float32],
+    has_joint_f: int,
     target_q: wp.array[wp.float32],
     has_target_q: int,
     target_qd: wp.array[wp.float32],
@@ -650,6 +655,8 @@ def _joint_option_terms(
     drv_on: wp.array[wp.int32],
     drv_ratio: wp.array[wp.float64],
     drv_aim: wp.array[wp.float64],
+    force_on: wp.array[wp.int32],
+    force: wp.array[wp.float64],
 ):
     """The driving term of a revolute or prismatic joint with the terms SolverIPC adds on request (class docstring,
     **Joints**), launched after ``_joint_terms`` and in place of its driving term: the drive, passive spring and
@@ -659,7 +666,11 @@ def _joint_option_terms(
     takes it) folded into the same quadratic potential; with ``armature`` the inertia of the coordinate, the
     step's kinetic term ``a/2 |q - q~|^2 / dt^2`` (BDF2: 9/4 of it) of ``joint_armature`` a with the integrator's
     prediction q~ from the coordinate and its rate ``rate_start`` at the step's start (``_joint_rates``; BDF2 also
-    the step before's, ``q_prev`` and ``rate_prev``), as libuipc writes the inertia of every degree of freedom."""
+    the step before's, ``q_prev`` and ``rate_prev``), as libuipc writes the inertia of every degree of freedom; with
+    ``effort`` the bound ``joint_effort_limit`` L (below Newton's default 1e6) of the drive's force, decided at the
+    step's start: where ``ke (q* - q_n) + kd (qd* - qd_n)`` exceeds L in magnitude, the step takes the constant
+    force of that sign and magnitude L as libuipc's joint torque or force (``force``, with ``joint_f``) in place of
+    the drive's quadratic, whose passive spring and damping remain."""
     e = wp.tid()
     j = joints[e]
     d = joint_qd_start[j]
@@ -703,6 +714,23 @@ def _joint_option_terms(
         N = ke * q_target + ks * q_rest + kd * w * (q_bar + qd_target / w) + c * w * q_bar
     else:
         N = ke * q_target + ks * q_rest + (kd / dt) * (q_n + dt * qd_target) + (c / dt) * q_n
+    saturated = False
+    bound = zero
+    if effort != 0 and (ke != zero or kd != zero):
+        L = wp.float64(effort_limit[d])
+        if L < _EFFORT_BOUND:
+            tau = ke * (q_target - q_n) + kd * (qd_target - rate_start[e])
+            if wp.abs(tau) > L:
+                # the drive's force at the step's start exceeds its bound: the bound, constant over the step, in place
+                # of the drive, whose passive spring and damping remain
+                saturated = True
+                bound = wp.where(tau > zero, L, -L)
+                if second:
+                    K = ks + c * w
+                    N = ks * q_rest + c * w * q_bar
+                else:
+                    K = ks + c / dt
+                    N = ks * q_rest + (c / dt) * q_n
     K_add = zero
     N_add = zero
     if limit_damping != 0:
@@ -740,6 +768,12 @@ def _joint_option_terms(
     if drive:
         drv_aim[e] = (N + N_add) / K
         drv_ratio[e] = drive_scale * K * dt * dt / m
+    if saturated:
+        value = bound
+        if has_joint_f != 0:
+            value += wp.float64(joint_f[d])
+        force_on[e] = wp.where(on and value != zero, 1, 0)
+        force[e] = value
 
 
 @wp.kernel
@@ -1587,22 +1621,24 @@ class _JointOptions:
     """The joints SolverIPC maps beyond revolute, prismatic, fixed, ball and free joints, on request (class
     docstring, **Joints**): ``d6``, D6 joints that lock what one of libuipc's joints locks; ``distance``, distance
     joints of one length or none; ``limit_damping``, ``joint_limit_kd`` past a limit; ``armature``,
-    ``joint_armature`` as the inertia of a revolute or prismatic joint's coordinate."""
+    ``joint_armature`` as the inertia of a revolute or prismatic joint's coordinate; ``effort_limit``,
+    ``joint_effort_limit`` as a bound of the drive's force decided at the step's start."""
 
     d6: bool = False
     distance: bool = False
     limit_damping: bool = False
     armature: bool = False
+    effort_limit: bool = False
 
     @property
     def drive_terms(self) -> bool:
         """Whether the driving terms take a term beyond ``_joint_terms``' (``_joint_option_terms``)."""
-        return self.limit_damping or self.armature
+        return self.limit_damping or self.armature or self.effort_limit
 
     @property
     def rates(self) -> bool:
         """Whether those terms need the joints' rates at the step's start (``_joint_rates``)."""
-        return self.armature
+        return self.armature or self.effort_limit
 
 
 @dataclass(frozen=True)
@@ -1798,7 +1834,8 @@ def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
     """Joints that libuipc's affine-body joints represent (class docstring, **Joints**): revolute, prismatic, fixed,
     ball and free joints, and with ``options`` the joints ``_map_joints`` maps; drives, passive springs, damping and
     limits on revolute and prismatic joints only; no armature (with ``options.armature``, none on ball and free
-    joints), no joint friction, and no effort limit on a driven degree of freedom."""
+    joints), no joint friction, and no effort limit on a driven degree of freedom (with ``options.effort_limit``, none
+    that is negative)."""
     if model.joint_count == 0:
         return
     joint_type = model.joint_type.numpy()
@@ -1886,12 +1923,21 @@ def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
         "angle or one distance, and its ball joint has none",
     )
     effort = per_dof("joint_effort_limit")
-    refuse(
-        np.flatnonzero(((ke != 0.0) | (kd != 0.0)) & (effort < _EFFORT_LIMIT)),
-        lambda d: f"joint_effort_limit {float(effort[d])!r} and a drive",
-        "cannot bound the force of a drive: libuipc's driving term is a quadratic potential, whose force has no "
-        f"bound; raise the limit to {_EFFORT_LIMIT:g}, Newton's default, to drive the joint without a bound",
-    )
+    gains = (ke != 0.0) | (kd != 0.0)
+    if options.effort_limit:
+        refuse(
+            np.flatnonzero(gains & ~(effort >= 0.0)),
+            lambda d: f"joint_effort_limit {float(effort[d])!r} and a drive",
+            "takes no negative effort limit",
+        )
+    else:
+        refuse(
+            np.flatnonzero(gains & (effort < _EFFORT_LIMIT)),
+            lambda d: f"joint_effort_limit {float(effort[d])!r} and a drive",
+            "cannot bound the force of a drive: libuipc's driving term is a quadratic potential, whose force has no "
+            f"bound; raise the limit to {_EFFORT_LIMIT:g}, Newton's default, to drive the joint without a bound, or "
+            "pass enable_joint_effort_limit=True for a bound decided at the start of every step",
+        )
 
 
 def _kinematic_bodies(model: Model) -> np.ndarray:
@@ -2898,6 +2944,19 @@ class SolverIPC(SolverBase):
     or free joint, an inertia about three axes or a mass without weight,
     has no such potential and is rejected.
 
+    The drive's force cannot be bounded inside libuipc's driving term, a
+    quadratic potential. With ``enable_joint_effort_limit=True`` a
+    ``joint_effort_limit`` :math:`L` below Newton's default 1e6 bounds the
+    force of the gains as decided at the start of every step: where
+    :math:`|k_e (q^* - q_n) + k_d (\\dot q^* - \\dot q_n)| > L`, the step takes the
+    constant force :math:`\\pm L` (libuipc's joint torque or force, with
+    ``joint_f``) in place of the gains' part of the potential; the passive
+    spring and damping remain. The bound holds at the start of every step,
+    which is where MuJoCo clamps its actuators' force; a step that starts
+    below it and ends above it, or the reverse, takes the bound one step
+    late, which a drive clamped at the end of the step would not (by 1.6e-4
+    of the motion for a hinge driven through a step of its target).
+
     Limits are libuipc's cubic penalty outside ``[joint_limit_lower,
     joint_limit_upper]``, not Newton's linear spring: at an overshoot
     :math:`\\delta` it stores :math:`k_l \\delta^3 / (3 \\delta_r)` with
@@ -2986,8 +3045,9 @@ class SolverIPC(SolverBase):
     since libuipc's joints have no inertia of their own; ``joint_friction``
     other than 0, since they have no friction and dry friction, a bounded
     force, is no quadratic potential; a ``joint_effort_limit`` below
-    Newton's default 1e6 on a driven degree of freedom, since the quadratic
-    drive cannot bound its force.
+    Newton's default 1e6 on a driven degree of freedom but with
+    ``enable_joint_effort_limit``, since the quadratic drive cannot bound its
+    force.
 
     **State.** The solver keeps positions and velocities in float64 and reads
     ``state_in`` on every step. A particle whose ``state_in`` position and
@@ -3176,6 +3236,10 @@ class SolverIPC(SolverBase):
         enable_joint_armature: Give a revolute or prismatic joint's
             ``joint_armature`` to its coordinate as an inertia (see
             **Joints**); without it an armature other than 0 is rejected.
+        enable_joint_effort_limit: Bound a drive's force by its
+            ``joint_effort_limit`` as decided at the start of every step (see
+            **Joints**); without it a limit below 1e6 on a driven degree of
+            freedom is rejected.
 
     Note:
         A step ends once the Newton update moves no vertex by more than
@@ -3334,6 +3398,7 @@ class SolverIPC(SolverBase):
         enable_distance_joints: bool = False,
         enable_joint_limit_damping: bool = False,
         enable_joint_armature: bool = False,
+        enable_joint_effort_limit: bool = False,
     ):
         if not model.device.is_cuda:
             raise NotImplementedError(f"SolverIPC runs on CUDA devices only; the model is on {model.device}.")
@@ -3344,6 +3409,7 @@ class SolverIPC(SolverBase):
             distance=bool(enable_distance_joints),
             limit_damping=bool(enable_joint_limit_damping),
             armature=bool(enable_joint_armature),
+            effort_limit=bool(enable_joint_effort_limit),
         )
         _check_supported(model, self._coupled_worlds, self._joint_options)
         _check_choice("integrator", integrator, ("bdf1", "bdf2"))
@@ -5160,6 +5226,10 @@ class SolverIPC(SolverBase):
                         model.joint_armature,
                         int(self._joint_options.armature),
                         *(self._joint_rate[kind][:2] if self._joint_options.rates else (q_prev, q_prev)),
+                        model.joint_effort_limit,
+                        int(self._joint_options.effort_limit),
+                        joint_f,
+                        int(joint_f is not None),
                         target_q,
                         int(target_q is not None),
                         target_qd,
@@ -5177,7 +5247,7 @@ class SolverIPC(SolverBase):
                         wp.float64(dt),
                         wp.float64(scale),
                     ],
-                    outputs=[group.drv_on, group.drv_ratio, group.drv_aim],
+                    outputs=[group.drv_on, group.drv_ratio, group.drv_aim, force_on, force],
                     device=model.device,
                 )
         for kind, group in (("fixed", groups.fixed), ("spherical", groups.spherical)):
