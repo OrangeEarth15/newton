@@ -3237,6 +3237,85 @@ def test_bdf2_drives(test, device):
             test.assertGreater(np.abs(euler - expected).max(), 1e-3 * scale_q)
 
 
+def test_al_ipc_rests_at_d_hat(test, device):
+    """With contact_constitution="al-ipc" a box dropped onto the ground comes to rest with its gap at d_hat, the
+    distance AL-IPC's constraint keeps, to 1%, and at rest; the barrier keeps it inside d_hat. (libuipc's AL-IPC does
+    not keep a stack of two such boxes: on its own CUDA backend, as here, the upper one slides off within two
+    seconds.) A free particle and a static box, which AL-IPC would not constrain, are refused."""
+    d_hat = 0.005
+    for constitution in ("ipc", "al-ipc"):
+        with test.subTest(contact_constitution=constitution):
+            builder = newton.ModelBuilder()
+            _box_body(builder, (0.0, 0.0, 0.06), (0.05, 0.05, 0.05))
+            builder.add_ground_plane()
+            model = builder.finalize(device=device)
+            solver = newton.solvers.SolverIPC(model, d_hat=d_hat, contact_constitution=constitution)
+            s0, s1 = model.state(), model.state()
+            for _ in range(200):
+                solver.step(s0, s1, None, None, 0.01)
+                s0, s1 = s1, s0
+            gap = float(s0.body_q.numpy()[0, 2]) - 0.05
+            test.assertLess(np.abs(s0.body_qd.numpy()).max(), 1e-3)
+            if constitution == "al-ipc":
+                test.assertAlmostEqual(gap, d_hat, delta=0.01 * d_hat)
+            else:
+                test.assertGreater(gap, 0.0)
+                test.assertLess(gap, 0.99 * d_hat)
+    # a particle on no cloth or tetrahedron takes part in no AL-IPC constraint, and a static shape has no mass for
+    # its penalty: refused
+    builder = newton.ModelBuilder()
+    builder.add_particle(wp.vec3(0.0, 0.0, 0.02), wp.vec3(0.0, 0.0, 0.0), 0.01, radius=0.01)
+    builder.add_ground_plane()
+    with test.assertRaisesRegex(NotImplementedError, "particles on no cloth"):
+        newton.solvers.SolverIPC(builder.finalize(device=device), contact_constitution="al-ipc")
+    builder = newton.ModelBuilder()
+    _box_body(builder, (0.0, 0.0, 0.17), (0.05, 0.05, 0.05))
+    builder.add_shape_box(-1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.05), wp.quat_identity()), hx=0.1, hy=0.1, hz=0.05)
+    with test.assertRaisesRegex(NotImplementedError, "static shapes"):
+        newton.solvers.SolverIPC(builder.finalize(device=device), contact_constitution="al-ipc")
+
+
+def test_al_ipc_status_and_new_masses(test, device):
+    """contact_constitution="al-ipc" (libuipc's contact/constitution; other values refused) builds libuipc-warp's
+    AL-IPC engine and refuses adaptive_kappa, a barrier stiffness, and the residual observable, which AL-IPC has not; a
+    captured step writes STATUS, which check_status reads, and new body masses build the solve again (the AL-IPC
+    penalty follows the masses it was built with), after which a captured step uses them."""
+    builder = newton.ModelBuilder()
+    _box_body(builder, (0.0, 0.0, 0.06), (0.05, 0.05, 0.05))
+    builder.add_ground_plane()
+    model = builder.finalize(device=device)
+    with test.assertRaisesRegex(ValueError, "contact_constitution"):
+        newton.solvers.SolverIPC(model, contact_constitution="barrier")
+    with test.assertRaisesRegex(ValueError, "adaptive_kappa"):
+        newton.solvers.SolverIPC(model, contact_constitution="al-ipc", adaptive_kappa=True)
+    solver = newton.solvers.SolverIPC(model, d_hat=0.005, contact_constitution="al-ipc")
+    test.assertEqual(type(solver._engine).__name__, "ALIPCSimEngine")
+    kind = solver.ObservableKind
+    test.assertEqual(solver.supported_observables, {kind.STATUS})
+    with test.assertRaisesRegex(ValueError, "solver_residual"):
+        solver.observables({kind.STATUS, kind.SOLVER_RESIDUAL})
+    observables = solver.observables({solver.ObservableKind.STATUS})
+    s0, s1 = model.state(), model.state()
+    solver.step(s0, s1, None, None, 0.01, observables=observables)
+    with wp.ScopedCapture(device=device) as capture:
+        solver.step(s1, s0, None, None, 0.01, observables=observables)
+        solver.step(s0, s1, None, None, 0.01, observables=observables)
+    wp.capture_launch(capture.graph)
+    test.assertFalse(solver.check_status(observables))
+    engine = solver._engine
+    model.body_mass.assign(2.0 * model.body_mass.numpy())
+    model.body_inv_mass.assign(0.5 * model.body_inv_mass.numpy())
+    model.body_inertia.assign(2.0 * model.body_inertia.numpy())
+    model.body_inv_inertia.assign(0.5 * model.body_inv_inertia.numpy())
+    solver.notify_model_changed(newton.ModelFlags.BODY_INERTIAL_PROPERTIES)
+    test.assertIsNot(solver._engine, engine)
+    test.assertAlmostEqual(float(solver._engine.abd.mass.numpy()[0]), float(model.body_mass.numpy()[0]), places=4)
+    with wp.ScopedCapture(device=device) as capture:
+        solver.step(s1, s0, None, None, 0.01, observables=observables)
+    wp.capture_launch(capture.graph)
+    test.assertFalse(solver.check_status(observables))
+
+
 @requires("uipc_warp")
 class TestSolverIPC(unittest.TestCase):
     pass
@@ -3519,7 +3598,7 @@ class TestSolverIPCJoints(unittest.TestCase):
 
 @requires("uipc_warp")
 class TestSolverIPCOptions(unittest.TestCase):
-    """libuipc's options: BDF2."""
+    """libuipc's options: BDF2 and AL-IPC contact."""
 
 
 devices = get_cuda_test_devices()
@@ -3663,6 +3742,8 @@ for name, func in (
     ("test_bdf2_is_second_order_on_a_spring", test_bdf2_is_second_order_on_a_spring),
     ("test_bdf2_history_starts_anew", test_bdf2_history_starts_anew),
     ("test_bdf2_drives", test_bdf2_drives),
+    ("test_al_ipc_rests_at_d_hat", test_al_ipc_rests_at_d_hat),
+    ("test_al_ipc_status_and_new_masses", test_al_ipc_status_and_new_masses),
 ):
     add_function_test(TestSolverIPCOptions, name, func, devices=devices)
 

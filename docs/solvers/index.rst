@@ -182,7 +182,8 @@ Supported Features
   see :doc:`/concepts/determinism` for limitations and performance trade-offs.
 | :sup:`4` Simulated as MuJoCo flexes; particles that belong to no spring,
   triangle, or tetrahedron are not simulated. See :ref:`mujoco-flexes`.
-| :sup:`5` Incremental Potential Contact: barrier contact with continuous collision detection between
+| :sup:`5` Incremental Potential Contact: barrier contact, or on request libuipc's augmented-Lagrangian contact, with
+  continuous collision detection between
   soft bodies, cloth (with self-collision), particles, near-rigid affine bodies, static shapes, planes and
   height fields, between the pairs that the collision groups, worlds and filter pairs let collide; springs
   without damping; revolute, prismatic, fixed and ball joints as penalty energies; one world besides the global

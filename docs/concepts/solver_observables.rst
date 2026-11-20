@@ -286,7 +286,9 @@ the largest displacement of the last Newton direction over
 ``newton_velocity_tol * dt``, with the rows of an affine body's matrix scaled by
 ``newton_velocity_tol / newton_transrate_tol``. It is dimensionless and at most one
 when the loop ended on that test; with ``semi_implicit=True`` the semi-implicit test
-may end the loop first, above one. A step that failed reports infinity. The solver
+may end the loop first, above one. A step that failed reports infinity. With
+``contact_constitution="al-ipc"`` the step ends on AL-IPC's own criterion, which has
+no such residual, and the solver does not offer the observable. The solver
 solves everything it simulates as one system, also several worlds with
 ``coupled_worlds=True``, so every world that owns particles or bodies reports the
 same value; ``SolverIPC.ObservableKind.STATUS`` reports how the step ended as

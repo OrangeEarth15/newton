@@ -1419,10 +1419,12 @@ class SolverIPC(SolverBase):
     build is needed). Each :meth:`step` is one implicit time step, by default
     of implicit Euler (BDF1): a Newton iteration with a backtracking line
     search, a block-Jacobi PCG linear solve, barrier contact and continuous
-    collision detection. ``integrator="bdf2"`` takes libuipc's BDF2 instead
-    (see **BDF2** below). The Newton loop, the PCG loop and the line search run
-    on the device under ``wp.capture_while``, so a step never synchronizes with
-    the host when it is captured in a CUDA graph. A step that is not captured
+    collision detection. ``integrator="bdf2"`` and
+    ``contact_constitution="al-ipc"`` take libuipc's BDF2 and its
+    augmented-Lagrangian contact instead (see **BDF2** and **AL-IPC
+    contact** below). The Newton loop, the PCG loop and the line search run on
+    the device under ``wp.capture_while``, so a step never synchronizes with the
+    host when it is captured in a CUDA graph. A step that is not captured
     captures the solve itself and checks how it ended (see below).
 
     Supported model content:
@@ -1655,6 +1657,29 @@ class SolverIPC(SolverBase):
     at the end of the step (see **Joints**); the default body stiffness follows
     the rule of **Rigid bodies**.
 
+    **AL-IPC contact.** ``contact_constitution="al-ipc"`` is libuipc's
+    augmented-Lagrangian contact (its ``contact/constitution``): each Newton
+    iteration linearizes the constraint
+    :math:`d \\ge \\hat d + \\text{thickness}` of the active contact pairs, with
+    a penalty that follows the masses and multipliers that converge to the
+    contact forces, and a collision-free sweep moves the configuration toward
+    the solution. Contact rests at ``d_hat`` beyond the contact thickness,
+    where the barrier rests inside ``d_hat``. Its constraints hold between
+    surfaces of vertices with mass, the penalty of a pair scaling with the
+    smallest mass of its vertices: particles on no cloth or tetrahedron that
+    collide are refused, and so are static mesh shapes, particles and bodies
+    without mass that collide (Newton's static shapes have no mass; static
+    planes are taken). A pair joins the active set only when the motion of a
+    step sweeps into it: a kinematic body moved between steps pushes nothing,
+    and what moves into it collides with it. A fast impact runs past the
+    constraint and rebounds faster than it came, as in libuipc: a cube dropped
+    0.4 m onto the ground in steps of 1/1800 s leaves at 4.5 times its impact
+    speed. ``kappa`` is not used, and ``adaptive_kappa`` is refused. The step
+    ends on AL-IPC's own criterion, which has no Newton residual:
+    ``SOLVER_RESIDUAL`` is not offered. A change of the bodies' masses
+    (:meth:`notify_model_changed`) builds the solve again, since the penalty
+    follows the masses the solve was built with.
+
     **Worlds.** Particles, bodies and colliding shapes in more than one local
     world are refused unless ``coupled_worlds=True``. With it every local world
     is a libuipc subscene of its own and the global entities (world -1) one
@@ -1839,7 +1864,8 @@ class SolverIPC(SolverBase):
     until then, and its links may cross each other or the ground there.
 
     **Status.** Request :attr:`SolverIPC.ObservableKind.STATUS` and
-    ``ObservableKind.SOLVER_RESIDUAL`` with :meth:`observables` and pass the
+    ``ObservableKind.SOLVER_RESIDUAL`` (not with ``contact_constitution="al-ipc"``)
+    with :meth:`observables` and pass the
     container to :meth:`step`: the step writes a :class:`SolverIPC.StatusBits` mask and
     the residual on the device, also during graph replay. Every world that
     owns particles or bodies receives the values of the one solve. The
@@ -1880,7 +1906,7 @@ class SolverIPC(SolverBase):
             libuipc's contact resistance, which libuipc and its pyuipc front
             end would clamp into libuipc's range (see ``adaptive_kappa``).
             ``None``, with ``adaptive_kappa``, takes the range's lower bound,
-            libuipc's default.
+            libuipc's default. Not used with ``contact_constitution="al-ipc"``.
         adaptive_kappa: Take the contact stiffness as libuipc and its pyuipc
             front end do: inside libuipc's scene-adaptive range, which
             follows each step's ``dt`` (see **Contact**).
@@ -1916,6 +1942,8 @@ class SolverIPC(SolverBase):
             in which no world collides with another (see **Worlds**); without
             it such a model is refused.
         integrator: ``"bdf1"`` (implicit Euler) or ``"bdf2"`` (see **BDF2**).
+        contact_constitution: ``"ipc"`` (barrier contact) or ``"al-ipc"`` (see
+            **AL-IPC contact**).
 
     Note:
         A step ends once the Newton update moves no vertex by more than
@@ -2063,6 +2091,7 @@ class SolverIPC(SolverBase):
         shape_segments: int = 24,
         coupled_worlds: bool = False,
         integrator: str = "bdf1",
+        contact_constitution: str = "ipc",
     ):
         if not model.device.is_cuda:
             raise NotImplementedError(f"SolverIPC runs on CUDA devices only; the model is on {model.device}.")
@@ -2070,6 +2099,12 @@ class SolverIPC(SolverBase):
         self._coupled_worlds = bool(coupled_worlds)
         _check_supported(model, self._coupled_worlds)
         _check_choice("integrator", integrator, ("bdf1", "bdf2"))
+        _check_choice("contact_constitution", contact_constitution, ("ipc", "al-ipc"))
+        if adaptive_kappa and contact_constitution == "al-ipc":
+            raise ValueError(
+                "SolverIPC: adaptive_kappa sets the stiffness of the barrier, which contact_constitution='al-ipc' "
+                "does not use."
+            )
         if kappa is None and not adaptive_kappa:
             raise ValueError("SolverIPC: kappa=None, libuipc's default stiffness, needs adaptive_kappa=True.")
         if kappa is not None and not (np.isfinite(kappa) and kappa > 0.0):
@@ -2090,6 +2125,7 @@ class SolverIPC(SolverBase):
             semi_implicit_k_min=semi_implicit_k_min,
             eps_velocity=eps_velocity,
             integrator=integrator,
+            contact_constitution=contact_constitution,
         )
         # a BDF2 history starts with an implicit Euler step: at the first step, and at every step from a state the
         # solver did not write (class docstring, **BDF2**)
@@ -2109,6 +2145,15 @@ class SolverIPC(SolverBase):
         self._default_control = None  # the Control of a step given none, built once (_control_of_model)
         self._build_engine()
         self._check_start()
+
+    @property
+    def supported_observables(self) -> frozenset[str]:
+        """``STATUS`` and ``SOLVER_RESIDUAL``; with ``contact_constitution="al-ipc"`` ``STATUS`` only: the AL-IPC
+        frame ends on its own criterion and has no Newton residual."""
+        config = getattr(self, "_config", None)
+        if config is not None and config.contact_constitution == "al-ipc":
+            return frozenset({self.ObservableKind.STATUS})
+        return self.SUPPORTED_OBSERVABLES
 
     @classmethod
     def _import_uipc_warp(cls):
@@ -2196,6 +2241,8 @@ class SolverIPC(SolverBase):
         self._add_cloth(scene, tets)
         self._add_springs(scene)
         self._dyadic = self._add_shapes_and_bodies(scene, elements)
+        if self._config.contact_constitution == "al-ipc":
+            self._check_al_ipc(elements)
         self._add_joints(scene)
         self._planes = self._collect_planes()
         for P, N, s in zip(*self._planes, strict=True):
@@ -2239,6 +2286,34 @@ class SolverIPC(SolverBase):
             self._body_qd_written = wp.empty(nb, dtype=wp.spatial_vector, device=device)
             self._forget_written()
         self._make_engine(None)
+
+    def _check_al_ipc(self, elements: _ContactElements) -> None:
+        """``NotImplementedError`` for contact that libuipc's AL-IPC does not constrain. Its active set holds the
+        vertex / half-plane, point / triangle and edge / edge pairs of surfaces, so a particle on no cloth or
+        tetrahedron that collides has no constraint; and the penalty of a pair is the smallest of its vertices'
+        mass-scaled penalties, so a pair with a vertex without mass has none (a static mesh shape, a particle of no
+        mass, a body of no mass), where libuipc's own obstacles are bodies or vertices with mass."""
+        model = self.model
+        colliding = elements.enabled[elements.particle].any(axis=1) if model.particle_count else np.zeros(0, bool)
+        massless = []
+        if np.any(colliding & ~elements.on_mesh):
+            massless.append("particles on no cloth or tetrahedron, which are points of no surface")
+        if np.any(colliding & elements.on_mesh & (model.particle_mass.numpy() <= 0.0)):
+            massless.append("cloth or tetrahedron particles without mass")
+        if self._obstacle_shapes:
+            massless.append(f"the static shapes {sorted(self._obstacle_shapes)}, which have no mass")
+        if model.shape_count and model.body_count:
+            shape_body = model.shape_body.numpy()[_colliding_shapes(model)]
+            bodies = np.unique(shape_body[shape_body >= 0])
+            light = bodies[self._dyadic[0][bodies] <= 0.0]
+            if len(light):
+                massless.append(f"the bodies {light.tolist()} without mass")
+        if massless:
+            raise NotImplementedError(
+                "SolverIPC: contact_constitution='al-ipc' constrains contact between surfaces of vertices with mass "
+                "(libuipc's AL-IPC scales the penalty of a pair by the smallest mass of its vertices); this model "
+                "collides " + "; ".join(massless) + ". Static planes are taken."
+            )
 
     def _subscene_of_shape(self, s: int) -> int:
         """The subscene of shape ``s``'s vertices: its world's (``coupled_worlds``), else the one subscene, 0."""
@@ -2558,8 +2633,8 @@ class SolverIPC(SolverBase):
                 tabular["plane_scids"], np.int64
             )
             self._enabled = np.kron(np.asarray(tabular["enabled"]) != 0, np.asarray(tabular["subscene_enabled"]) != 0)
-        if self.model.body_count:
-            # notify_model_changed may have changed them since the scene was laid out
+        if self.model.body_count and self._config.contact_constitution != "al-ipc":
+            # notify_model_changed may have changed them since the scene was laid out (AL-IPC: it builds it again)
             self._engine.set_dyadic_mass(*self._engine_dyadic(self._dyadic))
         self._joint_groups = self._uipc_warp.arrays.joint_groups(self._engine)
         self._find_body_stiffness()
@@ -3642,7 +3717,8 @@ class SolverIPC(SolverBase):
         ``BODY_INERTIAL_PROPERTIES``) builds the solve again: the next step reads ``state_in`` in full, and graphs that
         hold :meth:`step` must be captured again. The joints' other data are read at every step; the joint flags only
         check them again against what **Joints** in the class docstring rejects. Copies from the host: not inside a
-        graph capture.
+        graph capture. With ``contact_constitution="al-ipc"`` new masses build the solve again too, since the AL-IPC
+        penalty follows the masses it was built with.
         """
         if self.model.device.is_capturing:
             raise RuntimeError("SolverIPC.notify_model_changed() copies from the host; call it outside graph capture.")
@@ -3672,6 +3748,9 @@ class SolverIPC(SolverBase):
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES) and model.body_count:
             dyadic = self._body_mass_moments(stacklevel=3)
             rebuild |= not np.array_equal(self._kinematic_body, kinematic)
+            if self._config.contact_constitution == "al-ipc":
+                # the AL-IPC contact penalty follows the masses the engine was built with
+                rebuild |= any(not np.array_equal(a, b) for a, b in zip(dyadic, self._dyadic, strict=True))
         if rebuild:
             _check_supported(model, self._coupled_worlds)
             self._build_engine()
