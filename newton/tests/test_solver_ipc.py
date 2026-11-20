@@ -8,6 +8,7 @@ import pathlib
 import re
 import unittest
 import warnings
+from unittest import mock
 
 import numpy as np
 import warp as wp
@@ -1637,6 +1638,102 @@ def test_reset_checks_world_mask_as_newton_does(test, device):
             test.assertEqual(expected.count("accepted"), 3)
             solver = newton.solvers.SolverIPC(model, coupled_worlds=copies > 1)
             test.assertEqual([outcome(solver, state, m) for m in masks], expected)
+
+
+def _hanging_cloth(device):
+    """A 32 x 32 cloth of 1 cm cells hanging from its top edge, without contact."""
+    builder = newton.ModelBuilder()
+    builder.add_cloth_grid(
+        pos=wp.vec3(0.0, 0.0, 1.0), rot=wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.5 * np.pi),
+        vel=wp.vec3(0.0, 0.0, 0.0), dim_x=32, dim_y=32, cell_x=0.01, cell_y=0.01, mass=1.0e-4,
+        tri_ke=1.0e4, tri_ka=1.0e4, tri_kd=0.0, edge_ke=1.0e-3, edge_kd=0.0, fix_top=True,
+    )  # fmt: skip
+    return builder.finalize(device=device)
+
+
+def test_graph_outdated_after_long_solves(test, device):
+    """graph_outdated() takes the iterations of the captured steps replayed since it was last called. A cloth hanging
+    from its top edge, solved to 1e-12, takes about 270 PCG iterations per Newton iteration: the first call after
+    replays returns True, the steps captured from then on re-read the loop's test every 32 iterations instead of 8,
+    and they end where the steps of the old graph end, to 1e-6. A soft cube falling freely, solved to 1e-3, takes
+    fewer than 128, and the loop stays."""
+    for long in (True, False):
+        with test.subTest(long_solves=long):
+            if long:
+                model = _hanging_cloth(device)
+            else:
+                model = _soft_cube(device, height=0.5, ground=False)
+            outdated = long
+            args = {"linear_tol_rate": 1e-12 if long else 1e-3, "newton_velocity_tol": 1e-4}
+            s0, s1 = model.state(), model.state()
+            newton.solvers.SolverIPC(model, **args).step(s0, s1, None, None, 0.01)  # loads the kernels
+            solver = newton.solvers.SolverIPC(model, **args)
+            test.assertFalse(solver.graph_outdated())  # nothing captured yet
+            pcg = solver._engine.solver.pcg
+            s0, s1 = model.state(), model.state()
+            with wp.ScopedCapture(device=device) as capture:
+                solver.step(s0, s1, None, None, 0.01)
+                solver.step(s1, s0, None, None, 0.01)
+            wp.capture_launch(capture.graph)
+            after = (s0.particle_q.numpy(), s0.particle_qd.numpy())
+            wp.capture_launch(capture.graph)
+            test.assertEqual(solver.graph_outdated(), outdated)
+            test.assertEqual(pcg.iterations_per_check, 32 if outdated else 8)
+            test.assertFalse(solver.graph_outdated())  # the counts were taken
+            if outdated:
+                old = s0.particle_q.numpy()
+                s0.particle_q.assign(after[0])
+                s0.particle_qd.assign(after[1])
+                with wp.ScopedCapture(device=device) as capture:
+                    solver.step(s0, s1, None, None, 0.01)
+                    solver.step(s1, s0, None, None, 0.01)
+                wp.capture_launch(capture.graph)
+                np.testing.assert_allclose(s0.particle_q.numpy(), old, rtol=0.0, atol=1e-6)
+
+
+def test_graph_outdated_takes_the_ladder_guesses(test, device):
+    """graph_outdated() also answers for the size ladders, whose guess a captured step holds (libuipc-warp's
+    SimEngine.graph_outdated and prepare_capture). With libuipc-warp's RECAPTURE_NODES at 8, replays of the hanging
+    cloth, whose matrix conversions take no contact block, ask for the guess of that size: the first call returns
+    True and the engine takes the guess, a second call without new steps returns False, and so does a call after
+    replays of the steps captured on the guess. The PCG loop's own choice is off (``check_bodies = None``), so that
+    only the ladders ask. Without prepare_capture the second call would ask again."""
+    from uipc_warp.backend.engine import sim_engine  # noqa: PLC0415
+
+    model = _hanging_cloth(device)
+    s0, s1 = model.state(), model.state()
+    newton.solvers.SolverIPC(model).step(s0, s1, None, None, 0.01)  # loads the kernels
+
+    def replays(solver):
+        s0, s1 = model.state(), model.state()
+        with wp.ScopedCapture(device=device) as capture:
+            solver.step(s0, s1, None, None, 0.01)
+            solver.step(s1, s0, None, None, 0.01)
+        for _ in range(3):
+            wp.capture_launch(capture.graph)
+
+    def built():
+        solver = newton.solvers.SolverIPC(model)
+        solver._engine.solver.pcg.check_bodies = None  # the loop body stays: only the ladders ask for captures
+        return solver
+
+    with mock.patch.object(sim_engine, "RECAPTURE_NODES", 8):
+        solver = built()
+        ladder = solver._engine.solver.converter.ladder
+        test.assertGreaterEqual(ladder.depth, 2)
+        replays(solver)
+        test.assertIsNone(ladder.guess)
+        test.assertTrue(solver.graph_outdated())
+        test.assertEqual(ladder.sizes[ladder.guess], 0)
+        test.assertFalse(solver.graph_outdated())  # a second check without new steps
+        replays(solver)
+        test.assertFalse(solver.graph_outdated())  # the steps captured on the guess
+        # the negative control: an engine that does not take the guesses keeps asking
+        solver = built()
+        with mock.patch.object(type(solver._engine), "prepare_capture", lambda engine: None):
+            replays(solver)
+            test.assertTrue(solver.graph_outdated())
+            test.assertTrue(solver.graph_outdated())
 
 
 def test_default_control_is_built_once(test, device):
@@ -3312,6 +3409,8 @@ for name, func in (
     ("test_reset_checks_world_mask_as_newton_does", test_reset_checks_world_mask_as_newton_does),
     ("test_notify_updates_gravity_and_inertia_in_place", test_notify_updates_gravity_and_inertia_in_place),
     ("test_gravity_per_world", test_gravity_per_world),
+    ("test_graph_outdated_after_long_solves", test_graph_outdated_after_long_solves),
+    ("test_graph_outdated_takes_the_ladder_guesses", test_graph_outdated_takes_the_ladder_guesses),
     ("test_default_control_is_built_once", test_default_control_is_built_once),
 ):
     add_function_test(TestSolverIPCStep, name, func, devices=devices)

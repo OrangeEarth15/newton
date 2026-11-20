@@ -1807,6 +1807,12 @@ class SolverIPC(SolverBase):
     with ``grow=True`` it answers :attr:`SolverIPC.StatusBits.OVERFLOW` with
     :meth:`grow` and returns ``True``, and the caller then restores the
     state the replayed steps started from, captures again and repeats them.
+    The PCG loop of a captured step re-reads its stopping test every 8 or 32
+    iterations, and work whose size only the device knows starts at a guessed
+    size; both are chosen when the step is captured. :meth:`graph_outdated`,
+    called after replays, returns ``True`` when the steps replayed since asked
+    for the other length or for other guesses, and the caller then captures
+    again to run faster (the old graphs stay valid and give the same results).
 
     This solver requires the optional ``libuipc-warp`` package (``import uipc_warp``).
 
@@ -2057,7 +2063,7 @@ class SolverIPC(SolverBase):
             ) from e
         version = getattr(uipc_warp, "__version__", "0")
         # the newest calls of each kind the solver makes: the frame status, the contact and subscene tabulars and the
-        # stiffness policy, the start check, the joints
+        # stiffness policy, the start check, the joints, the iterations of captured steps
         needed = (
             (uipc_warp.arrays, "write_frame_status"),
             (uipc_warp.arrays.ArrayScene, "contact_model"),
@@ -2065,6 +2071,8 @@ class SolverIPC(SolverBase):
             (uipc_warp.backend.contact_system, "contact_stiffness"),
             (uipc_warp.validation.SurfaceChecker, "min_gap"),
             (uipc_warp.arrays, "joint_groups"),
+            (uipc_warp.arrays, "add_frame_iterations"),
+            (uipc_warp.SimEngine, "prepare_capture"),
         )
         missing = [f"{owner.__name__}.{name}" for owner, name in needed if not hasattr(owner, name)]
         if missing:
@@ -2460,6 +2468,8 @@ class SolverIPC(SolverBase):
             self._forces = self._external_acceleration("newton_forces", self._force_blocks, device)
             inputs["elements"].append(self._forces)
         self._engine = self._uipc_warp.make_engine(self._config, None, **inputs, device=device, capacity=capacity)
+        # the Newton and PCG iterations of the captured steps since the last graph_outdated()
+        self._iterations = wp.zeros(2, dtype=wp.int64, device=device)
         # what the start check needs of the tabular: the element of every vertex and half plane, and their pairs
         self._vertex_thickness = np.asarray(inputs["thickness"], np.float64)
         tabular = inputs["contact_tabular"]
@@ -2962,6 +2972,7 @@ class SolverIPC(SolverBase):
             # the solve joins the caller's graph; it cannot synchronize, grow or raise (see the class docstring)
             self._engine.stop_on_overflow = False
             self._engine.advance(dt)
+            self._uipc_warp.arrays.add_frame_iterations(self._engine, self._iterations)
         else:
             status = self._advance_eager(dt)
             if status.failed:
@@ -3233,9 +3244,20 @@ class SolverIPC(SolverBase):
                 break
             self._regrow()
             status = self._solve_frame(dt)
-        if not status.overflowed and self._engine.graph_outdated():
-            self._frame_graph = None  # the solves ask for the other PCG loop: capture the next frame anew
+        if not status.overflowed:
+            self._engine_outdated()  # the next frame is captured anew when the solves or the size ladders ask
         return status
+
+    def _engine_outdated(self, iterations=None) -> bool:
+        """``engine.graph_outdated``: whether a frame captured from now on would hold a better PCG loop or better
+        guesses of the size ladders. When it would, the engine takes the ladders' guesses for that capture
+        (``prepare_capture``, as libuipc-warp's ``FrameRunner`` does before it captures) and the solver's own graph of
+        the solve is dropped. ``iterations``: the sums of the captured steps (:meth:`graph_outdated`)."""
+        if not self._engine.graph_outdated(iterations=iterations):
+            return False
+        self._engine.prepare_capture()
+        self._frame_graph = None
+        return True
 
     def _solve_frame(self, dt: float):
         """One frame as a graph of its own (captured at the first frame of an engine), and how it ended."""
@@ -3263,6 +3285,7 @@ class SolverIPC(SolverBase):
         capacity = old.grown_capacity()
         start = old.frame_start_state()
         kept = [e.frame_start_state() for e in old.elements]
+        loop = old.solver.pcg.loop
         forces = None if self._forces is None else self._forces.a
         # release the old engine before the new one allocates
         self._engine = self._frame_graph = self._forces = old = None
@@ -3273,6 +3296,7 @@ class SolverIPC(SolverBase):
                 e.load_state(group_state)
         if forces is not None:
             wp.copy(self._forces.a, forces)
+        self._engine.solver.pcg.loop = loop  # the PCG loop the steps so far chose, as FrameRunner carries it
         self._write_joint_controls(self._control or self._control_of_model(), self._dt)
         self._write_body_stiffness(self._dt)
 
@@ -3353,6 +3377,32 @@ class SolverIPC(SolverBase):
         if self.model.body_count:
             # what the solver wrote for the restored state, so that the step's own state_in is kept as it was
             self._store(self._body_q_written, self._body_qd_written, None)
+
+    def graph_outdated(self) -> bool:
+        """Whether graphs that hold :meth:`step` would run faster captured again.
+
+        The PCG loop of a step re-reads its stopping test after a fixed number of iterations, 8 or 32, and work whose
+        size only the device knows (the matrix conversion, the sort of body pairs) runs on a ladder of sizes that
+        starts at a guess. Both are chosen when the step is enqueued: a captured step keeps what it was captured with.
+        A step that is not captured chooses for itself (libuipc-warp's ``SimEngine.graph_outdated``), from the steps
+        before. For captured steps, this takes the Newton and PCG iterations of every captured step replayed since the
+        last call, which the steps count on the device, and the sizes the ladders took, and returns ``True`` when
+        they ask for the other number or for other guesses; the engine then takes the guesses
+        (``SimEngine.prepare_capture``), and the steps captured from then on take both. The graphs captured before
+        stay valid and give the same results; only the loop and the ladders cost more. Call it outside graph
+        capture, after replays (after :meth:`check_status`, for example); a caller that never calls it keeps 8 and
+        no guesses. Reads the two counters and the ladders' counts back: two or three synchronizations.
+
+        Returns:
+            ``True`` when graphs that hold :meth:`step` should be captured again.
+        """
+        if self._engine is None:
+            return False
+        if self.model.device.is_capturing:
+            raise RuntimeError("SolverIPC.graph_outdated() reads from the device; call it outside graph capture.")
+        newton, pcg = self._iterations.numpy().tolist()
+        self._iterations.zero_()
+        return self._engine_outdated(iterations=(newton, pcg))
 
     def check_status(self, observables: SolverBase.Observables, *, grow: bool = False) -> bool:
         """Raise when a step that wrote ``observables`` failed, and warn when one reached an iteration limit.

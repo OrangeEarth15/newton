@@ -14,7 +14,9 @@ The example captures its substeps in a CUDA graph. A captured step cannot
 raise, so after every replay the example reads each substep's status with
 :meth:`~newton.solvers.SolverIPC.check_status`: a failed step raises there,
 and a contact-list overflow grows the lists and repeats the frame in a graph
-captured anew.
+captured anew. It also captures again when
+:meth:`~newton.solvers.SolverIPC.graph_outdated` says that the substeps' PCG
+loop would run faster with the other length.
 
 Requires the optional ``libuipc-warp`` package.
 
@@ -131,6 +133,8 @@ class Example:
                 self.state_0.assign(self.frame_start)
                 self.capture()
                 wp.capture_launch(self.graph)
+            if self.solver.graph_outdated():  # the next frames run a PCG loop of the other length
+                self.capture()
         else:
             self.simulate()
         self.sim_time += self.frame_dt
