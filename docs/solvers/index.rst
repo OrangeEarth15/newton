@@ -347,7 +347,7 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
      - |no|
      - |no|
      - |no|
-     - |no|
+     - 🟨 :sup:`18`
    * - D6
      - |yes|
      - |yes|
@@ -373,6 +373,9 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
   locks: no axis (fixed), one angular axis (revolute), one linear axis (prismatic), three orthonormal angular axes
   (ball), or three orthonormal linear and three orthonormal angular axes (no joint). Other D6 joints raise
   ``NotImplementedError``.
+| :sup:`18` With ``enable_distance_joints=True``, SolverIPC holds a distance joint of one length (equal bounds) as
+  libuipc's soft vertex stitch of that rest length, and one with both bounds negative as a free joint; a range or a
+  single bound raises ``NotImplementedError``.
 
 **Joint properties**
 

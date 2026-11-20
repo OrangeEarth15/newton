@@ -4936,6 +4936,100 @@ def test_d6_joint_f_is_featherstones(test, device):
     np.testing.assert_allclose(q[:, [0, 2, 3, 4]], 0.0, rtol=0.0, atol=1e-6)
 
 
+def _distance_pendulum(device, length, theta, lower, upper, gravity=10.0):
+    """A sphere of radius 0.05 hanging from the world on a distance joint at its centre, ``length`` below the
+    joint's origin turned by ``theta`` (y up), the joint's bounds ``lower`` and ``upper``."""
+    builder = newton.ModelBuilder(gravity=(0.0, -gravity, 0.0), up_axis=newton.Axis.Y)
+    x = (length * np.sin(theta), 1.0 - length * np.cos(theta), 0.0)
+    bob = builder.add_link(xform=wp.transform(x, wp.quat_identity()))
+    builder.add_shape_sphere(bob, radius=0.05)
+    j = builder.add_joint_distance(
+        -1, bob, parent_xform=wp.transform((0.0, 1.0, 0.0), wp.quat_identity()), min_distance=lower,
+        max_distance=upper,
+    )  # fmt: skip
+    builder.add_articulation([j])
+    return builder.finalize(device=device)
+
+
+def test_distance_joint_swings_as_a_pendulum(test, device):
+    """With enable_distance_joints=True a distance joint of one length L is libuipc's soft vertex stitch of rest length
+    L between its joint frames' origins: a sphere hanging 1 m from the world on it at its centre swings 0.02 rad as
+    implicit Euler integrates the linearized point-mass pendulum, step by step to 1e-3 of its amplitude, and stays at
+    L within the ball joint's penalty. Without the option the joint is refused, and a distance joint with a range or a
+    single bound is refused with it."""
+    L, theta0, g, h = 1.0, 0.02, 10.0, 1.0e-3
+    model = _distance_pendulum(device, L, theta0, L, L, gravity=g)
+    with test.assertRaisesRegex(NotImplementedError, "DISTANCE joints \\(joint 0\\).*enable_distance_joints=True"):
+        newton.solvers.SolverIPC(model)
+    solver = newton.solvers.SolverIPC(model, enable_distance_joints=True, **_CONVERGED)
+    test.assertEqual(len(solver._distance_rows), 1)
+    m = float(model.body_mass.numpy()[0])
+    steps = 700  # beyond half a period, 2 pi sqrt(L / g) = 1.99 s
+    frames, _ = _steps(model, solver, model.state(), steps, h, None, lambda s: s.body_q.numpy()[0, :3].copy())
+    offset = frames - np.array([0.0, 1.0, 0.0])
+    angle = np.arctan2(offset[:, 0], -offset[:, 1])
+    expected = _drive_recurrence(m * L * L, h, steps, q0=theta0, ke=m * g * L)
+    test.assertLess(expected.min(), -0.5 * theta0)
+    np.testing.assert_allclose(angle, expected, rtol=0.0, atol=1e-3 * theta0)
+    # the penalty K = joint_strength_ratio m holds the weight m g at a stretch of g h^2 / ratio, 1e-7 m here
+    np.testing.assert_allclose(np.linalg.norm(offset, axis=1), L, rtol=0.0, atol=1e-6)
+    for lower, upper in ((0.5, 1.0), (-1.0, 1.0), (0.5, -1.0)):
+        with test.subTest(bounds=(lower, upper)):
+            with test.assertRaisesRegex(NotImplementedError, "a range or a single bound is an inequality"):
+                newton.solvers.SolverIPC(_distance_pendulum(device, L, 0.0, lower, upper), enable_distance_joints=True)
+
+
+def test_distance_joint_between_bodies(test, device):
+    """A distance joint of 0.5 m between two free spheres thrown apart sideways at 1 m/s, without gravity: they turn
+    about each other at 0.5 m, within the penalty, the pair keeps its momentum to 1e-6 and its joint coordinates are a
+    free joint's (eval_ik's). A distance joint with both bounds negative holds nothing: the spheres fly apart as two
+    free bodies, and a disabled one too."""
+
+    def pair(lower, upper, enabled=True):
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        a = builder.add_link(xform=wp.transform((0.0, 0.0, 1.0), wp.quat_identity()))
+        builder.add_shape_sphere(a, radius=0.05)
+        b = builder.add_link(xform=wp.transform((0.5, 0.0, 1.0), wp.quat_identity()))
+        builder.add_shape_sphere(b, radius=0.05)
+        joints = [
+            builder.add_joint_free(a),
+            builder.add_joint_distance(a, b, min_distance=lower, max_distance=upper, enabled=enabled),
+        ]
+        builder.add_articulation(joints)
+        model = builder.finalize(device=device)
+        state = model.state()
+        qd = state.body_qd.numpy()
+        qd[0, 1], qd[1, 1] = -1.0, 1.0
+        state.body_qd.assign(qd)
+        return model, state
+
+    h, steps = 0.005, 200
+    model, state = pair(0.5, 0.5)
+    solver = newton.solvers.SolverIPC(model, enable_distance_joints=True, **_CONVERGED)
+    s0, s1 = state, model.state()
+    m = model.body_mass.numpy().astype(np.float64)
+    for _ in range(steps):
+        solver.step(s0, s1, None, None, h)
+        s0, s1 = s1, s0
+        x = s0.body_q.numpy()[:, :3].astype(np.float64)
+        test.assertAlmostEqual(float(np.linalg.norm(x[1] - x[0])), 0.5, delta=1e-4)
+        momentum = (m[:, None] * s0.body_qd.numpy()[:, :3]).sum(axis=0)
+        np.testing.assert_allclose(momentum, 0.0, rtol=0.0, atol=1e-6 * m.sum())
+    written_q, written_qd = s0.joint_q.numpy().copy(), s0.joint_qd.numpy().copy()
+    newton.eval_ik(model, s0, s0.joint_q, s0.joint_qd)
+    np.testing.assert_allclose(written_q, s0.joint_q.numpy(), rtol=0.0, atol=1e-5)
+    np.testing.assert_allclose(written_qd, s0.joint_qd.numpy(), rtol=0.0, atol=1e-4)
+    turned = np.arctan2(x[1, 1] - x[0, 1], x[1, 0] - x[0, 0])
+    test.assertGreater(abs(turned), 1.0)  # 4 rad/s for a second
+    for lower, upper, enabled in ((-1.0, -1.0, True), (0.5, 0.5, False)):
+        with test.subTest(bounds=(lower, upper), enabled=enabled):
+            model, state = pair(lower, upper, enabled)
+            solver = newton.solvers.SolverIPC(model, enable_distance_joints=True)
+            _, s0 = _steps(model, solver, state, 20, h)
+            x = s0.body_q.numpy()[:, :3]
+            np.testing.assert_allclose(x[:, 1], [-20 * h, 20 * h], rtol=0.0, atol=1e-5)
+
+
 def test_rejects_d6_joints_libuipc_lacks(test, device):
     """With enable_d6_joints=True the D6 joints that lock what no libuipc joint locks are refused, naming what they
     lock: two angular axes, three linear axes, one linear and one angular; and three angular axes that are not
@@ -5504,6 +5598,8 @@ for name, func in (
     ("test_d6_coordinates_are_newtons", test_d6_coordinates_are_newtons),
     ("test_d6_joint_f_is_featherstones", test_d6_joint_f_is_featherstones),
     ("test_rejects_d6_joints_libuipc_lacks", test_rejects_d6_joints_libuipc_lacks),
+    ("test_distance_joint_swings_as_a_pendulum", test_distance_joint_swings_as_a_pendulum),
+    ("test_distance_joint_between_bodies", test_distance_joint_between_bodies),
 ):
     add_function_test(TestSolverIPCJointOptions, name, func, devices=devices)
 

@@ -614,6 +614,29 @@ def _stitch_stiffness(
 
 
 @wp.kernel
+def _distance_stiffness(
+    source: wp.array[wp.int32],
+    joints: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_enabled: wp.array[wp.bool],
+    joint_limit_lower: wp.array[wp.float32],
+    hard: wp.array[wp.float64],
+    inv_dt2: wp.float64,
+    kappa: wp.array[wp.float64],
+    rest_length: wp.array[wp.float64],
+):
+    """The stiffness [N/m] and rest length of every row of a stitch group of distance joints for the next step
+    (class docstring, **Distance joints**): ``source`` holds the row's distance joint among ``joints``, whose penalty
+    ``hard`` is a ball joint's, over ``dt^2``, 0 when the joint is disabled; its rest length the joint's distance,
+    the bounds of its first degree of freedom."""
+    r = wp.tid()
+    k = source[r]
+    j = joints[k]
+    kappa[r] = wp.where(joint_enabled[j], hard[k] * inv_dt2, wp.float64(0.0))
+    rest_length[r] = wp.float64(joint_limit_lower[joint_qd_start[j]])
+
+
+@wp.kernel
 def _adopt_joint_angles(
     joints: wp.array[wp.int32],
     joint_q_start: wp.array[wp.int32],
@@ -1392,9 +1415,11 @@ def _default_d_hat(model: Model) -> float:
 @dataclass(frozen=True)
 class _JointOptions:
     """The joints SolverIPC maps beyond revolute, prismatic, fixed, ball and free joints, on request (class
-    docstring, **Joints**): ``d6``, D6 joints that lock what one of libuipc's joints locks."""
+    docstring, **Joints**): ``d6``, D6 joints that lock what one of libuipc's joints locks; ``distance``, distance
+    joints of one length or none."""
 
     d6: bool = False
+    distance: bool = False
 
 
 @dataclass(frozen=True)
@@ -1404,12 +1429,15 @@ class _JointMap:
     ``kind``: the joint type whose libuipc joint the joint becomes, REVOLUTE, PRISMATIC, FIXED or BALL, or FREE for
     none. ``store``: the type ``_store_joints`` and ``_joint_wrenches`` take the joint for, its own but for a D6 joint:
     that of its libuipc joint, or FIXED (skipped) for one whose coordinates and ``joint_f`` the D6 kernels take.
-    ``d6``: those joints, D6 joints of three angular axes, with or without three linear ones."""
+    ``d6``: those joints, D6 joints of three angular axes, with or without three linear ones. ``distance``: the
+    distance joints of one length, libuipc's stitch of that rest length between their joint frames' origins; the
+    other distance joints, of no length, are no joint, and every distance joint is stored as a free joint."""
 
     kind: np.ndarray
     store: np.ndarray
     d6: np.ndarray
     relabeled: bool  # whether a joint is stored as another type than its own
+    distance: np.ndarray
 
 
 # what libuipc's joints lock, by the (linear, angular) axes a D6 joint keeps free: all six (fixed), all but one
@@ -1432,13 +1460,16 @@ def _map_joints(model: Model, options: _JointOptions) -> _JointMap:
     """How every joint maps onto libuipc (``_JointMap``), or ``NotImplementedError`` for the first joint that does
     not: a joint type libuipc has no joint for (``_UNMAPPED_JOINTS``), and without ``options.d6`` every D6 joint; with
     it a D6 joint that locks other degrees of freedom than one of libuipc's joints does, or that takes Newton's
-    coordinates of three axes that are not orthonormal."""
+    coordinates of three axes that are not orthonormal; without ``options.distance`` every distance joint, with it one
+    whose distance is bounded to a range or on one side."""
     joint_type = model.joint_type.numpy().astype(np.int32)
     kind, store = joint_type.copy(), joint_type.copy()
     supported = [int(t) for t in (JointType.FREE, JointType.REVOLUTE, JointType.PRISMATIC, JointType.FIXED)]
     supported.append(int(JointType.BALL))
     if options.d6:
         supported.append(int(JointType.D6))
+    if options.distance:
+        supported.append(int(JointType.DISTANCE))
     other = np.flatnonzero(~np.isin(joint_type, supported))
     if len(other):
         j = int(other[0])
@@ -1447,6 +1478,11 @@ def _map_joints(model: Model, options: _JointOptions) -> _JointMap:
         if t == JointType.D6:
             why += (
                 "; with enable_d6_joints=True SolverIPC takes a D6 joint that locks what one of them locks, or nothing"
+            )
+        elif t == JointType.DISTANCE:
+            why += (
+                "; with enable_distance_joints=True SolverIPC takes a distance joint of one length, as libuipc's soft "
+                "vertex stitch of that rest length, and one of no length"
             )
         raise NotImplementedError(f"SolverIPC does not simulate {t.name} joints (joint {j}): {why}.")
     d6 = np.flatnonzero(joint_type == int(JointType.D6))
@@ -1473,8 +1509,24 @@ def _map_joints(model: Model, options: _JointOptions) -> _JointMap:
                     )
         kind[j] = int(t)
         store[j] = int(JointType.FIXED) if ang == 3 else int(t)
+    distance = np.flatnonzero(joint_type == int(JointType.DISTANCE))
+    if len(distance):
+        # the bounds of a distance joint are those of its first degree of freedom, a negative one being no bound
+        first = model.joint_qd_start.numpy()[distance]
+        lo, hi = model.joint_limit_lower.numpy()[first], model.joint_limit_upper.numpy()[first]
+        for j, a, b in zip(distance, lo, hi, strict=True):
+            if (a >= 0.0 or b >= 0.0) and not (a == b):
+                raise NotImplementedError(
+                    f"SolverIPC does not simulate the DISTANCE joint {j}, whose distance is bounded to "
+                    f"[{float(a)!r}, {float(b)!r}] (a negative bound is none): a range or a single bound is an "
+                    "inequality, and libuipc's soft vertex stitch, the spring it holds a distance with, has one rest "
+                    "length; libuipc has no distance limit."
+                )
+        kind[distance] = int(JointType.FREE)
+        store[distance] = int(JointType.FREE)
+        distance = distance[lo >= 0.0]
     three = (d6[dof_dim[d6, 1] == 3] if len(d6) else d6).astype(np.int32)
-    return _JointMap(kind, store, three, bool(np.any(store != joint_type)))
+    return _JointMap(kind, store, three, bool(np.any(store != joint_type)), distance.astype(np.int32))
 
 
 def _check_supported(model: Model, coupled_worlds: bool = False, joints: _JointOptions | None = None) -> None:
@@ -1604,6 +1656,7 @@ def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
     )
     lo, hi, limit_k = per_dof("joint_limit_lower"), per_dof("joint_limit_upper"), per_dof("joint_limit_ke")
     limited = ((lo > -MAXVAL) | (hi < MAXVAL)) & (limit_k > 0.0)
+    limited[qd_start[:-1][joint_type == int(JointType.DISTANCE)]] = False  # a distance joint's bounds
     other = np.isin(dof_type, [int(JointType.BALL), int(JointType.FREE)])
 
     def drive(d: int) -> str:
@@ -2202,7 +2255,8 @@ class SolverIPC(SolverBase):
       world, with drives, passive springs and damping, limits and
       :attr:`~newton.Control.joint_f` (see **Joints** below); ``joint_q`` and
       ``joint_qd`` are written at every step. With ``enable_d6_joints``, D6
-      joints that lock what one of these locks, or nothing.
+      joints that lock what one of these locks, or nothing; with
+      ``enable_distance_joints``, distance joints of one length or none.
     - external forces: :attr:`~newton.State.particle_f`, :attr:`~newton.State.body_f`
       and :attr:`~newton.Control.joint_f`, held constant over the step as
       libuipc holds its external forces (a constant acceleration in the
@@ -2679,6 +2733,21 @@ class SolverIPC(SolverBase):
     decomposition: both are rejected, and so are drives, springs, damping
     and limits on the D6 joints that become a ball or no joint.
 
+    **Distance joints** (``enable_distance_joints=True``). libuipc has no
+    distance joint. One whose distance has a single value ``L`` (the two
+    bounds of its first degree of freedom equal and not negative) holds the
+    origins of its joint frames ``L`` apart as libuipc's soft vertex stitch
+    (constitution 22) of rest length ``L`` between two anchors of the
+    bodies there (the world's fixed body for a parent of -1): the penalty
+    of a ball joint, ``K/2 (|x_c - x_p| - L)^2`` with the same ``K``, and
+    nothing when the joint is disabled. One whose bounds are both negative
+    holds nothing, as Featherstone and SemiImplicit take every distance
+    joint. Either takes ``joint_q``, ``joint_qd`` and ``joint_f`` as a free
+    joint does. A range of distances, or a single bound, is an inequality,
+    which a stitch, a spring about one rest length, cannot hold: rejected,
+    and so are drives on a distance joint (SolverXPBD reads its gains as
+    the compliance of the distance).
+
     Rejected (:class:`NotImplementedError`), each for the libuipc
     constitution it lacks: distance joints and D6 joints but those above,
     which libuipc does not have, and rod joints, which no libuipc
@@ -2869,6 +2938,10 @@ class SolverIPC(SolverBase):
         enable_d6_joints: Simulate the D6 joints that lock what one of
             libuipc's joints locks, as that joint (see **D6 joints**); without
             it every D6 joint is rejected.
+        enable_distance_joints: Simulate distance joints of one length, as
+            libuipc's soft vertex stitch of that rest length, and those of
+            none (see **Distance joints**); without it every distance joint is
+            rejected.
 
     Note:
         A step ends once the Newton update moves no vertex by more than
@@ -3024,12 +3097,13 @@ class SolverIPC(SolverBase):
         kinematic_motion: str = "jump",
         kinematic_strength_ratio: float = 100.0,
         enable_d6_joints: bool = False,
+        enable_distance_joints: bool = False,
     ):
         if not model.device.is_cuda:
             raise NotImplementedError(f"SolverIPC runs on CUDA devices only; the model is on {model.device}.")
         super().__init__(model)
         self._coupled_worlds = bool(coupled_worlds)
-        self._joint_options = _JointOptions(d6=bool(enable_d6_joints))
+        self._joint_options = _JointOptions(d6=bool(enable_d6_joints), distance=bool(enable_distance_joints))
         _check_supported(model, self._coupled_worlds, self._joint_options)
         _check_choice("integrator", integrator, ("bdf1", "bdf2"))
         _check_choice("contact_constitution", contact_constitution, ("ipc", "al-ipc"))
@@ -3250,6 +3324,7 @@ class SolverIPC(SolverBase):
         self._add_cloth(scene, tets)
         self._add_springs(scene)
         self._plan_attachments()
+        self._plan_distance_joints()
         self._dyadic = self._add_shapes_and_bodies(scene, elements)
         if self._config.contact_constitution == "al-ipc":
             self._check_al_ipc(elements)
@@ -3264,6 +3339,7 @@ class SolverIPC(SolverBase):
             a, b = a + 1, b + 1
             scene.contact_model(a, b, elements.mu[a, b], None, elements.enabled[a, b])
         self._attachment_hard = wp.array(self._attachment_penalties(self._dyadic[0]), dtype=wp.float64, device=device)
+        self._distance_hard = wp.array(self._distance_penalties(self._dyadic[0]), dtype=wp.float64, device=device)
         self._add_stitches(scene)
         if len(self._aim_bodies):  # libuipc's soft transform constraint on the kinematic bodies, in their order
             ratio = self._kinematic_strength_ratio
@@ -3741,11 +3817,23 @@ class SolverIPC(SolverBase):
             self._engine.set_dyadic_mass(*self._engine_dyadic(self._dyadic))
         self._joint_groups = self._uipc_warp.arrays.joint_groups(self._engine)
         self._aim_group = self._uipc_warp.arrays.constraint_groups(self._engine).transform  # None without aims
-        # the stiffness of every stitch group and the attachment or spring of each of its rows (_stitch_stiffness)
-        self._stitch_rows = [
-            (g.kappa, wp.array(self._stitch_source[g.rows], dtype=wp.int32, device=device))
-            for g in self._uipc_warp.arrays.stitch_groups(self._engine)
-        ]
+        # the stiffness of every stitch group and the attachment or spring of each of its rows (_stitch_stiffness);
+        # the groups of the distance joints' stitches, which join two bodies and so never share a group with an
+        # attachment or a spring, apart (_distance_stiffness)
+        self._stitch_rows, self._distance_rows = [], []
+        for g in self._uipc_warp.arrays.stitch_groups(self._engine):
+            distance = g.rows >= self._distance_first
+            if not distance.any():
+                self._stitch_rows.append(
+                    (g.kappa, wp.array(self._stitch_source[g.rows], dtype=wp.int32, device=device))
+                )
+            elif distance.all():
+                rows = wp.array((g.rows - self._distance_first).astype(np.int32), dtype=wp.int32, device=device)
+                self._distance_rows.append((g.kappa, g.rest_length, rows))
+            else:
+                raise RuntimeError("SolverIPC: a stitch group holds distance joints and attachments or springs.")
+        if self._distance_rows:
+            self._distance_joints_device = wp.array(self._distance_joints, dtype=wp.int32, device=device)
         self._find_body_stiffness()
         self._make_contact_export()
 
@@ -3964,6 +4052,38 @@ class SolverIPC(SolverBase):
             self._body_anchors[int(b)] = points[order].astype(np.float64)
             self._attachment_anchor[rows] = rank[inverse.reshape(-1)]
 
+    def _plan_distance_joints(self) -> None:
+        """The anchors of the distance joints of one length (``enable_distance_joints``, class docstring, **Distance
+        joints**): one on either side at the origin of its joint frame, ``joint_X_p`` in the parent's frame, the
+        fixed body that stands for the world for a parent of -1, and ``joint_X_c`` in the child's, after the anchors
+        of the attachments; for every such joint the body and the anchor of its two sides."""
+        model = self.model
+        self._distance_joints = np.zeros(0, np.int32)
+        self._distance_anchor = np.zeros((0, 2, 2), np.int64)  # joint, side (parent, child), (body, anchor)
+        if model.joint_count == 0 or not self._joint_options.distance:
+            return
+        joints = _map_joints(model, self._joint_options).distance
+        parent, child = model.joint_parent.numpy()[joints], model.joint_child.numpy()[joints]
+        X_p, X_c = model.joint_X_p.numpy().astype(np.float64), model.joint_X_c.numpy().astype(np.float64)
+        anchor = np.zeros((len(joints), 2, 2), np.int64)
+        for k, j in enumerate(joints):
+            sides = ((parent[k] if parent[k] >= 0 else model.body_count, X_p[j, :3]), (child[k], X_c[j, :3]))
+            for side, (b, point) in enumerate(sides):
+                points = self._body_anchors.get(int(b), np.zeros((0, 3)))
+                anchor[k, side] = (b, len(points))
+                self._body_anchors[int(b)] = np.vstack([points, point])
+        self._distance_joints, self._distance_anchor = joints, anchor
+
+    def _distance_penalties(self, mass: np.ndarray) -> np.ndarray:
+        """The penalty of every distance joint of one length: a ball joint's, ``joint_strength_ratio`` times the
+        mass of the dynamic bodies it joins, in the units of the incremental potential, so that its stitch's
+        stiffness is that over ``dt^2``."""
+        if not len(self._distance_joints):
+            return np.zeros(1)
+        dynamic = np.append(np.where(self._kinematic_body, 0.0, mass), 0.0)  # the world's after Newton's bodies
+        bodies = self._distance_anchor[:, :, 0]
+        return self._joint_strength_ratio * dynamic[bodies].sum(axis=1)
+
     def _attachment_penalties(self, mass: np.ndarray) -> np.ndarray:
         """The penalty of every attachment if it is hard (infinite stiffness): a ball joint's, ``joint_strength_ratio``
         times the dynamic masses it joins (a particle that is not fixed, a dynamic body), in the units of the
@@ -3996,6 +4116,20 @@ class SolverIPC(SolverBase):
         self._stitch_source = np.concatenate(source).astype(np.int32) if source else np.zeros(0, np.int32)
         if pairs:
             scene.add_stitches(np.concatenate(pairs), self._stitch_kappa(self._config.dt), 0.0)
+        # the distance joints of one length: a stitch of that rest length between the anchors of their two sides,
+        # after the other stitches (class docstring, **Distance joints**)
+        self._distance_first = len(self._stitch_source)
+        if len(self._distance_joints):
+            offsets = scene.layout().body_anchor_offsets
+            a = self._distance_anchor
+            ends = np.stack([offsets[a[:, 0, 0]] + a[:, 0, 1], offsets[a[:, 1, 0]] + a[:, 1, 1]], axis=1)
+            dt = self._config.dt
+            model = self.model
+            first = model.joint_qd_start.numpy()[self._distance_joints]
+            length = model.joint_limit_lower.numpy()[first].astype(np.float64)
+            kappa = self._distance_hard.numpy() / (dt * dt)
+            kappa[~model.joint_enabled.numpy()[self._distance_joints]] = 0.0
+            self._distance_first = scene.add_stitches(ends, kappa, length)
 
     def _stitch_kappa(self, dt: float) -> np.ndarray:
         """The stiffness of every stitch for a step of ``dt``, as ``_stitch_stiffness`` writes it, on the host."""
@@ -4015,7 +4149,24 @@ class SolverIPC(SolverBase):
     def _write_stitch_stiffness(self, dt: float) -> None:
         """The stiffness of every stitch for a step of ``dt`` (``_stitch_stiffness``), on the device, so that a
         captured step takes the attachments' stiffness and enabled flags of its replay, and the hard ones' penalty
-        for its own ``dt``."""
+        for its own ``dt``; and of the distance joints' stitches (``_distance_stiffness``)."""
+        model = self.model
+        for kappa, rest_length, source in self._distance_rows:
+            wp.launch(
+                _distance_stiffness,
+                source.shape[0],
+                inputs=[
+                    source,
+                    self._distance_joints_device,
+                    model.joint_qd_start,
+                    model.joint_enabled,
+                    model.joint_limit_lower,
+                    self._distance_hard,
+                    wp.float64(1.0 / (dt * dt)),
+                ],
+                outputs=[kappa, rest_length],
+                device=model.device,
+            )
         if not self._stitch_rows:
             return
         model = self.model
@@ -4289,7 +4440,8 @@ class SolverIPC(SolverBase):
         self._wrenched_joints = wp.array(np.flatnonzero(wrenched).astype(np.int32), dtype=wp.int32, device=device)
         element = np.full(model.joint_count, -1, np.int32)
         joints = np.flatnonzero(joint_type != int(JointType.FREE))
-        if len(joints) and np.any(parent[joints] < 0):
+        world = np.concatenate([joints, mapping.distance])  # the distance joints' stitches need it too
+        if len(world) and np.any(parent[world] < 0):
             self._world_body = model.body_count
             scene.add_affine_body(
                 np.zeros((0, 3)),
@@ -4299,6 +4451,7 @@ class SolverIPC(SolverBase):
                 second_moment=np.zeros((3, 3)),
                 volume=0.0,
                 fixed=True,
+                anchors=self._body_anchors.get(model.body_count),
             )
         self._joint_bodies = {}
         for kind, t in (
@@ -5232,6 +5385,8 @@ class SolverIPC(SolverBase):
         )
         if flags & dof_flags:
             _check_joints(model, self._joint_options)  # the other joint data are read at every step
+            if self._joint_options.distance and model.joint_count:  # a distance joint gains or loses its length
+                rebuild |= not np.array_equal(_map_joints(model, self._joint_options).distance, self._distance_joints)
         if flags & ModelFlags.CONSTRAINT_PROPERTIES and model.attachment_particle_body_count:
             _check_attachments(model)  # their stiffness and enabled flags are read at every step
             body, particle, point = self._attachment_inputs or (None, None, None)
@@ -5270,6 +5425,7 @@ class SolverIPC(SolverBase):
             for kind in self._joint_bodies:  # the joints' penalties follow the masses
                 self._joint_strength[kind].assign(self._joint_strengths(kind, dyadic[0])[1])
             self._attachment_hard.assign(self._attachment_penalties(dyadic[0]))  # and so do the hard attachments'
+            self._distance_hard.assign(self._distance_penalties(dyadic[0]))  # and the distance joints'
             if self._ortho is not None:  # and the default body stiffness the inertia
                 self._ortho_inertia.assign(self._ortho_ratios())
 
