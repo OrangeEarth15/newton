@@ -167,16 +167,20 @@ def _load_bodies(
     body_com: wp.array[wp.vec3],
     base: wp.array[wp.int32],
     kinematic: wp.array[wp.int32],
+    hold: wp.array[wp.int32],
     x: wp.array[wp.vec3d],
     v: wp.array[wp.vec3d],
     changed: wp.array[wp.int32],
 ):
-    """Keep the affine state of a body whose ``state_in`` pose and twist are what the solver wrote last; give
-    another the rigid state of ``state_in``: q = (p, rows of R) and its rate from Newton's COM twist.
+    """Keep the affine state of a body whose ``state_in`` pose and twist are what the solver wrote last, or that
+    ``hold`` holds (a kinematic body moving toward its aim, ``kinematic_motion="aim"``); give another the rigid state
+    of ``state_in``: q = (p, rows of R) and its rate from Newton's COM twist.
 
     ``changed[0]`` is set where a dynamic body took ``state_in``.
     """
     b = wp.tid()
+    if hold[b] != 0:
+        return
     tf = body_q[b]
     tw = body_qd[b]
     seen = written_q[b]
@@ -259,6 +263,71 @@ def _store_bodies(
     body_qd[b] = tw
     written_q[b] = tf
     written_qd[b] = tw
+
+
+@wp.kernel
+def _aim_kinematic_bodies(
+    bodies: wp.array[wp.int32],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    base: wp.array[wp.int32],
+    x: wp.array[wp.vec3d],
+    dt: wp.float64,
+    bdf2: int,
+    q_aim: wp.array[wp.vec3d],
+    active: wp.array[wp.int32],
+    v: wp.array[wp.vec3d],
+    x_nm1: wp.array[wp.vec3d],
+    v_nm1: wp.array[wp.vec3d],
+    hold: wp.array[wp.int32],
+):
+    """The aim of every kinematic body of the soft transform constraint's rows (``kinematic_motion="aim"``, class
+    docstring, **Kinematic bodies**): its ``state_in`` pose advanced by its twist over the step, the centre of mass by
+    ``v dt``, the rotation by the exponential of ``omega dt``, as ``q_aim = (p, rows of R)``; the constraint on; the
+    body's affine velocity ``(q_aim - q) / dt`` from its state ``q``, so that the step's prediction ``q + v dt`` is the
+    aim, and with ``bdf2`` the history of a restart from that velocity (``x_nm1 = q - dt v``, ``v_nm1 = v``), whose
+    prediction is the same; and the body held from the next step on, so that it starts where it ends."""
+    k = wp.tid()
+    b = bodies[k]
+    tf = body_q[b]
+    tw = body_qd[b]
+    R0 = _rotation64(wp.transform_get_rotation(tf))
+    c = _to64(body_com[b])
+    com = _to64(wp.transform_get_translation(tf)) + R0 * c + _to64(wp.spatial_top(tw)) * dt
+    w = _to64(wp.spatial_bottom(tw))
+    R = R0
+    turn = wp.length(w) * dt
+    if turn > wp.float64(0.0):
+        R = wp.quat_to_matrix(wp.quat_from_axis_angle(wp.normalize(w), turn)) * R0
+    o = base[b]
+    for r in range(4):
+        aim = com - R * c
+        if r > 0:
+            aim = wp.vec3d(R[r - 1, 0], R[r - 1, 1], R[r - 1, 2])
+        q_aim[4 * k + r] = aim
+        rate = (aim - x[o + r]) / dt
+        v[o + r] = rate
+        if bdf2 != 0:
+            x_nm1[o + r] = x[o + r] - dt * rate
+            v_nm1[o + r] = rate
+    active[k] = 1
+    hold[b] = 1
+
+
+@wp.kernel
+def _release_held(
+    world_mask: wp.array[wp.bool],
+    entry: wp.array[wp.int32],
+    bodies: wp.array[wp.int32],
+    hold: wp.array[wp.int32],
+):
+    """A kinematic body of the soft transform constraint (``kinematic_motion="aim"``) whose world ``world_mask`` selects
+    takes its ``state_in`` at the next step (``SolverIPC.reset``)."""
+    k = wp.tid()
+    b = bodies[k]
+    if world_mask[entry[b]]:
+        hold[b] = 0
 
 
 @wp.kernel
@@ -977,6 +1046,13 @@ def _check_joints(model: Model) -> None:
     )
 
 
+def _kinematic_bodies(model: Model) -> np.ndarray:
+    """The bodies the solver does not let forces move: :attr:`~newton.BodyFlags.KINEMATIC` ones and those of mass 0."""
+    if model.body_count == 0:
+        return np.zeros(0, bool)
+    return ((model.body_flags.numpy() & int(BodyFlags.KINEMATIC)) != 0) | (model.body_mass.numpy() <= 0.0)
+
+
 def _local_worlds(model: Model) -> np.ndarray:
     """The local worlds (index >= 0) that hold particles, bodies or colliding shapes, in increasing order."""
     worlds = []
@@ -1082,7 +1158,7 @@ def _filter_classes(world: np.ndarray, filters: np.ndarray, ns: int) -> np.ndarr
     return own
 
 
-def _contact_elements(model: Model, worlds: _Worlds | None = None) -> _ContactElements:
+def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = False) -> _ContactElements:
     """The contact elements of a model's shapes and particles and the models of their pairs, checked against
     :attr:`Model.shape_contact_pairs`.
 
@@ -1092,9 +1168,11 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None) -> _ContactEl
     elements: those in no triangle and no tetrahedron, active (``P_free``) or not (``P_off``), and the vertices of
     cloth and tetrahedra (``P_surf``). With ``worlds`` (``coupled_worlds``) the subscenes keep the worlds apart, so the
     world leaves the signature, and a shape in a filter pair shares its element with its copies in replicated worlds
-    (``_filter_classes``). Raises ``NotImplementedError`` when the shape pairs the elements enable on different
-    bodies are not exactly ``Model.shape_contact_pairs`` (a pair array assigned to the model), or when there are more
-    elements, times the subscenes, than the engine takes.
+    (``_filter_classes``). With ``aims`` (``kinematic_motion="aim"``) a shape's motion joins the signature: on a
+    dynamic body, on a kinematic body (``_kinematic_bodies``), or static; the pairs of two shapes that are each
+    kinematic or static are disabled, and ``Model.shape_contact_pairs`` less those pairs is the set compared. Raises
+    ``NotImplementedError`` when the shape pairs the elements enable on different bodies are not exactly that set (a
+    pair array assigned to the model), or when there are more elements, times the subscenes, than the engine takes.
     """
     ns, n_particles = model.shape_count, model.particle_count
     shape_element = np.full(ns, -1, np.int64)
@@ -1127,9 +1205,12 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None) -> _ContactEl
         colliding = np.flatnonzero(_colliding_shapes(model))
         # with subscenes the worlds are kept apart by them: the world does not split the classes
         class_world = world if worlds is None else np.zeros_like(world)
-        signature = np.stack(
-            [group, class_world, hits_shapes, hits_particles, shape_mu.view(np.int32).astype(np.int64), own], axis=1
-        )[colliding]
+        columns = [group, class_world, hits_shapes, hits_particles, shape_mu.view(np.int32).astype(np.int64), own]
+        if aims:  # the shape's motion: 0 on a dynamic body, 1 on a kinematic one, 2 static
+            motion = np.where(body < 0, 2, 0)
+            motion[body >= 0] = _kinematic_bodies(model)[body[body >= 0]]
+            columns.append(motion)
+        signature = np.stack(columns, axis=1)[colliding]
         _, first, inverse = np.unique(signature, axis=0, return_index=True, return_inverse=True)
         order = np.argsort(first)  # classes numbered in the order of their first shapes
         rank = np.empty_like(order)
@@ -1162,9 +1243,14 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None) -> _ContactEl
         cls = shape_element - 1
         pairs[cls[filters[:, 0]], cls[filters[:, 1]]] = False
         pairs[cls[filters[:, 1]], cls[filters[:, 0]]] = False
+        immovable = None
+        if aims:  # two shapes that each move only as the caller prescribes, or not at all, do not collide
+            moves = motion[rep] == 0
+            pairs &= moves[:, None] | moves[None, :]
+            immovable = motion != 0
         enabled[shapes, shapes] = pairs
         mu[shapes, shapes] = 0.5 * (m[:, None] + m[None, :])
-        _check_shape_pairs(model, colliding, shape_class, body[colliding], pairs, worlds is not None)
+        _check_shape_pairs(model, colliding, shape_class, body[colliding], pairs, worlds is not None, immovable)
     particle_element = np.zeros(n_particles, np.int64)
     on_mesh = np.zeros(n_particles, bool)
     if n_particles:
@@ -1212,16 +1298,22 @@ def _check_shape_pairs(
     shape_body: np.ndarray,
     enabled: np.ndarray,
     by_world: bool = False,
+    immovable: np.ndarray | None = None,
 ) -> None:
     """Raise unless the shape classes and their ``enabled`` pairs give exactly ``Model.shape_contact_pairs``: every
     listed pair enabled, and as many enabled pairs of shapes on different bodies (static shapes on body -1) as listed.
     ``shapes`` are the shapes the solver triangulates, ``shape_class`` and ``shape_body`` theirs. ``by_world``: the
     worlds are subscenes, and only shapes of one world or a global one pair; the count is taken per world, the global
-    shapes among themselves and every world's shapes among themselves and with the global ones."""
+    shapes among themselves and every world's shapes among themselves and with the global ones. ``immovable``: per
+    shape, whether it is kinematic or static; the listed pairs of two such shapes are left out of the comparison."""
     cls = np.full(model.shape_count, -1, np.int64)
     cls[shapes] = shape_class
     listed = model.shape_contact_pairs
     listed = np.zeros((0, 2), np.int64) if listed is None else listed.numpy().reshape(-1, 2).astype(np.int64)
+    expected = model.shape_contact_pair_count
+    if immovable is not None:
+        listed = listed[~(immovable[listed[:, 0]] & immovable[listed[:, 1]])]
+        expected = len(listed)
     a, b = cls[listed[:, 0]], cls[listed[:, 1]]
     missing = (a < 0) | (b < 0) | ~enabled[np.maximum(a, 0), np.maximum(b, 0)]
     if not by_world:
@@ -1236,11 +1328,12 @@ def _check_shape_pairs(
             mine = glob | (world == w)
             count += _enabled_pair_count(shape_class[mine], shape_body[mine], enabled) - global_count
     missing = np.flatnonzero(missing)
-    if len(missing) or count != model.shape_contact_pair_count:
+    if len(missing) or count != expected:
         detail = (
             f"shapes {int(listed[missing[0], 0])} and {int(listed[missing[0], 1])} are listed but not in it"
             if len(missing)
-            else f"they give {count} pairs, Model.shape_contact_pairs lists {model.shape_contact_pair_count}"
+            else f"they give {count} pairs, Model.shape_contact_pairs lists {expected}"
+            + (" that are not of two kinematic or static shapes" if immovable is not None else "")
         )
         raise NotImplementedError(
             "SolverIPC collides the shapes that Newton's collision groups, worlds, collide flags and filter pairs "
@@ -1518,9 +1611,12 @@ class SolverIPC(SolverBase):
       not collide with itself.
     - kinematic particles (zero mass or not :attr:`~newton.ParticleFlags.ACTIVE`)
       and kinematic bodies (:attr:`~newton.BodyFlags.KINEMATIC` or zero mass).
-      They follow the poses written to ``state_in`` every step; the jump is not
-      swept by collision detection. A particle that is not active and on no
-      cloth or tetrahedron collides with nothing, as in Newton.
+      By default they follow the poses written to ``state_in`` every step; the
+      jump is not swept by collision detection. With
+      ``kinematic_motion="aim"`` kinematic bodies move inside the step toward
+      the pose that ``state_in`` prescribes for its end, swept like every other
+      motion (see **Kinematic bodies** below). A particle that is not active
+      and on no cloth or tetrahedron collides with nothing, as in Newton.
     - revolute, prismatic, fixed and ball joints between bodies or to the
       world, with drives, passive springs and damping, limits and
       :attr:`~newton.Control.joint_f` (see **Joints** below); ``joint_q`` and
@@ -1771,6 +1867,44 @@ class SolverIPC(SolverBase):
     ``adaptive_kappa`` the stiffness range is that of the whole scene. A model
     with content in one local world is solved as without the option. The
     engine takes at most 2048 contact elements times subscenes.
+
+    **Kinematic bodies.** By default (``kinematic_motion="jump"``) a
+    kinematic body is a fixed affine body whose pose the solver writes from
+    ``state_in`` before the step: the jump between two steps is not swept by
+    collision detection, so a jump larger than the room the barrier leaves
+    puts surfaces into each other, and friction never sees the motion (a
+    platform sliding under a box does not carry it). With
+    ``kinematic_motion="aim"`` every kinematic body with colliding shapes is
+    built as libuipc builds an animated body: an affine body that is an
+    unknown of the step, with no gravity and no external force, pulled by
+    libuipc's soft transform constraint (constitution 16) toward its aim, the
+    pose of ``state_in`` advanced by its twist over the step (the centre of
+    mass by :math:`v \\Delta t`, the rotation by the exponential of
+    :math:`\\omega \\Delta t`). Its velocity is set so that the step's
+    prediction is the aim, so its motion is part of the Newton direction: the
+    CCD sweeps it, the line search keeps every surface apart, friction sees
+    it, and a body that contact blocks stops short of its aim. The aim is
+    soft, with the strength ratio :math:`\\eta` = ``kinematic_strength_ratio``
+    (libuipc's motors' 100) for translation and rotation alike: under a load
+    :math:`F` a body of mass :math:`m` lags its aim by about
+    :math:`F \\Delta t^2 / ((1 + \\eta) m)`, 2.8e-5 m for 10 N on 1 kg at
+    1/60 s. A kinematic body moves with Newton's mass; one of mass 0 takes the
+    mass of its collision meshes at 1000 kg/m^3. A caller who writes
+    consistent ``body_q`` and ``body_qd`` every step gets the next pose as the
+    aim, one who writes poses only (``body_qd`` 0) the written pose, one who
+    writes nothing motion at constant twist. The step starts from the pose the
+    body reached, so the motion from there to the aim is swept, a jump
+    included; the first step after the solver is built and the step after a
+    :meth:`reset` that selects the body's world take ``state_in`` instead,
+    which is how a caller moves such a body without sweeping. ``state_out``
+    holds the pose the body reached and its twist, not a copy of
+    ``state_in``. Pairs of two shapes that are each kinematic or static do not
+    collide, as Newton's collision pipeline can filter them
+    (``include_static_kinematic_pairs=False``) and as they never collide in
+    the default mode, where neither moves inside the step; the solver checks
+    its pairs against :attr:`~newton.Model.shape_contact_pairs` less those
+    pairs. Kinematic particles keep the jump (a soft aim would make a pinned
+    vertex sag). Not with ``contact_constitution="al-ipc"``.
 
     **Attachments.** A particle-body attachment
     (:meth:`~newton.ModelBuilder.add_attachment_particle_body`) is libuipc's
@@ -2045,6 +2179,12 @@ class SolverIPC(SolverBase):
             **AL-IPC contact**).
         fem_preconditioner: ``"diag"`` (block diagonal) or ``"mas"`` for
             particles, cloth and tetrahedra (see **MAS**).
+        kinematic_motion: ``"jump"`` (a kinematic body takes the pose of
+            ``state_in`` before the step) or ``"aim"`` (it moves inside the
+            step toward the pose prescribed for its end; see **Kinematic
+            bodies**).
+        kinematic_strength_ratio: The strength ratio of the aims of
+            ``kinematic_motion="aim"`` (libuipc's soft transform constraint).
 
     Note:
         A step ends once the Newton update moves no vertex by more than
@@ -2066,7 +2206,8 @@ class SolverIPC(SolverBase):
         :attr:`SolverIPC.StatusBits.OVERFLOW`; one as long as the edges of a
         cloth or soft body puts its non-adjacent primitives inside ``d_hat`` at
         rest, and the barrier stretches it. A smaller ``d_hat`` also leaves
-        less room for the jump of a kinematic body, which is not swept.
+        less room for the jump of a kinematic body, which is not swept (see
+        ``kinematic_motion``).
 
         The barrier needs a gap at the start. When the surfaces of different
         bodies cross each other, or are at or inside their contact thickness (up
@@ -2194,6 +2335,8 @@ class SolverIPC(SolverBase):
         integrator: str = "bdf1",
         contact_constitution: str = "ipc",
         fem_preconditioner: str = "diag",
+        kinematic_motion: str = "jump",
+        kinematic_strength_ratio: float = 100.0,
     ):
         if not model.device.is_cuda:
             raise NotImplementedError(f"SolverIPC runs on CUDA devices only; the model is on {model.device}.")
@@ -2203,6 +2346,17 @@ class SolverIPC(SolverBase):
         _check_choice("integrator", integrator, ("bdf1", "bdf2"))
         _check_choice("contact_constitution", contact_constitution, ("ipc", "al-ipc"))
         _check_choice("fem_preconditioner", fem_preconditioner, ("diag", "mas"))
+        _check_choice("kinematic_motion", kinematic_motion, ("jump", "aim"))
+        if not (np.isfinite(kinematic_strength_ratio) and kinematic_strength_ratio >= 0.0):
+            raise ValueError(
+                f"SolverIPC: kinematic_strength_ratio must be finite and not negative, got {kinematic_strength_ratio}."
+            )
+        if kinematic_motion == "aim" and contact_constitution == "al-ipc":
+            # libuipc's AL-IPC frame checks animated aims with a test of its own (animation_reach_target), which has
+            # not been tested on this path
+            raise NotImplementedError(
+                "SolverIPC: kinematic_motion='aim' is not offered with contact_constitution='al-ipc'."
+            )
         if adaptive_kappa and contact_constitution == "al-ipc":
             raise ValueError(
                 "SolverIPC: adaptive_kappa sets the stiffness of the barrier, which contact_constitution='al-ipc' "
@@ -2240,6 +2394,8 @@ class SolverIPC(SolverBase):
         self._body_kappa = None if body_kappa is None else float(body_kappa)
         self._joint_strength_ratio = float(joint_strength_ratio)
         self._shape_segments = int(shape_segments)
+        self._aims = kinematic_motion == "aim"
+        self._kinematic_strength_ratio = float(kinematic_strength_ratio)
         self._dt = self._config.dt  # of the last step, which grow() solves again
         self._clamp_checked_dt = None  # the step size whose stiffness the clamp warning was last checked for
         self._clamp_reported = False
@@ -2278,7 +2434,8 @@ class SolverIPC(SolverBase):
         version = getattr(uipc_warp, "__version__", "0")
         # the newest calls of each kind the solver makes: the frame status, the contact and subscene tabulars and the
         # stiffness policy, the start check, the joints, the iterations of captured steps, the restart of a BDF2
-        # history, the stitches (with the anchors and stitch_groups of the same release)
+        # history, the stitches (with the anchors and stitch_groups of the same release), the soft transform constraint
+        # (with constraint_groups)
         needed = (
             (uipc_warp.arrays, "write_frame_status"),
             (uipc_warp.arrays.ArrayScene, "contact_model"),
@@ -2290,6 +2447,7 @@ class SolverIPC(SolverBase):
             (uipc_warp.SimEngine, "prepare_capture"),
             (uipc_warp.SimEngine, "restart_history"),
             (uipc_warp.arrays.ArrayScene, "add_stitches"),
+            (uipc_warp.arrays.ArrayScene, "add_soft_transform_constraints"),
         )
         missing = [f"{owner.__name__}.{name}" for owner, name in needed if not hasattr(owner, name)]
         if missing:
@@ -2335,7 +2493,7 @@ class SolverIPC(SolverBase):
         scene = self._uipc_warp.arrays.ArrayScene(kappa_corridor=self._adaptive_kappa)
         # several local worlds (coupled_worlds): one subscene each, all of them meeting the global entities' subscene 0
         self._worlds = _Worlds.of(model) if self._coupled_worlds else None
-        elements = _contact_elements(model, self._worlds)
+        elements = _contact_elements(model, self._worlds, self._aims)
         for _ in range(1, elements.count):
             scene.contact_element()
         if self._worlds is not None:
@@ -2361,6 +2519,9 @@ class SolverIPC(SolverBase):
             scene.contact_model(a, b, elements.mu[a, b], None, elements.enabled[a, b])
         self._attachment_hard = wp.array(self._attachment_penalties(self._dyadic[0]), dtype=wp.float64, device=device)
         self._add_stitches(scene)
+        if len(self._aim_bodies):  # libuipc's soft transform constraint on the kinematic bodies, in their order
+            ratio = self._kinematic_strength_ratio
+            scene.add_soft_transform_constraints(self._aim_bodies, (ratio, ratio))
         self._scene = scene
         self._scene_inputs = self._scene_inputs_now()
         self._joint_inputs = self._joint_inputs_now()
@@ -2391,6 +2552,17 @@ class SolverIPC(SolverBase):
         if nb:
             self._body_base = wp.array(layout.body_base.astype(np.int32), dtype=wp.int32, device=device)
             self._body_kinematic = wp.array(self._kinematic_body.astype(np.int32), dtype=wp.int32, device=device)
+            # kinematic_motion="aim": the bodies whose state the solver keeps (held), and those whose state_out copies
+            # state_in (passed through: every kinematic body, but those moving toward their aims)
+            self._body_hold = wp.zeros(nb, dtype=wp.int32, device=device)
+            self._body_passthrough = self._body_kinematic
+            if len(self._aim_bodies):
+                through = self._kinematic_body.copy()
+                through[self._aim_bodies] = False
+                self._body_passthrough = wp.array(through.astype(np.int32), dtype=wp.int32, device=device)
+            self._aim_rows = wp.array(self._aim_bodies.astype(np.int32), dtype=wp.int32, device=device)
+            entry = np.where(model.body_world.numpy() < 0, model.world_count, model.body_world.numpy())
+            self._body_entry = wp.array(entry.astype(np.int32), dtype=wp.int32, device=device)
             self._joint_wrench = wp.zeros(nb, dtype=wp.spatial_vector, device=device)
             self._body_q_written = wp.empty(nb, dtype=wp.transform, device=device)
             self._body_qd_written = wp.empty(nb, dtype=wp.spatial_vector, device=device)
@@ -2449,6 +2621,7 @@ class SolverIPC(SolverBase):
             out[: layout.n_fem] = g[self.model.particle_world.numpy()]
         if self.model.body_count:
             out[layout.body_base[: self.model.body_count]] = g[self.model.body_world.numpy()]
+            out[layout.body_base[self._aim_bodies]] = 0.0  # gravity does not move a kinematic body toward its aim
         return out
 
     def _check_start(self) -> None:
@@ -2482,7 +2655,9 @@ class SolverIPC(SolverBase):
         still[: layout.n_fem] = self._fixed_particle
         still[layout.obstacle_offsets[0] : layout.obstacle_offsets[-1]] = True
         offsets = layout.body_vertex_offsets
-        for b in np.flatnonzero(self._kinematic_body):
+        held = self._kinematic_body.copy()
+        held[self._aim_bodies] = False  # kinematic_motion="aim": these move in the step
+        for b in np.flatnonzero(held):
             still[offsets[b] : offsets[b + 1]] = True
         x = eng.vm.x.numpy()
         thickness = self._vertex_thickness
@@ -2715,6 +2890,7 @@ class SolverIPC(SolverBase):
         if nb:
             self._body_q_written.assign(np.full((nb, 7), np.nan, np.float32))
             self._body_qd_written.assign(np.full((nb, 6), np.nan, np.float32))
+            self._body_hold.zero_()  # the kinematic bodies moving toward their aims take state_in too
         if self.model.joint_count:
             self._joint_q_written.fill_(np.nan)
 
@@ -2754,6 +2930,7 @@ class SolverIPC(SolverBase):
             # notify_model_changed may have changed them since the scene was laid out (AL-IPC: it builds it again)
             self._engine.set_dyadic_mass(*self._engine_dyadic(self._dyadic))
         self._joint_groups = self._uipc_warp.arrays.joint_groups(self._engine)
+        self._aim_group = self._uipc_warp.arrays.constraint_groups(self._engine).transform  # None without aims
         # the stiffness of every stitch group and the attachment or spring of each of its rows (_stitch_stiffness)
         self._stitch_rows = [
             (g.kappa, wp.array(self._stitch_source[g.rows], dtype=wp.int32, device=device))
@@ -3125,8 +3302,17 @@ class SolverIPC(SolverBase):
                     meshes[b].append((v, f, s))
 
         mass, first, second = self._body_mass_moments(stacklevel=5)
+        # kinematic_motion="aim": the kinematic bodies with colliding shapes, which move toward their aims
+        self._aim_bodies = np.zeros(0, np.int64)
+        self._aim_mesh_moments = {}
         if model.body_count == 0:
             return mass, first, second
+        if self._aims:
+            self._aim_bodies = np.flatnonzero(self._kinematic_body & np.array([bool(meshes[b]) for b in meshes]))
+            for b in self._aim_bodies:
+                if mass[b] <= 0.0:  # the mass of its collision meshes at 1000 kg/m^3
+                    self._aim_mesh_moments[int(b)] = self._mesh_moments(int(b), meshes[b])
+            mass, first, second = self._with_aim_moments((mass, first, second))
         body_q, body_qd = self._start_bodies()
         body_com = model.body_com.numpy().astype(np.float64)
         body_mass = model.body_mass.numpy().astype(np.float64)
@@ -3169,13 +3355,47 @@ class SolverIPC(SolverBase):
                 A=R,
                 p_dot=body_qd[b, :3] - np.cross(w, R @ body_com[b]),
                 A_dot=W @ R,
-                fixed=bool(self._kinematic_body[b]),
+                fixed=bool(self._kinematic_body[b]) and b not in self._aim_bodies,
                 thickness=thickness,
                 contact_element=element,
                 subscene_element=subscene,
-                gravity=body_gravity[b],
+                # a kinematic body moving toward its aim falls with nothing: gravity does not move it
+                gravity=np.zeros(3) if b in self._aim_bodies else body_gravity[b],
                 anchors=self._body_anchors.get(b),
             )
+        return mass, first, second
+
+    def _mesh_moments(self, b: int, parts: list) -> tuple[float, np.ndarray, np.ndarray]:
+        """The dyadic mass of body ``b``'s collision meshes ``parts`` at 1000 kg/m^3, for a kinematic body of mass 0
+        that moves toward its aim (``kinematic_motion="aim"``); ``NotImplementedError`` when they enclose no volume."""
+        m, mx, S = 0.0, np.zeros(3), np.zeros((3, 3))
+        for v, f, _ in parts:
+            pm, pmx, pS, vol = self._uipc_warp.arrays.mesh_dyadic_mass(v, f, 1000.0)
+            sign = -1.0 if vol < 0.0 else 1.0  # a mesh wound inward
+            m, mx, S = m + sign * pm, mx + sign * pmx, S + sign * pS
+        if not m > 0.0:
+            raise NotImplementedError(
+                f"SolverIPC: kinematic_motion='aim' moves the kinematic body {b} with its mass; it has none, and its "
+                "collision shapes enclose no volume to give it one at 1000 kg/m^3."
+            )
+        return m, mx, S
+
+    def _with_aim_moments(self, dyadic: tuple) -> tuple:
+        """``dyadic`` with the mass moments of the kinematic bodies that move toward their aims (``kinematic_motion=
+        "aim"``): Newton's for a body of positive mass, which needs a positive-definite inertia, else those of its
+        collision meshes (``_mesh_moments``)."""
+        if not len(self._aim_bodies):
+            return dyadic
+        mass, first, second = (a.copy() for a in dyadic)
+        inertia = self.model.body_inertia.numpy().astype(np.float64)
+        for b in self._aim_bodies:
+            if int(b) in self._aim_mesh_moments:
+                mass[b], first[b], second[b] = self._aim_mesh_moments[int(b)]
+            elif np.linalg.eigvalsh(0.5 * (inertia[b] + inertia[b].T)).min() <= 0.0:
+                raise ValueError(
+                    f"SolverIPC needs a positive-definite inertia for the kinematic body {b}, which "
+                    "kinematic_motion='aim' moves with its mass."
+                )
         return mass, first, second
 
     def _start_bodies(self) -> tuple[np.ndarray, np.ndarray]:
@@ -3428,14 +3648,48 @@ class SolverIPC(SolverBase):
                     model.body_com,
                     self._body_base,
                     self._body_kinematic,
+                    self._body_hold,
                 ],
                 outputs=[vm.x, vm.v, self._changed],
                 device=device,
             )
             self._uipc_warp.arrays.update_body_vertices(eng)  # surface vertices x = A x_bar + p
+            self._aim_bodies_of(state_in)
             self._load_joints(state_in)
         eng.discard_friction(where=self._changed)
         eng.restart_history(where=self._changed)  # BDF2: the step is an implicit Euler step (BDF1: nothing)
+
+    def _aim_bodies_of(self, state_in: State) -> None:
+        """``kinematic_motion="aim"``: the aims of the kinematic bodies for the step, from ``state_in`` (the poses
+        advanced by the twists), with the velocities that put the step's prediction on them (``_aim_kinematic_bodies``);
+        ``dt`` is the step's, frozen in a captured step as the joints' kernels freeze it."""
+        if self._aim_group is None:
+            return
+        eng = self._engine
+        bdf2 = self._config.integrator == "bdf2"
+        wp.launch(
+            _aim_kinematic_bodies,
+            len(self._aim_bodies),
+            inputs=[
+                self._aim_rows,
+                state_in.body_q,
+                state_in.body_qd,
+                self.model.body_com,
+                self._body_base,
+                eng.vm.x,
+                wp.float64(self._dt),
+                int(bdf2),
+            ],
+            outputs=[
+                self._aim_group.q_aim,
+                self._aim_group.active,
+                eng.vm.v,
+                eng.vm.x_nm1,
+                eng.vm.v_nm1,
+                self._body_hold,
+            ],
+            device=self.model.device,
+        )
 
     def _write_forces(self, state_in: State, control: Control) -> None:
         """The external accelerations of the step, on the device."""
@@ -3602,7 +3856,7 @@ class SolverIPC(SolverBase):
             wp.launch(
                 _store_bodies,
                 model.body_count,
-                inputs=[vm.x, vm.v, self._body_base, model.body_com, self._body_kinematic, body_q_in, body_qd_in],
+                inputs=[vm.x, vm.v, self._body_base, model.body_com, self._body_passthrough, body_q_in, body_qd_in],
                 outputs=[body_q, body_qd, self._body_q_written, self._body_qd_written],
                 device=model.device,
             )
@@ -3685,6 +3939,7 @@ class SolverIPC(SolverBase):
         kept = [e.frame_start_state() for e in old.elements]
         loop = old.solver.pcg.loop
         forces = None if self._forces is None else self._forces.a
+        aims = None if self._aim_group is None else self._aim_group
         # release the old engine before the new one allocates
         self._engine = self._frame_graph = self._forces = old = None
         self._make_engine(capacity)
@@ -3694,6 +3949,9 @@ class SolverIPC(SolverBase):
                 e.load_state(group_state)
         if forces is not None:
             wp.copy(self._forces.a, forces)
+        if aims is not None:  # the aims of the step, which the new engine solves again
+            for name in ("q_aim", "active", "strength"):
+                wp.copy(getattr(self._aim_group, name), getattr(aims, name))
         self._engine.solver.pcg.loop = loop  # the PCG loop the steps so far chose, as FrameRunner carries it
         self._write_joint_controls(self._control or self._control_of_model(), self._dt)
         self._write_stitch_stiffness(self._dt)
@@ -3921,7 +4179,17 @@ class SolverIPC(SolverBase):
         if world_mask is None:
             self._engine.discard_friction()
             self._engine.restart_history()
+            if self.model.body_count:
+                self._body_hold.zero_()
             return
+        if len(self._aim_bodies):
+            wp.launch(
+                _release_held,
+                len(self._aim_bodies),
+                inputs=[world_mask, self._body_entry, self._aim_rows],
+                outputs=[self._body_hold],
+                device=self.model.device,
+            )
         wp.launch(
             _any_selected,
             1,
@@ -3948,9 +4216,11 @@ class SolverIPC(SolverBase):
         hold :meth:`step` must be captured again. The joints' other data are read at every step; the joint flags only
         check them again against what **Joints** in the class docstring rejects. So are the stiffness and the enabled
         flags of the particle-body attachments (``CONSTRAINT_PROPERTIES``), which that flag checks again against what
-        **Attachments** rejects; a new body, particle or point of an attachment builds the solve again. Copies from
-        the host: not inside a graph capture. With ``contact_constitution="al-ipc"`` new masses build the solve again
-        too, since the AL-IPC penalty follows the masses it was built with.
+        **Attachments** rejects; a new body, particle or point of an attachment builds the solve again. With
+        ``kinematic_motion="aim"`` a change of a kinematic body's mass properties builds the solve again too, since
+        its soft transform constraint follows the masses it was built with. Copies from the host: not inside a graph
+        capture. With ``contact_constitution="al-ipc"`` new masses build the solve again too, since the AL-IPC
+        penalty follows the masses it was built with.
         """
         if self.model.device.is_capturing:
             raise RuntimeError("SolverIPC.notify_model_changed() copies from the host; call it outside graph capture.")
@@ -3989,9 +4259,17 @@ class SolverIPC(SolverBase):
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES) and model.body_count:
             dyadic = self._body_mass_moments(stacklevel=3)
             rebuild |= not np.array_equal(self._kinematic_body, kinematic)
+            if not rebuild:
+                dyadic = self._with_aim_moments(dyadic)
+            changed = any(not np.array_equal(a, b) for a, b in zip(dyadic, self._dyadic, strict=True))
             if self._config.contact_constitution == "al-ipc":
                 # the AL-IPC contact penalty follows the masses the engine was built with
-                rebuild |= any(not np.array_equal(a, b) for a, b in zip(dyadic, self._dyadic, strict=True))
+                rebuild |= changed
+            if changed and len(self._aim_bodies):
+                # kinematic_motion="aim": the soft transform constraint of a kinematic body follows the masses the
+                # engine was built with
+                aims = self._aim_bodies
+                rebuild |= any(not np.array_equal(a[aims], b[aims]) for a, b in zip(dyadic, self._dyadic, strict=True))
         if rebuild:
             _check_supported(model, self._coupled_worlds)
             self._build_engine()
