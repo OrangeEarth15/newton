@@ -539,6 +539,24 @@ def _store_joints(
 
 
 @wp.kernel
+def _copy_status(
+    entries: wp.array[wp.int32],
+    status_in: wp.array[wp.int32],
+    residual_in: wp.array[wp.float32],
+    write_status: int,
+    write_residual: int,
+    status: wp.array[wp.int32],
+    residual: wp.array[wp.float32],
+):
+    """The status bits and the residual of the one solve, written into every world entry that owns content."""
+    k = wp.tid()
+    if write_status != 0:
+        status[entries[k]] = status_in[0]
+    if write_residual != 0:
+        residual[entries[k]] = residual_in[0]
+
+
+@wp.kernel
 def _any_selected(world_mask: wp.array[wp.bool], entries: wp.array[wp.int32], selected: wp.array[wp.int32]):
     """``selected[0]`` = 1 when ``world_mask`` selects a world the solver simulates."""
     s = int(0)
@@ -659,8 +677,9 @@ def _default_d_hat(model: Model) -> float:
     return d_hat
 
 
-def _check_supported(model: Model) -> None:
-    """Reject model content the solver would otherwise accept and ignore."""
+def _check_supported(model: Model, coupled_worlds: bool = False) -> None:
+    """Reject model content the solver would otherwise accept and ignore; content in more than one world unless
+    ``coupled_worlds``."""
     if model.requires_grad:
         raise NotImplementedError("SolverIPC does not support gradients (model.requires_grad=True).")
     for name, count in (
@@ -689,7 +708,8 @@ def _check_supported(model: Model) -> None:
             raise NotImplementedError(f"SolverIPC does not take {name} activations; the model has non-zero ones.")
     _check_joints(model)
     _check_springs(model)
-    _check_one_world(model)
+    if not coupled_worlds:
+        _check_one_world(model)
     _check_surface_velocity(model)
 
 
@@ -796,9 +816,8 @@ def _check_joints(model: Model) -> None:
     )
 
 
-def _check_one_world(model: Model) -> None:
-    """One world, besides global entities: a solve couples everything it holds through one contact space, one
-    step length and one convergence test."""
+def _local_worlds(model: Model) -> np.ndarray:
+    """The local worlds (index >= 0) that hold particles, bodies or colliding shapes, in increasing order."""
     worlds = []
     if model.particle_count:
         worlds.append(model.particle_world.numpy())
@@ -807,11 +826,18 @@ def _check_one_world(model: Model) -> None:
     if model.shape_count:
         worlds.append(model.shape_world.numpy()[_colliding_shapes(model)])
     local = np.unique(np.concatenate(worlds)) if worlds else np.zeros(0, np.int32)
-    local = local[local >= 0]
+    return local[local >= 0].astype(np.int64)
+
+
+def _check_one_world(model: Model) -> None:
+    """One world, besides global entities, unless ``coupled_worlds``: one solve couples everything it holds through
+    one step length, one line search and one convergence test."""
+    local = _local_worlds(model)
     if len(local) > 1:
         raise NotImplementedError(
             f"SolverIPC simulates one world: the model has particles, bodies or colliding shapes in worlds "
-            f"{local.tolist()}, which would collide with each other and share one Newton solve."
+            f"{local.tolist()}, which would share one Newton solve. With coupled_worlds=True the worlds are solved "
+            "together without colliding with each other, and each world's result depends on the others' iterations."
         )
 
 
@@ -825,6 +851,34 @@ def _compatible_groups(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 def _compatible_worlds(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """A global entity (world -1) meets every world, a local one its own world only."""
     return (a == b) | (a == -1) | (b == -1)
+
+
+@dataclass
+class _Worlds:
+    """The subscenes of a model with content in more than one local world (``coupled_worlds``): subscene 0 holds the
+    global entities (world -1), subscene k + 1 the k-th local world that holds content."""
+
+    worlds: np.ndarray  # (L,): the world of subscene k + 1
+    lookup: np.ndarray  # (world_count + 1,): the subscene of world w at index w, of the global world -1 at the last
+
+    @classmethod
+    def of(cls, model: Model) -> _Worlds | None:
+        """The subscenes of ``model``, or None when it has content in at most one local world."""
+        local = _local_worlds(model)
+        if len(local) < 2:
+            return None
+        lookup = np.zeros(model.world_count + 1, np.int64)
+        lookup[local] = 1 + np.arange(len(local))
+        return cls(local, lookup)
+
+    @property
+    def count(self) -> int:
+        """The subscenes, the global one included."""
+        return len(self.worlds) + 1
+
+    def subscene(self, world: np.ndarray) -> np.ndarray:
+        """The subscene of every entity of ``world`` (-1 for a global one)."""
+        return self.lookup[np.asarray(world, np.int64)]
 
 
 @dataclass
@@ -847,7 +901,27 @@ class _ContactElements:
 _MAX_CONTACT_ELEMENTS = 2048
 
 
-def _contact_elements(model: Model) -> _ContactElements:
+def _filter_classes(world: np.ndarray, filters: np.ndarray, ns: int) -> np.ndarray:
+    """A key for every shape in a filter pair (-1 for the other shapes) that the copies of the shape in replicated
+    worlds share: its offset in its world (a global shape: ``-1 - index``) and the offsets of its filter partners,
+    which are in its world or global, as Newton compares replicated worlds (``shape_contact_pairs.py``, its
+    normalized filters). Two shapes get one key only where their filter partners correspond."""
+    local = world >= 0
+    start = np.full(max(int(world.max(initial=-1)) + 1, 1), ns, np.int64)
+    np.minimum.at(start, world[local], np.flatnonzero(local))
+    offset = np.where(local, np.arange(ns) - start[np.maximum(world, 0)], -1 - np.arange(ns))
+    partners: dict[int, list] = {}
+    for a, b in filters.tolist():
+        partners.setdefault(a, []).append(int(offset[b]))
+        partners.setdefault(b, []).append(int(offset[a]))
+    keys: dict[tuple, int] = {}
+    own = np.full(ns, -1, np.int64)
+    for shape in sorted(partners):
+        own[shape] = keys.setdefault((int(offset[shape]), *sorted(partners[shape])), len(keys))
+    return own
+
+
+def _contact_elements(model: Model, worlds: _Worlds | None = None) -> _ContactElements:
     """The contact elements of a model's shapes and particles and the models of their pairs, checked against
     :attr:`Model.shape_contact_pairs`.
 
@@ -855,9 +929,11 @@ def _contact_elements(model: Model) -> _ContactElements:
     the two collide flags and the friction coefficient. A shape in a filter pair that would otherwise collide gets an
     element of its own, since the pair excludes two shapes and not two classes of them. The particles take three
     elements: those in no triangle and no tetrahedron, active (``P_free``) or not (``P_off``), and the vertices of
-    cloth and tetrahedra (``P_surf``). Raises ``NotImplementedError`` when the shape pairs the elements enable on
-    different bodies are not exactly ``Model.shape_contact_pairs`` (a pair array assigned to the model), or when there
-    are more elements than the engine takes.
+    cloth and tetrahedra (``P_surf``). With ``worlds`` (``coupled_worlds``) the subscenes keep the worlds apart, so the
+    world leaves the signature, and a shape in a filter pair shares its element with its copies in replicated worlds
+    (``_filter_classes``). Raises ``NotImplementedError`` when the shape pairs the elements enable on different
+    bodies are not exactly ``Model.shape_contact_pairs`` (a pair array assigned to the model), or when there are more
+    elements, times the subscenes, than the engine takes.
     """
     ns, n_particles = model.shape_count, model.particle_count
     shape_element = np.full(ns, -1, np.int64)
@@ -882,11 +958,16 @@ def _contact_elements(model: Model) -> _ContactElements:
             & _compatible_groups(group[fa], group[fb])
         )
         filters = filters[effective]
-        own = np.full(ns, -1, np.int64)
-        own[filters.reshape(-1)] = filters.reshape(-1)
+        if worlds is None:
+            own = np.full(ns, -1, np.int64)
+            own[filters.reshape(-1)] = filters.reshape(-1)
+        else:
+            own = _filter_classes(world, filters, ns)
         colliding = np.flatnonzero(_colliding_shapes(model))
+        # with subscenes the worlds are kept apart by them: the world does not split the classes
+        class_world = world if worlds is None else np.zeros_like(world)
         signature = np.stack(
-            [group, world, hits_shapes, hits_particles, shape_mu.view(np.int32).astype(np.int64), own], axis=1
+            [group, class_world, hits_shapes, hits_particles, shape_mu.view(np.int32).astype(np.int64), own], axis=1
         )[colliding]
         _, first, inverse = np.unique(signature, axis=0, return_index=True, return_inverse=True)
         order = np.argsort(first)  # classes numbered in the order of their first shapes
@@ -897,16 +978,19 @@ def _contact_elements(model: Model) -> _ContactElements:
         classes = len(first)
         rep = colliding[first[order]]  # one shape of each class
     count = 1 + classes + (3 if n_particles else 0)
-    if count > _MAX_CONTACT_ELEMENTS:
+    subscenes = 1 if worlds is None else worlds.count
+    if count * subscenes > _MAX_CONTACT_ELEMENTS:
+        detail = f" times {subscenes} subscenes (the worlds and the global one)" if worlds is not None else ""
         raise NotImplementedError(
             f"SolverIPC needs {count} contact elements for this model (one per class of shapes that collide alike, "
-            f"one per shape in a filter pair), more than libuipc-warp's engine takes ({_MAX_CONTACT_ELEMENTS})."
+            f"one per shape in a filter pair){detail}, more than libuipc-warp's engine takes "
+            f"({_MAX_CONTACT_ELEMENTS})."
         )
     enabled = np.zeros((count, count), bool)
     mu = np.zeros((count, count))
     shapes = slice(1, 1 + classes)
     if classes:
-        g, w, m = group[rep], world[rep], shape_mu[rep].astype(np.float64)
+        g, w, m = group[rep], class_world[rep], shape_mu[rep].astype(np.float64)
         part = takes_part[rep]
         pairs = (
             part[:, None]
@@ -919,7 +1003,7 @@ def _contact_elements(model: Model) -> _ContactElements:
         pairs[cls[filters[:, 1]], cls[filters[:, 0]]] = False
         enabled[shapes, shapes] = pairs
         mu[shapes, shapes] = 0.5 * (m[:, None] + m[None, :])
-        _check_shape_pairs(model, colliding, shape_class, body[colliding], pairs)
+        _check_shape_pairs(model, colliding, shape_class, body[colliding], pairs, worlds is not None)
     particle_element = np.zeros(n_particles, np.int64)
     on_mesh = np.zeros(n_particles, bool)
     if n_particles:
@@ -929,7 +1013,8 @@ def _contact_elements(model: Model) -> _ContactElements:
                 on_mesh[cells.numpy().reshape(-1)] = True
         active = (model.particle_flags.numpy() & int(ParticleFlags.ACTIVE)) != 0
         particle_element = np.where(on_mesh, p_surf, np.where(active, p_free, p_off))
-        # particles meet the shapes that collide with particles, in the solver's one world
+        # particles meet the shapes that collide with particles, of their own world or global (with subscenes, the
+        # subscenes keep the worlds apart)
         for p in (p_free, p_surf):
             if classes:
                 enabled[p, shapes] = enabled[shapes, p] = hits_particles[rep]
@@ -943,22 +1028,12 @@ def _contact_elements(model: Model) -> _ContactElements:
     return _ContactElements(shape_element, particle_element, on_mesh, enabled, mu)
 
 
-def _check_shape_pairs(
-    model: Model, shapes: np.ndarray, shape_class: np.ndarray, shape_body: np.ndarray, enabled: np.ndarray
-) -> None:
-    """Raise unless the shape classes and their ``enabled`` pairs give exactly ``Model.shape_contact_pairs``: every
-    listed pair enabled, and as many enabled pairs of shapes on different bodies (static shapes on body -1) as listed.
-    ``shapes`` are the shapes the solver triangulates, ``shape_class`` and ``shape_body`` theirs."""
-    cls = np.full(model.shape_count, -1, np.int64)
-    cls[shapes] = shape_class
-    listed = model.shape_contact_pairs
-    listed = np.zeros((0, 2), np.int64) if listed is None else listed.numpy().reshape(-1, 2).astype(np.int64)
-    a, b = cls[listed[:, 0]], cls[listed[:, 1]]
-    missing = np.flatnonzero((a < 0) | (b < 0) | ~enabled[np.maximum(a, 0), np.maximum(b, 0)])
+def _enabled_pair_count(shape_class: np.ndarray, shape_body: np.ndarray, enabled: np.ndarray) -> int:
+    """The pairs of shapes on different bodies (static shapes on body -1) whose classes ``enabled`` pairs, counted
+    from the class sizes, less the pairs of shapes on one body."""
     sizes = np.bincount(shape_class, minlength=len(enabled)).astype(np.int64)
     upper = np.triu(enabled, 1)
     count = int((upper * np.outer(sizes, sizes)).sum() + (np.diag(enabled) * sizes * (sizes - 1) // 2).sum())
-    # less the pairs of shapes on one body
     entries, n = np.unique(np.stack([shape_body, shape_class], axis=1), axis=0, return_counts=True)
     count -= int((np.diag(enabled)[entries[:, 1]] * n * (n - 1) // 2).sum())
     starts = np.flatnonzero(np.r_[True, entries[1:, 0] != entries[:-1, 0]])
@@ -966,6 +1041,40 @@ def _check_shape_pairs(
         if e - s > 1:
             c, k = entries[s:e, 1], n[s:e]
             count -= int((upper[np.ix_(c, c)] * np.outer(k, k)).sum())
+    return count
+
+
+def _check_shape_pairs(
+    model: Model,
+    shapes: np.ndarray,
+    shape_class: np.ndarray,
+    shape_body: np.ndarray,
+    enabled: np.ndarray,
+    by_world: bool = False,
+) -> None:
+    """Raise unless the shape classes and their ``enabled`` pairs give exactly ``Model.shape_contact_pairs``: every
+    listed pair enabled, and as many enabled pairs of shapes on different bodies (static shapes on body -1) as listed.
+    ``shapes`` are the shapes the solver triangulates, ``shape_class`` and ``shape_body`` theirs. ``by_world``: the
+    worlds are subscenes, and only shapes of one world or a global one pair; the count is taken per world, the global
+    shapes among themselves and every world's shapes among themselves and with the global ones."""
+    cls = np.full(model.shape_count, -1, np.int64)
+    cls[shapes] = shape_class
+    listed = model.shape_contact_pairs
+    listed = np.zeros((0, 2), np.int64) if listed is None else listed.numpy().reshape(-1, 2).astype(np.int64)
+    a, b = cls[listed[:, 0]], cls[listed[:, 1]]
+    missing = (a < 0) | (b < 0) | ~enabled[np.maximum(a, 0), np.maximum(b, 0)]
+    if not by_world:
+        count = _enabled_pair_count(shape_class, shape_body, enabled)
+    else:
+        all_worlds = model.shape_world.numpy().astype(np.int64)
+        missing |= ~_compatible_worlds(all_worlds[listed[:, 0]], all_worlds[listed[:, 1]])
+        world = all_worlds[shapes]
+        glob = world == -1
+        count = global_count = _enabled_pair_count(shape_class[glob], shape_body[glob], enabled)
+        for w in np.unique(world[~glob]):
+            mine = glob | (world == w)
+            count += _enabled_pair_count(shape_class[mine], shape_body[mine], enabled) - global_count
+    missing = np.flatnonzero(missing)
     if len(missing) or count != model.shape_contact_pair_count:
         detail = (
             f"shapes {int(listed[missing[0], 0])} and {int(listed[missing[0], 1])} are listed but not in it"
@@ -1216,8 +1325,9 @@ class SolverIPC(SolverBase):
     and equality constraints, tendons, muscles, non-zero triangle or
     tetrahedron activations, the joint types and properties that **Joints**
     below rejects,
-    gradients (``model.requires_grad``), content in more than one world (the
-    solver has one contact space and one Newton solve), a
+    gradients (``model.requires_grad``), content in more than one world unless
+    ``coupled_worlds`` (the worlds would share one Newton solve; see
+    **Worlds**), a
     :attr:`~newton.Model.shape_contact_pairs` array assigned to the model, more
     contact elements than the engine takes (see **Contact** below),
     collision meshes with a surface velocity (``Mesh.enable_surface_velocity``,
@@ -1299,8 +1409,11 @@ class SolverIPC(SolverBase):
     contact tabular: every vertex and half plane is in a contact element, and
     every pair of elements has a friction coefficient and a switch. Shapes that
     Newton's rules cannot tell apart share an element (the same collision
-    group, world, collide flags and friction coefficient); a shape in a filter
-    pair gets one of its own. Free particles (in no triangle and no
+    group, world, collide flags and friction coefficient; with
+    ``coupled_worlds`` the subscenes keep the worlds apart, see **Worlds**,
+    and the world leaves the signature); a shape in a filter pair gets one of
+    its own, which with ``coupled_worlds`` its copies in replicated worlds
+    share. Free particles (in no triangle and no
     tetrahedron) are in one element, or in another one that collides with
     nothing when they are not :attr:`~newton.ParticleFlags.ACTIVE`, and the
     vertices of cloth and tetrahedra in a third. Two shapes collide as
@@ -1352,6 +1465,26 @@ class SolverIPC(SolverBase):
     (:meth:`notify_model_changed`) keeps it, as libuipc computes it once at
     init. Every contact pair takes one value, which :meth:`contact_stiffness`
     gives for a step of any ``dt``.
+
+    **Worlds.** Particles, bodies and colliding shapes in more than one local
+    world are refused unless ``coupled_worlds=True``. With it every local world
+    is a libuipc subscene of its own and the global entities (world -1) one
+    more, which meets every world, as Newton's collision rules say: no contact
+    pair joins two worlds, also where the worlds overlap in space, and a global
+    ground or static shape acts in every world. The worlds remain one solve:
+    one step length (the smallest time of impact over all worlds, and a line
+    search on the sum of their energies), one Newton convergence test (the
+    largest displacement over all worlds), one PCG solve and one set of contact
+    lists. A world's result therefore depends on the others through the
+    iteration counts and the step lengths, and a failure or an overflow in one
+    world fails the step in every world. Copies of one world take the
+    iterations of one copy, and each follows the run of that world alone to
+    the rounding of the shared sums. A reset of one world, or a new state
+    written for one world, discards the friction of the next step in every
+    world, since libuipc discards friction for a whole scene; with
+    ``adaptive_kappa`` the stiffness range is that of the whole scene. A model
+    with content in one local world is solved as without the option. The
+    engine takes at most 2048 contact elements times subscenes.
 
     **Rigid bodies.** Each Newton body becomes a libuipc affine body with 12
     degrees of freedom :math:`q = (p, a_1, a_2, a_3)`, the translation and the
@@ -1537,6 +1670,9 @@ class SolverIPC(SolverBase):
             dynamic bodies they join (libuipc's ``strength_ratio``; see **Joints**).
         shape_segments: Segments around a sphere, capsule, cylinder, cone or
             ellipsoid when it is triangulated.
+        coupled_worlds: Simulate content in more than one world as one solve
+            in which no world collides with another (see **Worlds**); without
+            it such a model is refused.
 
     Note:
         A step ends once the Newton update moves no vertex by more than
@@ -1679,11 +1815,13 @@ class SolverIPC(SolverBase):
         body_kappa: float = 1.0e8,
         joint_strength_ratio: float = _JOINT_STRENGTH_RATIO,
         shape_segments: int = 24,
+        coupled_worlds: bool = False,
     ):
         if not model.device.is_cuda:
             raise NotImplementedError(f"SolverIPC runs on CUDA devices only; the model is on {model.device}.")
         super().__init__(model)
-        _check_supported(model)
+        self._coupled_worlds = bool(coupled_worlds)
+        _check_supported(model, self._coupled_worlds)
         if kappa is None and not adaptive_kappa:
             raise ValueError("SolverIPC: kappa=None, libuipc's default stiffness, needs adaptive_kappa=True.")
         if kappa is not None and not (np.isfinite(kappa) and kappa > 0.0):
@@ -1712,6 +1850,7 @@ class SolverIPC(SolverBase):
         self._clamp_checked_dt = None  # the step size whose stiffness the clamp warning was last checked for
         self._clamp_reported = False
         self._engine = None
+        self._worlds = None
         self._build_engine()
         self._check_start()
 
@@ -1731,11 +1870,12 @@ class SolverIPC(SolverBase):
                 "SolverIPC requires the libuipc-warp package: pip install git+https://github.com/OrangeEarth15/libuipc-warp"
             ) from e
         version = getattr(uipc_warp, "__version__", "0")
-        # the newest calls of each kind the solver makes: the frame status, the contact tabular and its stiffness
-        # policy, the start check, the joints
+        # the newest calls of each kind the solver makes: the frame status, the contact and subscene tabulars and the
+        # stiffness policy, the start check, the joints
         needed = (
             (uipc_warp.arrays, "write_frame_status"),
             (uipc_warp.arrays.ArrayScene, "contact_model"),
+            (uipc_warp.arrays.ArrayScene, "subscene_model"),
             (uipc_warp.backend.contact_system, "contact_stiffness"),
             (uipc_warp.validation.SurfaceChecker, "min_gap"),
             (uipc_warp.arrays, "joint_groups"),
@@ -1781,9 +1921,15 @@ class SolverIPC(SolverBase):
             self._config.d_hat = _default_d_hat(model)
 
         scene = self._uipc_warp.arrays.ArrayScene(kappa_corridor=self._adaptive_kappa)
-        elements = _contact_elements(model)
+        # several local worlds (coupled_worlds): one subscene each, all of them meeting the global entities' subscene 0
+        self._worlds = _Worlds.of(model) if self._coupled_worlds else None
+        elements = _contact_elements(model, self._worlds)
         for _ in range(1, elements.count):
             scene.contact_element()
+        if self._worlds is not None:
+            for _ in range(1, self._worlds.count):
+                scene.subscene_element()
+            scene.subscene_model(np.zeros(self._worlds.count - 1, np.int64), np.arange(1, self._worlds.count), True)
         tets = self._add_particles_and_tets(scene, elements)
         self._add_cloth(scene, tets)
         self._add_springs(scene)
@@ -1791,7 +1937,7 @@ class SolverIPC(SolverBase):
         self._add_joints(scene)
         self._planes = self._collect_planes()
         for P, N, s in zip(*self._planes, strict=True):
-            scene.add_half_plane(P, N, contact_element=elements.shape[s])
+            scene.add_half_plane(P, N, contact_element=elements.shape[s], subscene_element=self._subscene_of_shape(s))
         if elements.count > 1:
             # one model for every pair of the elements that hold vertices, with the default model's stiffness: the
             # solver's kappa, as given or as libuipc's policy resolves it (adaptive_kappa), one value for every pair
@@ -1819,6 +1965,8 @@ class SolverIPC(SolverBase):
         )
         self._world_entries = np.where(worlds < 0, model.world_count, worlds).astype(np.int32)
         self._world_entries_device = wp.array(self._world_entries, dtype=wp.int32, device=device)
+        self._status_scratch = wp.zeros(1, dtype=wp.int32, device=device)
+        self._residual_scratch = wp.zeros(1, dtype=wp.float32, device=device)
         nb = model.body_count
         if nb:
             self._body_base = wp.array(layout.body_base.astype(np.int32), dtype=wp.int32, device=device)
@@ -1828,6 +1976,10 @@ class SolverIPC(SolverBase):
             self._body_qd_written = wp.empty(nb, dtype=wp.spatial_vector, device=device)
             self._forget_written()
         self._make_engine(None)
+
+    def _subscene_of_shape(self, s: int) -> int:
+        """The subscene of shape ``s``'s vertices: its world's (``coupled_worlds``), else the one subscene, 0."""
+        return 0 if self._worlds is None else int(self._worlds.subscene(self.model.shape_world.numpy()[s]))
 
     def _world_gravity(self) -> np.ndarray:
         """``Model.gravity`` in float64: one row per world, the global world's last, so that the world of an entity
@@ -1953,14 +2105,17 @@ class SolverIPC(SolverBase):
         # the particles on no surface meet each other where their element meets itself
         lone_parts = np.flatnonzero((ids_group == lone_group) & enabled[ids_element, ids_element])
         pairs = np.concatenate([pairs, np.stack([lone_parts, lone_parts], axis=1)])
+        # not tested: two parts that never move, the inside of a body, two parts whose elements do not collide (such
+        # as worlds that overlap in space)
+        a, b = pairs[:, 0], pairs[:, 1]
+        pairs = pairs[
+            ~(all_still[a] & all_still[b])
+            & ~((a != b) & (ids_group[a] == ids_group[b]))
+            & enabled[ids_element[a], ids_element[b]]
+        ]
         device = self.model.device
         arrays = (wp.array(body.astype(np.int32), device=device), wp.array(thickness, dtype=wp.float64, device=device))
         for a, b in pairs:
-            if all_still[a] and all_still[b]:
-                continue
-            # the inside of a body is not tested, nor two parts whose elements do not collide
-            if (a != b and ids_group[a] == ids_group[b]) or not enabled[ids_element[a], ids_element[b]]:
-                continue
             result = self._part_pair(prims, arrays, a, b)
             if result is None:
                 warnings.warn(
@@ -2128,9 +2283,14 @@ class SolverIPC(SolverBase):
             )
             self._enabled = np.ones((1, 1), bool)
         else:
-            self._cids = np.asarray(tabular["cids"], np.int64)
-            self._plane_cids = np.asarray(tabular["plane_cids"], np.int64)
-            self._enabled = np.asarray(tabular["enabled"]) != 0
+            # the engine's ids, contact element * S + subscene, and the product of the two masks: with one subscene
+            # the contact elements and their mask
+            n_sub = len(tabular["subscene_enabled"])
+            self._cids = np.asarray(tabular["cids"], np.int64) * n_sub + np.asarray(tabular["scids"], np.int64)
+            self._plane_cids = np.asarray(tabular["plane_cids"], np.int64) * n_sub + np.asarray(
+                tabular["plane_scids"], np.int64
+            )
+            self._enabled = np.kron(np.asarray(tabular["enabled"]) != 0, np.asarray(tabular["subscene_enabled"]) != 0)
         if self.model.body_count:
             # notify_model_changed may have changed them since the scene was laid out
             self._engine.set_dyadic_mass(*self._engine_dyadic(self._dyadic))
@@ -2155,6 +2315,7 @@ class SolverIPC(SolverBase):
             fixed=self._fixed_particle,
             thickness=np.where(elements.on_mesh, self._thickness, radius),
             contact_element=elements.particle,
+            subscene_element=0 if self._worlds is None else self._worlds.subscene(model.particle_world.numpy()),
             gravity=self._world_gravity()[model.particle_world.numpy()],
         )
         if model.tet_count == 0:
@@ -2334,7 +2495,13 @@ class SolverIPC(SolverBase):
                     continue  # a height field without a cell
                 v = _quat_rotate_np(shape_xform[s, 3:7], v) + shape_xform[s, :3]
                 if b == -1:
-                    scene.add_obstacle(v, f, thickness=margin[s], contact_element=elements.shape[s])
+                    scene.add_obstacle(
+                        v,
+                        f,
+                        thickness=margin[s],
+                        contact_element=elements.shape[s],
+                        subscene_element=self._subscene_of_shape(s),
+                    )
                     self._obstacle_shapes.append(s)
                 else:
                     meshes[b].append((v, f, s))
@@ -2356,8 +2523,11 @@ class SolverIPC(SolverBase):
                 if parts
                 else np.zeros((0, 3), np.int64)
             )
-            # every vertex in the element of its shape, with the shape's margin as its thickness
+            # every vertex in the element and the subscene of its shape, with the shape's margin as its thickness
             element = np.concatenate([np.full(len(v), elements.shape[s]) for v, _, s in parts]) if parts else 0
+            subscene = (
+                np.concatenate([np.full(len(v), self._subscene_of_shape(s)) for v, _, s in parts]) if parts else 0
+            )
             thickness = np.concatenate([np.full(len(v), margin[s]) for v, _, s in parts]) if parts else 0.0
             volume = sum(_closed_volume(v, f) for v, f, _ in parts)
             if volume <= 0.0:
@@ -2381,6 +2551,7 @@ class SolverIPC(SolverBase):
                 fixed=bool(self._kinematic_body[b]),
                 thickness=thickness,
                 contact_element=element,
+                subscene_element=subscene,
                 gravity=body_gravity[b],
             )
         return mass, first, second
@@ -2860,8 +3031,28 @@ class SolverIPC(SolverBase):
         )
         if status is None and residual is None:
             return
-        for entry in self._world_entries:
-            self._uipc_warp.arrays.write_frame_status(self._engine, status, residual, index=int(entry))
+        if len(self._world_entries) <= 2:
+            for entry in self._world_entries:
+                self._uipc_warp.arrays.write_frame_status(self._engine, status, residual, index=int(entry))
+            return
+        # many worlds (coupled_worlds): the one solve's status written once, then copied to every entry
+        self._uipc_warp.arrays.write_frame_status(self._engine, self._status_scratch, self._residual_scratch)
+        wp.launch(
+            _copy_status,
+            len(self._world_entries),
+            inputs=[
+                self._world_entries_device,
+                self._status_scratch,
+                self._residual_scratch,
+                int(status is not None),
+                int(residual is not None),
+            ],
+            outputs=[
+                self._status_scratch if status is None else status,
+                self._residual_scratch if residual is None else residual,
+            ],
+            device=self.model.device,
+        )
 
     def grow(self) -> None:
         """Enlarge the contact lists after a captured step reported :attr:`SolverIPC.StatusBits.OVERFLOW`.
@@ -2993,9 +3184,9 @@ class SolverIPC(SolverBase):
 
         Args:
             state: Unused; the next step reads its own ``state_in``.
-            world_mask: Optional boolean mask of shape ``(world_count + 1,)``. The solver simulates one world
-                (with the global entities), so the reset applies when the mask selects a world that owns
-                particles or bodies. ``None`` resets.
+            world_mask: Optional boolean mask of shape ``(world_count + 1,)``. The worlds share one solve, so
+                the reset applies to all of them when the mask selects a world that owns particles or bodies.
+                ``None`` resets.
             flags: Unused.
         """
         del state, flags
@@ -3060,7 +3251,7 @@ class SolverIPC(SolverBase):
             dyadic = self._body_mass_moments(stacklevel=3)
             rebuild |= not np.array_equal(self._kinematic_body, kinematic)
         if rebuild:
-            _check_supported(model)
+            _check_supported(model, self._coupled_worlds)
             self._build_engine()
             return
         if flags & ModelFlags.MODEL_PROPERTIES:

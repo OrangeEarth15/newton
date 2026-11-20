@@ -287,9 +287,10 @@ the largest displacement of the last Newton direction over
 ``newton_velocity_tol / newton_transrate_tol``. It is dimensionless and at most one
 when the loop ended on that test; with ``semi_implicit=True`` the semi-implicit test
 may end the loop first, above one. A step that failed reports infinity. The solver
-solves everything it simulates as one system, so every world that owns particles or
-bodies reports the same value; ``SolverIPC.ObservableKind.STATUS`` reports how the
-step ended as :class:`~newton.solvers.SolverIPC.StatusBits`.
+solves everything it simulates as one system, also several worlds with
+``coupled_worlds=True``, so every world that owns particles or bodies reports the
+same value; ``SolverIPC.ObservableKind.STATUS`` reports how the step ended as
+:class:`~newton.solvers.SolverIPC.StatusBits`.
 
 Solver-specific observables
 ---------------------------

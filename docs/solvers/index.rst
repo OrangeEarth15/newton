@@ -186,7 +186,8 @@ Supported Features
   soft bodies, cloth (with self-collision), particles, near-rigid affine bodies, static shapes, planes and
   height fields, between the pairs that the collision groups, worlds and filter pairs let collide; springs
   without damping; revolute, prismatic, fixed and ball joints as penalty energies; one world besides the global
-  one; requires the optional ``libuipc-warp`` package.
+  one, or several with ``coupled_worlds=True``, which keeps them apart in contact but solves them together, so that
+  a world's result depends on the others' iterations; requires the optional ``libuipc-warp`` package.
 
 .. experimental::
     :class:`~newton.solvers.SolverSteel`'s public API and behavior may change without prior notice.

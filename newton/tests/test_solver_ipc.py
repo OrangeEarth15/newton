@@ -627,13 +627,18 @@ def test_rejects_gradients(test, device):
 
 
 def test_rejects_worlds(test, device):
-    """Reject content in two worlds: they would collide with each other and share one Newton solve."""
+    """Reject content in two worlds unless coupled_worlds: they would share one Newton solve."""
     builder = newton.ModelBuilder()
     for _ in range(2):
         builder.begin_world()
         _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
         builder.end_world()
-    _rejects(test, builder, "one world", device)
+    _rejects(
+        test,
+        builder,
+        r"one world: .* worlds \[0, 1\], which would share one Newton solve\. With coupled_worlds",
+        device,
+    )
 
 
 def _belt(device, enable_surface_velocity):
@@ -1966,6 +1971,223 @@ def test_gravity_per_world(test, device):
     check({-1: (1.0, 0.0, -3.0), 0: (0.0, 2.0, -1.0)}, 4)
 
 
+# ---------------------------------------------------------------------------- worlds
+
+
+def _world_content():
+    """One world: a soft cube above the global static box, a rigid box and a free particle above the ground."""
+    world = newton.ModelBuilder()
+    world.add_soft_grid(
+        pos=wp.vec3(0.3, -0.05, 0.25),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(0.0, 0.0, 0.0),
+        dim_x=2,
+        dim_y=2,
+        dim_z=2,
+        cell_x=0.05,
+        cell_y=0.05,
+        cell_z=0.05,
+        density=1000.0,
+        k_mu=3.4e4,
+        k_lambda=1.6e5,
+        k_damp=0.0,
+    )
+    _box_body(world, (-0.3, 0.0, 0.15), (0.05, 0.05, 0.05))
+    world.add_particle(wp.vec3(0.0, 0.3, 0.1), wp.vec3(0.0, 0.0, 0.0), 0.01, radius=0.01)
+    return world
+
+
+def _worlds(device, copies, content=_world_content):
+    """``copies`` worlds of ``content``, all at the origin as ``replicate`` places them, over a global ground plane and
+    a global static box whose top is at z = 0.1."""
+    scene = newton.ModelBuilder()
+    scene.add_ground_plane()
+    scene.add_shape_box(-1, xform=wp.transform(wp.vec3(0.35, 0.0, 0.05), wp.quat_identity()), hx=0.15, hy=0.15, hz=0.05)
+    scene.replicate(content(), copies)
+    return scene.finalize(device=device)
+
+
+def _world_rows(model, copies):
+    """The particle and body indices of every world, in the order of one world's."""
+    pw, bw = model.particle_world.numpy(), model.body_world.numpy()
+    return [(np.flatnonzero(pw == k), np.flatnonzero(bw == k)) for k in range(copies)]
+
+
+def _pair_subscenes(solver):
+    """The subscenes of the vertices of every stored, candidate and active simplex pair of the solver's last step, one
+    array per list, padded with -1 to four vertices."""
+    f = solver._engine.simplex
+    sub = solver._cids % solver._worlds.count  # the engine's ids: contact element * S + subscene
+    sv, cv = f.info.surf_verts.numpy(), f.info.codim_verts.numpy()
+    ed, tr = f.info.edges.numpy().reshape(-1, 2), f.info.tris.numpy().reshape(-1, 3)
+    out = []
+    for lists in (f.stored_lists(), f.candidate_lists()):
+        p = {k: v.reshape(-1, 2) for k, v in lists.items()}
+        out += [
+            np.stack([sv[p["PP"][:, 0]], cv[p["PP"][:, 1]]], axis=1),
+            np.concatenate([cv[p["PE"][:, :1]], ed[p["PE"][:, 1]]], axis=1),
+            np.concatenate([ed[p["EE"][:, 0]], ed[p["EE"][:, 1]]], axis=1),
+            np.concatenate([sv[p["PT"][:, :1]], tr[p["PT"][:, 1]]], axis=1),
+        ]
+    for pairs in f.active_lists().values():
+        a = np.asarray(pairs)
+        out.append(a.reshape(len(a), -1) if a.size else np.zeros((0, 2), np.int64))
+    return [sub[v] for v in out]
+
+
+def _pairs_across_worlds(sub):
+    """Of pairs given by the subscenes of their vertices: how many join two worlds, and how many join a world with
+    the global entities (subscene 0)."""
+    local = np.where(sub > 0, sub, 0)
+    high = local.max(axis=1)
+    low = np.where(sub > 0, sub, high[:, None]).min(axis=1)
+    return int(np.sum(low != high)), int(np.sum((sub == 0).any(axis=1) & (high > 0)))
+
+
+def test_coupled_worlds_follow_the_single_world(test, device):
+    """Four copies of a world at the origin, each a world of its own, with coupled_worlds: no stored, candidate or
+    active pair joins two worlds at any step, every world meets the global static box, and every world follows the run
+    of the one world alone, with the same Newton iterations at every step (the copies' shares of every sum of the solve
+    are equal) and positions within the rounding of those sums."""
+    copies, steps, dt = 4, 60, 0.01
+    runs = []
+    for n in (1, copies):
+        model = _worlds(device, n)
+        solver = newton.solvers.SolverIPC(model, coupled_worlds=True)
+        test.assertEqual(solver._worlds is None, n == 1)
+        s0, s1 = model.state(), model.state()
+        rows = _world_rows(model, n)
+        q, body_q, newton_iterations, global_pairs = [], [], [], 0
+        for _ in range(steps):
+            solver.step(s0, s1, None, None, dt)
+            s0, s1 = s1, s0
+            newton_iterations.append(solver.frame_stats()["newton_iterations"])
+            pq, bq = s0.particle_q.numpy(), s0.body_q.numpy()
+            q.append([pq[p] for p, _ in rows])
+            body_q.append([bq[b] for _, b in rows])
+            if n > 1:
+                for sub in _pair_subscenes(solver):
+                    across, with_global = _pairs_across_worlds(sub)
+                    test.assertEqual(across, 0)
+                    global_pairs += with_global
+        runs.append((np.array(q), np.array(body_q), newton_iterations))
+        if n > 1:
+            test.assertGreater(global_pairs, 0)
+    (q1, b1, n1), (qn, bn, nn) = runs
+    test.assertEqual(n1, nn)
+    # measured: 1e-12 m and 0 (the float32 output hides the rounding of the shared sums)
+    test.assertLess(np.abs(qn - q1).max(), 1e-6)
+    test.assertLess(np.abs(bn[..., :3] - b1[..., :3]).max(), 1e-6)
+    # every world rests: the soft cube on the global box (top at 0.1), the rigid box and the particle on the ground
+    for k in range(copies):
+        test.assertGreater(qn[-1, k, :-1, 2].min(), 0.1)
+        test.assertLess(qn[-1, k, :-1, 2].min(), 0.1 + D_HAT)
+        test.assertGreater(bn[-1, k, 0, 2], 0.05)
+        test.assertLess(bn[-1, k, 0, 2], 0.05 + D_HAT)
+        test.assertGreater(qn[-1, k, -1, 2], 0.01)
+
+
+def test_coupled_worlds_are_built_as_one_world(test, device):
+    """A model with content in one local world is built as without coupled_worlds: no subscenes, the same contact
+    elements and ids, and the same steps."""
+    model = _worlds(device, 1)
+    trajectories = []
+    for coupled in (False, True):
+        solver = newton.solvers.SolverIPC(model, coupled_worlds=coupled)
+        test.assertIsNone(solver._worlds)
+        trajectories.append((solver._cids.copy(), solver._enabled.copy(), _run(model, solver, 5)))
+    (c0, e0, t0), (c1, e1, t1) = trajectories
+    np.testing.assert_array_equal(c0, c1)
+    np.testing.assert_array_equal(e0, e1)
+    np.testing.assert_allclose(t0, t1, rtol=0.0, atol=1e-7)
+
+
+def test_coupled_worlds_share_filter_classes(test, device):
+    """A box filtered against a second box that starts inside it, replicated over six worlds: the worlds take the
+    contact elements of one world, the pairs the elements enable are Model.shape_contact_pairs, and in every world the
+    smaller box falls through the larger and both come to rest on the ground."""
+
+    def content():
+        world = newton.ModelBuilder()
+        _box_body(world, (0.0, 0.0, 0.3), (0.05, 0.05, 0.05))
+        _box_body(world, (0.0, 0.0, 0.31), (0.03, 0.03, 0.03))
+        world.add_shape_collision_filter_pair(0, 1)
+        return world
+
+    elements = []
+    for copies in (1, 6):
+        model = _worlds(device, copies, content)
+        solver = newton.solvers.SolverIPC(model, coupled_worlds=True)
+        elements.append(solver._scene._elements)
+        if copies > 1:
+            s0, s1 = model.state(), model.state()
+            for _ in range(60):
+                solver.step(s0, s1, None, None, 0.01)
+                s0, s1 = s1, s0
+            z = s0.body_q.numpy()[:, 2].reshape(copies, 2)
+            np.testing.assert_array_less(0.05, z[:, 0])
+            np.testing.assert_array_less(z[:, 0], 0.05 + D_HAT)
+            np.testing.assert_array_less(0.03, z[:, 1])
+            np.testing.assert_array_less(z[:, 1], 0.03 + D_HAT)
+    test.assertEqual(elements[0], elements[1])
+
+
+def test_coupled_worlds_status_in_every_world(test, device):
+    """The status and the residual of the one solve reach every world entry, also from a captured step, and a step that
+    fails in one world is reported in every world."""
+    copies = 3
+    model = _worlds(device, copies)
+    solver = newton.solvers.SolverIPC(model, coupled_worlds=True)
+    observables = solver.observables({solver.ObservableKind.STATUS, solver.ObservableKind.SOLVER_RESIDUAL})
+    s0, s1 = model.state(), model.state()
+    solver.step(s0, s1, None, None, 0.01, observables=observables)
+    with wp.ScopedCapture(device=device) as capture:
+        solver.step(s1, s0, None, None, 0.01, observables=observables)
+    wp.capture_launch(capture.graph)
+    status, residual = observables.status.numpy(), observables.solver_residual.numpy()
+    test.assertEqual(status.tolist(), [0] * (copies + 1))
+    test.assertTrue(np.all(residual[:copies] == residual[0]) and 0.0 < residual[0] <= 1.0)
+    test.assertEqual(residual[copies], 0.0)  # the global entry: no global particle or body
+    test.assertFalse(solver.check_status(observables))
+    # the particle of world 1 written below the ground into the captured step's input: it fails, in every world
+    q = s1.particle_q.numpy()
+    q[_world_rows(model, copies)[1][0][-1], 2] = -0.01
+    s1.particle_q.assign(q)
+    wp.capture_launch(capture.graph)
+    bits = observables.status.numpy()
+    test.assertTrue(np.all(bits[:copies] == bits[0]) and bits[0] & int(solver.StatusBits.FAILED))
+    with test.assertRaises(RuntimeError):
+        solver.check_status(observables)
+
+
+def test_coupled_worlds_fall_with_their_gravity(test, device):
+    """A particle in each of three worlds of different gravity falls as implicit Euler with its world's gravity."""
+    dt, steps = 0.01, 10
+    gravities = ((0.0, 0.0, -9.81), (0.0, 0.0, -2.0), (1.0, 0.0, -5.0))
+    builder = newton.ModelBuilder()
+    for g in gravities:
+        builder.begin_world(gravity=g)
+        builder.add_particle(wp.vec3(0.0, 0.0, 1.0), wp.vec3(0.0, 0.0, 0.0), 1.0, radius=0.01)
+        builder.end_world()
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model, coupled_worlds=True, **_TIGHT)
+    traj = _run(model, solver, steps, dt=dt)
+    k = np.arange(1, steps + 1)[:, None, None]
+    expected = np.array([[0.0, 0.0, 1.0]]) + np.array(gravities)[None] * dt * dt * (k * (k + 1) / 2.0)
+    np.testing.assert_allclose(traj, expected, rtol=0.0, atol=1e-5)
+
+
+def test_coupled_worlds_element_limit(test, device):
+    """More contact elements times subscenes than libuipc-warp's engine takes are refused, naming both."""
+    builder = newton.ModelBuilder()
+    world = newton.ModelBuilder()
+    world.add_particle(wp.vec3(0.0, 0.0, 1.0), wp.vec3(0.0, 0.0, 0.0), 1.0, radius=0.01)
+    builder.replicate(world, 1100)
+    model = builder.finalize(device=device)
+    with test.assertRaisesRegex(NotImplementedError, r"4 contact elements .* times 1101 subscenes"):
+        newton.solvers.SolverIPC(model, coupled_worlds=True)
+
+
 # ---------------------------------------------------------------------------- joints
 
 # a converged Newton loop and PCG, so that a joint follows a closed form to rounding
@@ -2561,6 +2783,79 @@ class TestSolverIPCInputs(unittest.TestCase):
                         bool(flags[i] & int(newton.ShapeFlags.COLLIDE_PARTICLES)),
                     )
 
+    def test_contact_elements_of_coupled_worlds(self):
+        """On random models of global shapes and two to four local worlds, some replicated with their filter pairs and
+        some drawn on their own, the shape pairs that the contact elements enable on different bodies, in the same
+        world or with a global shape (the subscenes), are exactly Model.shape_contact_pairs; replicated worlds add no
+        contact element."""
+        from newton._src.solvers.ipc.solver_ipc import _colliding_shapes, _contact_elements, _Worlds  # noqa: PLC0415
+
+        rng = np.random.default_rng(11)
+
+        def content(builder):
+            """Bodies of random shapes and filter pairs among them."""
+            first = builder.shape_count
+            for _ in range(int(rng.integers(1, 4))):
+                body = builder.add_body(xform=wp.transform(wp.vec3(*rng.uniform(-1.0, 1.0, 3)), wp.quat_identity()))
+                for _ in range(int(rng.integers(1, 3))):
+                    cfg = newton.ModelBuilder.ShapeConfig(
+                        collision_group=int(rng.choice([-2, -1, 0, 1, 2])),
+                        has_shape_collision=bool(rng.random() < 0.85),
+                        mu=float(rng.choice([0.2, 0.5])),
+                    )
+                    xform = wp.transform(wp.vec3(*rng.uniform(-0.2, 0.2, 3)), wp.quat_identity())
+                    builder.add_shape_box(body, xform=xform, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+            for _ in range(int(rng.integers(0, 3))):
+                a, b = rng.choice(np.arange(first, builder.shape_count), 2)
+                if a != b:
+                    builder.add_shape_collision_filter_pair(int(a), int(b))
+
+        for trial in range(30):
+            builder = newton.ModelBuilder()
+            for _ in range(int(rng.integers(1, 3))):
+                cfg = newton.ModelBuilder.ShapeConfig(collision_group=int(rng.choice([-1, 1, 2])))
+                g = builder.add_shape_box(
+                    -1,
+                    xform=wp.transform(wp.vec3(*rng.uniform(-1, 1, 3)), wp.quat_identity()),
+                    hx=0.3,
+                    hy=0.3,
+                    hz=0.05,
+                    cfg=cfg,
+                )
+            template = newton.ModelBuilder()
+            content(template)
+            copies = int(rng.integers(2, 4))
+            builder.replicate(template, copies)
+            for _ in range(int(rng.integers(0, 2))):
+                builder.begin_world()
+                content(builder)
+                builder.end_world()
+            if trial % 3 == 0:  # the last shape of every copy filtered against a global one
+                shape_world = np.asarray(builder.shape_world)
+                for k in range(copies):
+                    builder.add_shape_collision_filter_pair(g, int(np.flatnonzero(shape_world == k)[-1]))
+            model = builder.finalize(device="cpu")
+            worlds = _Worlds.of(model)
+            self.assertIsNotNone(worlds)
+            elements = _contact_elements(model, worlds)
+            body, world = model.shape_body.numpy(), model.shape_world.numpy()
+            shapes = np.flatnonzero(_colliding_shapes(model))
+            enabled = set()
+            for i in shapes:
+                for j in shapes[shapes > i]:
+                    e, f = elements.shape[i], elements.shape[j]
+                    together = world[i] == world[j] or world[i] == -1 or world[j] == -1
+                    if body[i] != body[j] and together and elements.enabled[e, f]:
+                        enabled.add((int(i), int(j)))
+            listed = model.shape_contact_pairs
+            listed = set() if listed is None else {tuple(sorted(map(int, p))) for p in listed.numpy()}
+            self.assertEqual(enabled, listed, f"trial {trial}")
+            replicated = world[shapes] < copies  # the replicated worlds come first
+            local = world[shapes] >= 0
+            used = np.unique(elements.shape[shapes[local & replicated]])
+            first = np.unique(elements.shape[shapes[world[shapes] == 0]])
+            self.assertEqual(used.tolist(), first.tolist(), f"trial {trial}: the copies share the elements of world 0")
+
 
 @requires("uipc_warp")
 class TestSolverIPCContact(unittest.TestCase):
@@ -2570,6 +2865,11 @@ class TestSolverIPCContact(unittest.TestCase):
 @requires("uipc_warp")
 class TestSolverIPCStep(unittest.TestCase):
     """How a step ends and what carries from one step to the next: status, overflow, state, reset, model changes."""
+
+
+@requires("uipc_warp")
+class TestSolverIPCWorlds(unittest.TestCase):
+    """Several worlds with coupled_worlds: kept apart in contact, solved together."""
 
 
 @requires("uipc_warp")
@@ -2676,6 +2976,15 @@ for name, func in (
     ("test_gravity_per_world", test_gravity_per_world),
 ):
     add_function_test(TestSolverIPCStep, name, func, devices=devices)
+for name, func in (
+    ("test_coupled_worlds_follow_the_single_world", test_coupled_worlds_follow_the_single_world),
+    ("test_coupled_worlds_are_built_as_one_world", test_coupled_worlds_are_built_as_one_world),
+    ("test_coupled_worlds_share_filter_classes", test_coupled_worlds_share_filter_classes),
+    ("test_coupled_worlds_status_in_every_world", test_coupled_worlds_status_in_every_world),
+    ("test_coupled_worlds_fall_with_their_gravity", test_coupled_worlds_fall_with_their_gravity),
+    ("test_coupled_worlds_element_limit", test_coupled_worlds_element_limit),
+):
+    add_function_test(TestSolverIPCWorlds, name, func, devices=devices)
 
 for name, func in (
     ("test_pendulum_is_implicit_euler", test_pendulum_is_implicit_euler),
