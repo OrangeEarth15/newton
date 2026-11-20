@@ -89,6 +89,15 @@ _LIMIT_OVERSHOOT = wp.constant(wp.float64(1.0e-3))
 _MAXVAL = wp.constant(wp.float32(MAXVAL))
 # Newton's default joint_effort_limit, which bounds no drive
 _EFFORT_LIMIT = 1.0e6
+# why libuipc has no joint for a joint type SolverIPC refuses
+_UNMAPPED_JOINTS = {
+    JointType.DISTANCE: "libuipc has no distance joint; its affine-body joints are revolute, prismatic, fixed and ball "
+    "joints",
+    JointType.D6: "libuipc has no D6 joint (constitution 28 is only registered); its affine-body joints are revolute, "
+    "prismatic, fixed and ball joints",
+    JointType.ROD: "libuipc has no constitution of stretch, shear, bend and twist between two affine bodies; its rods "
+    "are finite elements (Kirchhoff rod bending, constitution 15) and codimensional affine bodies",
+}
 
 # threads per block of the contact rows of CONTACT_F, whose grid strides over the records of the step's contact terms
 _CONTACT_ROW_BLOCK = 256
@@ -1284,10 +1293,9 @@ def _check_joints(model: Model) -> None:
     other = np.flatnonzero(~np.isin(joint_type, supported))
     if len(other):
         j = int(other[0])
-        raise NotImplementedError(
-            f"SolverIPC does not simulate {JointType(int(joint_type[j])).name} joints (joint {j}): "
-            "libuipc's affine-body joints are revolute, prismatic, fixed and ball joints."
-        )
+        t = JointType(int(joint_type[j]))
+        why = _UNMAPPED_JOINTS.get(t, "libuipc's affine-body joints are revolute, prismatic, fixed and ball joints")
+        raise NotImplementedError(f"SolverIPC does not simulate {t.name} joints (joint {j}): {why}.")
     if model.joint_dof_count == 0:
         return
     qd_start = model.joint_qd_start.numpy()
@@ -1307,15 +1315,15 @@ def _check_joints(model: Model) -> None:
             )
 
     for name, why in (
-        ("joint_armature", "does not simulate joint armature"),
-        ("joint_friction", "does not simulate joint friction"),
+        ("joint_armature", "does not simulate joint armature: libuipc's joints have no inertia of their own"),
+        (
+            "joint_friction",
+            "does not simulate joint friction: libuipc's joints have none, and dry friction, a bounded force, is no "
+            "quadratic potential that libuipc's driving term could hold",
+        ),
     ):
         values = per_dof(name)
-        refuse(
-            np.flatnonzero(values != 0.0),
-            lambda d, v=values, n=name: f"{n} {float(v[d])!r}",
-            f"{why} (libuipc's joints have none)",
-        )
+        refuse(np.flatnonzero(values != 0.0), lambda d, v=values, n=name: f"{n} {float(v[d])!r}", why)
     ke, kd = per_dof("joint_target_ke"), per_dof("joint_target_kd")
     ks, c = per_dof("joint_stiffness"), per_dof("joint_damping")
     mode = model.joint_target_mode.numpy() if model.joint_target_mode is not None else np.zeros(len(ke), np.int32)
@@ -1338,20 +1346,22 @@ def _check_joints(model: Model) -> None:
     refuse(
         np.flatnonzero(other & driven),
         drive,
-        "drives, springs and damps revolute and prismatic joints only (libuipc's ball joint has no driving term, a "
-        "free body no joint); Control.joint_f acts on every joint",
+        "drives, springs and damps revolute and prismatic joints only: libuipc's driving term (constitutions 19 "
+        "and 21) is a quadratic potential of one hinge angle or one distance, its ball joint has none (constitution "
+        "27 is only registered) and a free body has no joint; Control.joint_f acts on every joint",
     )
     refuse(
         np.flatnonzero(other & limited),
         lambda d: f"the limits [{float(lo[d])!r}, {float(hi[d])!r}] with limit_ke {float(limit_k[d])!r}",
-        "limits revolute and prismatic joints only (libuipc's ball joint has no limit)",
+        "limits revolute and prismatic joints only: libuipc's limits (constitutions 669 and 670) act on one hinge "
+        "angle or one distance, and its ball joint has none",
     )
     effort = per_dof("joint_effort_limit")
     refuse(
         np.flatnonzero(((ke != 0.0) | (kd != 0.0)) & (effort < _EFFORT_LIMIT)),
         lambda d: f"joint_effort_limit {float(effort[d])!r} and a drive",
-        "cannot bound the torque of a drive (libuipc's driving term is a quadratic potential); raise the limit to "
-        f"{_EFFORT_LIMIT:g}, Newton's default, to drive the joint without a bound",
+        "cannot bound the force of a drive: libuipc's driving term is a quadratic potential, whose force has no "
+        f"bound; raise the limit to {_EFFORT_LIMIT:g}, Newton's default, to drive the joint without a bound",
     )
 
 
@@ -2373,11 +2383,19 @@ class SolverIPC(SolverBase):
     wrote, it picks the turn of the bodies' angle (the pose decides the angle
     modulo :math:`2\\pi`).
 
-    Rejected (:class:`NotImplementedError`): distance, D6 and rod joints;
-    drives, springs, damping and limits on ball and free joints (libuipc's
-    ball joint has none); ``joint_armature`` and ``joint_friction`` other
-    than 0; a ``joint_effort_limit`` below Newton's default 1e6 on a driven
-    degree of freedom, since the quadratic drive cannot bound its torque.
+    Rejected (:class:`NotImplementedError`), each for the libuipc
+    constitution it lacks: distance and D6 joints, which libuipc does not
+    have (its D6 joint, constitution 28, is only registered), and rod
+    joints, which no libuipc constitution between two affine bodies
+    represents; drives, springs, damping and limits on ball and free joints,
+    since libuipc's driving term and limits act on one hinge angle or one
+    distance and its ball joint has neither (its ball driving term,
+    constitution 27, is only registered); ``joint_armature`` other than 0,
+    since libuipc's joints have no inertia of their own; ``joint_friction``
+    other than 0, since they have no friction and dry friction, a bounded
+    force, is no quadratic potential; a ``joint_effort_limit`` below
+    Newton's default 1e6 on a driven degree of freedom, since the quadratic
+    drive cannot bound its force.
 
     **State.** The solver keeps positions and velocities in float64 and reads
     ``state_in`` on every step. A particle whose ``state_in`` position and
