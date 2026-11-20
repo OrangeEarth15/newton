@@ -109,6 +109,17 @@ observable storage smaller than their configured export capacity.
 With ``use_mujoco_cpu=True``, ``nconmax`` bounds contact export, not simulation;
 excess contacts are omitted with a warning.
 
+:class:`~newton.solvers.SolverIPC` always detects its own contacts and is such a
+native backend: with ``CONTACT_F`` requested, a step writes one row per contact
+term of its incremental potential with a force (a barrier term or a friction
+term), rigid rows between shapes and soft rows between a particle, edge or face
+and a shape, and their forces at the end of the step. Size the buffer with
+``rigid_contact_max=solver.get_max_contact_count()`` and
+``soft_contact_max=solver.get_max_soft_contact_count()``, a worst case. A smaller
+buffer is accepted: the rows past its capacity are dropped and the counts report
+every row, as the collision pipeline's do. Points are in the body frames of the
+step's output state.
+
 A solver advertises available entries through
 :attr:`~newton.solvers.SolverBase.supported_observables` and rejects an
 unsupported request during allocation. Passing an observable container to a
@@ -138,7 +149,8 @@ Standard observables
      - Contact spatial forces in the row layout of the step's contacts
      - :class:`~newton.solvers.SolverMuJoCo`,
        :class:`~newton.solvers.SolverXPBD`, :class:`~newton.solvers.SolverVBD`,
-       :class:`~newton.solvers.SolverKamino`, and :class:`~newton.solvers.SolverSteel`
+       :class:`~newton.solvers.SolverKamino`, :class:`~newton.solvers.SolverSteel`, and
+       :class:`~newton.solvers.SolverIPC`
    * - ``SOLVER_RESIDUAL`` / ``observables.solver_residual``
      - Per-world convergence residual of the step; see :ref:`solver_residual_observable`
      - :class:`~newton.solvers.SolverIPC`, :class:`~newton.solvers.SolverKamino`, and

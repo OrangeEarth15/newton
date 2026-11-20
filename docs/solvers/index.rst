@@ -189,7 +189,8 @@ Supported Features
   particle-body attachments without damping; revolute, prismatic, fixed and ball joints as penalty energies; one
   world besides the global
   one, or several with ``coupled_worlds=True``, which keeps them apart in contact but solves them together, so that
-  a world's result depends on the others' iterations; requires the optional ``libuipc-warp`` package.
+  a world's result depends on the others' iterations; on request its own contacts and their forces written into the
+  step's ``Contacts`` (``CONTACT_F``); requires the optional ``libuipc-warp`` package.
 
 .. experimental::
     :class:`~newton.solvers.SolverSteel`'s public API and behavior may change without prior notice.

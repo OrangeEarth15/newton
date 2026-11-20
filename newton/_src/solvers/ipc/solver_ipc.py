@@ -90,6 +90,9 @@ _MAXVAL = wp.constant(wp.float32(MAXVAL))
 # Newton's default joint_effort_limit, which bounds no drive
 _EFFORT_LIMIT = 1.0e6
 
+# threads per block of the contact rows of CONTACT_F, whose grid strides over the records of the step's contact terms
+_CONTACT_ROW_BLOCK = 256
+
 
 @wp.func
 def _to64(a: wp.vec3) -> wp.vec3d:
@@ -724,6 +727,286 @@ def _copy_status(
         status[entries[k]] = status_in[0]
     if write_residual != 0:
         residual[entries[k]] = residual_in[0]
+
+
+@wp.func
+def _term_sides(kind: int):
+    """(vertices of the first primitive, vertices of the term) of a contact term of libuipc-warp's ``ContactForces``
+    kind PT, EE, PE, PP or PH (0 ... 4): the point, the first edge or the vertex comes first; a half-plane term's
+    second side is its half plane."""
+    first = int(1)
+    count = int(4)
+    if kind == 1:
+        first = 2
+    elif kind == 2:
+        count = 3
+    elif kind == 3:
+        count = 2
+    elif kind == 4:
+        count = 1
+    return first, count
+
+
+@wp.func
+def _record_force(forces: wp.array2d[wp.vec3], r: int, k: int) -> wp.vec3d:
+    f = forces[r, k]
+    return wp.vec3d(wp.float64(f[0]), wp.float64(f[1]), wp.float64(f[2]))
+
+
+@wp.func
+def _side_force(forces: wp.array2d[wp.vec3], r: int, k0: int, k1: int) -> wp.vec3d:
+    """The force on the vertices ``k0 .. k1 - 1`` of record ``r`` together."""
+    f = wp.vec3d()
+    for k in range(k0, k1):
+        f += _record_force(forces, r, k)
+    return f
+
+
+@wp.func
+def _side_point(x: wp.array[wp.vec3d], q: wp.vec4i, forces: wp.array2d[wp.vec3], r: int, k0: int, k1: int) -> wp.vec3d:
+    """The force-weighted mean of the vertices ``k0 .. k1 - 1`` of record ``r``: the closest point of their primitive
+    where the force splits by the barycentric weights of that point, as a barrier's and a friction term's do (their
+    plain mean where no force acts on them)."""
+    p = wp.vec3d()
+    mean = wp.vec3d()
+    w = wp.float64(0.0)
+    for k in range(k0, k1):
+        a = wp.float64(wp.length(forces[r, k]))
+        p += a * x[q[k]]
+        mean += x[q[k]]
+        w += a
+    if w > wp.float64(0.0):
+        return p / w
+    return mean / wp.float64(k1 - k0)
+
+
+@wp.func
+def _side_torque(
+    x: wp.array[wp.vec3d], q: wp.vec4i, forces: wp.array2d[wp.vec3], r: int, k0: int, k1: int, c: wp.vec3d
+) -> wp.vec3d:
+    """The torque about ``c`` of the forces on the vertices ``k0 .. k1 - 1`` of record ``r``, each at its vertex: exact
+    also where a force does not split by barycentric weights (the mollified edge-edge barrier)."""
+    t = wp.vec3d()
+    for k in range(k0, k1):
+        t += wp.cross(x[q[k]] - c, _record_force(forces, r, k))
+    return t
+
+
+@wp.func
+def _body_frame(shape: int, shape_body: wp.array[wp.int32], body_q: wp.array[wp.transform]) -> wp.transform:
+    """The frame of ``shape``'s body in ``body_q``, the world's for a static shape."""
+    b = shape_body[shape]
+    X = wp.transform_identity()
+    if b >= 0:
+        X = body_q[b]
+    return X
+
+
+@wp.func
+def _body_centre(
+    shape: int, shape_body: wp.array[wp.int32], body_q: wp.array[wp.transform], body_com: wp.array[wp.vec3]
+) -> wp.vec3d:
+    """The centre of mass of ``shape``'s body at the pose ``body_q``, the world origin for a static shape."""
+    b = shape_body[shape]
+    c = wp.vec3d()
+    if b >= 0:
+        p = wp.transform_point(body_q[b], body_com[b])
+        c = wp.vec3d(wp.float64(p[0]), wp.float64(p[1]), wp.float64(p[2]))
+    return c
+
+
+@wp.func
+def _in_frame(X: wp.transform, p: wp.vec3d) -> wp.vec3:
+    """World point ``p`` in the frame ``X``, its offset from the frame's origin taken in float64."""
+    o = wp.transform_get_translation(X)
+    d = p - wp.vec3d(wp.float64(o[0]), wp.float64(o[1]), wp.float64(o[2]))
+    return wp.quat_rotate_inv(
+        wp.transform_get_rotation(X), wp.vec3(wp.float32(d[0]), wp.float32(d[1]), wp.float32(d[2]))
+    )
+
+
+@wp.func
+def _to32v(a: wp.vec3d) -> wp.vec3:
+    return wp.vec3(wp.float32(a[0]), wp.float32(a[1]), wp.float32(a[2]))
+
+
+@wp.func
+def _row_normal(barrier: bool, push: wp.vec3d, d: wp.vec3d) -> wp.vec3:
+    """The normal of a row from its first side toward its second: against ``push``, the force on the first side, for
+    a barrier term, whose force is the distance's gradient (closest points of two parallel edges, which the mollified
+    edge-edge barrier takes, are not unique: their difference can lie in the plane of contact); along ``d``, from the
+    first side's point to the second's, for a friction term, whose force is tangential. The other where one has no
+    length."""
+    n = -push
+    if not barrier or wp.length(n) == wp.float64(0.0):
+        n = d
+        if wp.length(n) == wp.float64(0.0):
+            n = -push
+    if wp.length(n) > wp.float64(0.0):
+        n = wp.normalize(n)
+    return _to32v(n)
+
+
+@wp.kernel
+def _contact_rows(
+    rec_vertices: wp.array[wp.vec4i],
+    rec_forces: wp.array2d[wp.vec3],
+    rec_counts: wp.array[wp.int32],
+    rec_offsets: wp.array[wp.int32],
+    nthreads: int,
+    x: wp.array[wp.vec3d],
+    n_particles: int,
+    vertex_shape: wp.array[wp.int32],
+    plane_shape: wp.array[wp.int32],
+    plane_P: wp.array[wp.vec3d],
+    plane_N: wp.array[wp.vec3d],
+    shape_body: wp.array[wp.int32],
+    shape_margin: wp.array[wp.float32],
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    rigid_max: int,
+    soft_max: int,
+    rigid_count: wp.array[wp.int32],
+    rigid_shape0: wp.array[wp.int32],
+    rigid_shape1: wp.array[wp.int32],
+    rigid_point0: wp.array[wp.vec3],
+    rigid_point1: wp.array[wp.vec3],
+    rigid_normal: wp.array[wp.vec3],
+    rigid_margin0: wp.array[wp.float32],
+    rigid_margin1: wp.array[wp.float32],
+    rigid_offset0: wp.array[wp.vec3],
+    rigid_offset1: wp.array[wp.vec3],
+    rigid_surface_velocity: wp.array[wp.vec3],
+    soft_count: wp.array[wp.int32],
+    soft_shape: wp.array[wp.int32],
+    soft_indices: wp.array[wp.vec3i],
+    soft_barycentric: wp.array[wp.vec3],
+    soft_particle: wp.array[wp.int32],
+    soft_body_pos: wp.array[wp.vec3],
+    soft_body_vel: wp.array[wp.vec3],
+    soft_normal: wp.array[wp.vec3],
+    soft_rigid_indices: wp.array[wp.vec3i],
+    contact_f: wp.array[wp.spatial_vector],
+):
+    """One row of ``Contacts`` per contact term with a force, from libuipc-warp's ``ContactForces`` records (class
+    docstring, **Contact output**): a rigid row for a term between two shapes, a soft row for a term between a
+    particle feature and a shape, none between particle features. Grid-stride over the live records; a row takes its
+    index from the rigid or the soft count, which counts every row, and is written only below its capacity."""
+    tid = wp.tid()
+    total = int(0)
+    for k in range(10):
+        total += rec_counts[k]
+    for idx in range(tid, total, nthreads):
+        seg = int(0)
+        i = idx
+        while seg < 9 and i >= rec_counts[seg]:
+            i -= rec_counts[seg]
+            seg += 1
+        r = rec_offsets[seg] + i
+        kind = seg % 5
+        first, count = _term_sides(kind)
+        q = rec_vertices[r]
+        # the owner of each side: a shape, or a particle feature (cloth, tetrahedra, free particles)
+        shape_a = vertex_shape[q[0]]
+        particle_a = q[0] < n_particles
+        shape_b = int(-1)
+        particle_b = bool(False)
+        if kind == 4:
+            shape_b = plane_shape[q[1]]
+        else:
+            shape_b = vertex_shape[q[first]]
+            particle_b = q[first] < n_particles
+        if (shape_a < 0 and not particle_a) or (shape_b < 0 and not particle_b):
+            continue  # a vertex of no shape and no particle: not a contact primitive
+        if shape_a < 0 and shape_b < 0:
+            continue  # between particle features: not exported
+        f_a = _side_force(rec_forces, r, 0, first)
+        f_b = wp.vec3d()
+        if kind == 4:
+            f_b = _record_force(rec_forces, r, 1)
+        else:
+            f_b = _side_force(rec_forces, r, first, count)
+        if wp.length(f_a) == wp.float64(0.0) and wp.length(f_b) == wp.float64(0.0):
+            continue  # no force
+        p_a = _side_point(x, q, rec_forces, r, 0, first)
+        p_b = wp.vec3d()
+        if kind == 4:
+            # the point of the half plane under the vertex, on the plane's raw surface: the engine's half plane is
+            # moved out by the shape's margin
+            n_p = plane_N[q[1]]
+            raw = plane_P[q[1]] - wp.float64(shape_margin[shape_b]) * n_p
+            p_b = p_a - wp.dot(p_a - raw, n_p) * n_p
+        else:
+            p_b = _side_point(x, q, rec_forces, r, first, count)
+        if shape_a >= 0 and shape_b >= 0:
+            row = wp.atomic_add(rigid_count, 0, 1)
+            if row < rigid_max:
+                X0 = _body_frame(shape_a, shape_body, body_q)
+                X1 = _body_frame(shape_b, shape_body, body_q)
+                n = _row_normal(seg < 5, f_a, p_b - p_a)
+                m0 = shape_margin[shape_a]
+                m1 = shape_margin[shape_b]
+                rigid_shape0[row] = shape_a
+                rigid_shape1[row] = shape_b
+                rigid_point0[row] = _in_frame(X0, p_a)
+                rigid_point1[row] = _in_frame(X1, p_b)
+                rigid_normal[row] = n
+                rigid_margin0[row] = m0
+                rigid_margin1[row] = m1
+                rigid_offset0[row] = wp.quat_rotate_inv(wp.transform_get_rotation(X0), m0 * n)
+                rigid_offset1[row] = wp.quat_rotate_inv(wp.transform_get_rotation(X1), -m1 * n)
+                if rigid_surface_velocity:
+                    rigid_surface_velocity[row] = wp.vec3()
+                c = _body_centre(shape_a, shape_body, body_q, body_com)
+                torque = _side_torque(x, q, rec_forces, r, 0, first, c)
+                contact_f[row] = wp.spatial_vector(_to32v(f_a), _to32v(torque))
+        else:
+            row = wp.atomic_add(soft_count, 0, 1)
+            if row < soft_max:
+                # the shape takes shape 0's role: the force on its body by the particle feature
+                shape = shape_a
+                p_shape = p_a
+                p_soft = p_b
+                f_shape = f_a
+                k0 = first
+                k1 = count
+                if shape_a < 0:
+                    shape = shape_b
+                    p_shape = p_b
+                    p_soft = p_a
+                    f_shape = f_b
+                    k0 = 0
+                    k1 = first
+                c = _body_centre(shape, shape_body, body_q, body_com)
+                torque = wp.cross(p_shape - c, f_shape)
+                if kind != 4:
+                    if shape_a < 0:
+                        torque = _side_torque(x, q, rec_forces, r, first, count, c)
+                    else:
+                        torque = _side_torque(x, q, rec_forces, r, 0, first, c)
+                indices = wp.vec3i(-1, -1, -1)
+                weights = wp.vec3()
+                w = wp.float32(0.0)
+                for k in range(k0, k1):
+                    w += wp.length(rec_forces[r, k])
+                for k in range(k0, k1):
+                    indices[k - k0] = q[k]
+                    if w > wp.float32(0.0):
+                        weights[k - k0] = wp.length(rec_forces[r, k]) / w
+                    else:
+                        weights[k - k0] = wp.float32(1.0) / wp.float32(k1 - k0)
+                soft_shape[row] = shape
+                soft_indices[row] = indices
+                soft_barycentric[row] = weights
+                particle = int(-1)
+                if k1 - k0 == 1:
+                    particle = q[k0]
+                soft_particle[row] = particle
+                soft_body_pos[row] = _in_frame(_body_frame(shape, shape_body, body_q), p_shape)
+                soft_body_vel[row] = wp.vec3()
+                soft_normal[row] = _row_normal(seg < 5, f_shape, p_soft - p_shape)
+                soft_rigid_indices[row] = wp.vec3i(-1, -1, -1)
+                contact_f[rigid_max + row] = wp.spatial_vector(_to32v(f_shape), _to32v(torque))
 
 
 @wp.kernel
@@ -1663,7 +1946,9 @@ class SolverIPC(SolverBase):
     which the solver's own contacts would ignore), and a CPU device.
     Gaussian shapes and planes attached to bodies raise when the shapes are
     triangulated. The ``contacts`` argument of
-    :meth:`step` is not used: the solver detects its own contacts.
+    :meth:`step` is not read: the solver detects its own contacts, and
+    writes them into it when ``CONTACT_F`` is requested (see **Contact
+    output** below).
 
     Not read: the penalty contact parameters of shapes and particles
     (``ke``, ``kd``, ``kf``, ``ka``, ``particle_cohesion`` and
@@ -2153,6 +2438,66 @@ class SolverIPC(SolverBase):
     for the other length or for other guesses, and the caller then captures
     again to run faster (the old graphs stay valid and give the same results).
 
+    **Contact output.** Request ``SolverBase.ObservableKind.CONTACT_F`` with
+    :meth:`observables`, passing the :class:`~newton.Contacts` that sizes
+    ``contact_f``, and pass the container and a ``Contacts`` to :meth:`step`:
+    the step writes its own contacts into that buffer and their forces into
+    ``contact_f``, as a native collision backend does (SolverMuJoCo with its
+    own collision detection). Do not run ``CollisionPipeline.collide`` into
+    the buffer; the step overwrites its rows. Each contact term of the step
+    with a force is one row: a point-triangle, edge-edge, point-edge,
+    point-point or vertex / half-plane pair of the final active set (its
+    barrier) or of the step's friction pairs (its lagged friction), so that a
+    pair in both gives two rows, one normal and one tangential. A term between
+    two shapes is a rigid row. A term between a particle feature (a particle,
+    or an edge or a face of cloth or tetrahedra) and a shape is a soft row,
+    with the particle, edge or face record of
+    :attr:`~newton.Contacts.soft_contact_indices` and the weights of its
+    contact point. Terms between particle features (cloth self-contact,
+    particles among themselves) are not exported, as SolverVBD exports no
+    soft self-contact.
+
+    The forces are those at the end of the step: minus the gradient of the
+    term's energy in the step's incremental potential at the final positions,
+    over :math:`\\Delta t^2`, which the step balanced to the Newton tolerance.
+    A box resting on the ground reports its weight. On a body of mass ``m``
+    whose step ended on the displacement test the forces can be off by up to
+    about ``m * newton_velocity_tol / dt``: a box creeping down a ramp under
+    friction reports its weight within 1.2% at the default tolerances and
+    within 1e-4 with ``newton_velocity_tol=1e-4``, ``linear_tol_rate=1e-10``
+    and ``semi_implicit=False``. A rigid row's
+    ``contact_f`` is the force on the body of shape 0 by the body of shape 1,
+    the sum of the forces on its vertices, with their torque about that body's
+    centre of mass at the end of the step (about the world origin for a static
+    shape), in the world frame; a soft row's is the force on the shape's body
+    by the particle feature, with its torque about that body's centre of mass.
+    The points are written in the body frames of ``state_out``, so pass
+    ``state_out`` to a consumer such as :class:`~newton.sensors.SensorContact`.
+    Each side's point is the force-weighted mean of its vertices, the closest
+    point of its primitive on the triangulated surface (a half plane's: the
+    point under the vertex, on the plane's surface). The normal points from
+    shape 0 toward shape 1, a soft row's from the shape toward the particle
+    feature: against the force on shape 0 for a barrier term, whose force is
+    the gradient of the distance, and from shape 0's point to shape 1's for a
+    friction term, whose force is tangential. The margins are the shapes'
+    ``shape_margin``, their contact thickness, and the offsets the normal
+    times each margin toward the other side, as Newton's collision pipeline
+    writes them.
+    ``rigid_contact_surface_velocity`` (when allocated) and
+    ``soft_contact_body_vel`` are zero, and ``soft_contact_rigid_indices`` is
+    ``-1``: the solver has no surface velocity, and it triangulates and welds
+    the shapes' meshes. The counts are true counts: rows past the buffer's
+    capacity are dropped, as Newton's collision pipeline drops them, and a
+    ``rigid_contact_count`` or ``soft_contact_count`` above the capacity tells
+    it; :meth:`get_max_contact_count` and :meth:`get_max_soft_contact_count`
+    give capacities that drop none, a worst case several times the usual
+    count. A step that failed writes no rows. The order of the rows changes
+    from run to run (atomic counters), their set and values do not. With
+    ``coupled_worlds`` the rows of every world share the buffer, and the
+    shapes tell the worlds apart. Not with ``contact_constitution="al-ipc"``.
+    The output costs, only when requested, one pass over the step's contact
+    terms and one over its rows, and 64 bytes per slot of the contact lists.
+
     This solver requires the optional ``libuipc-warp`` package (``import uipc_warp``).
 
     Args:
@@ -2325,7 +2670,9 @@ class SolverIPC(SolverBase):
         )
         """The bits of a failed step."""
 
-    SUPPORTED_OBSERVABLES = frozenset({SolverBase.ObservableKind.SOLVER_RESIDUAL, ObservableKind.STATUS})
+    SUPPORTED_OBSERVABLES = frozenset(
+        {SolverBase.ObservableKind.SOLVER_RESIDUAL, SolverBase.ObservableKind.CONTACT_F, ObservableKind.STATUS}
+    )
 
     # libuipc-warp, its external-acceleration element group and the element group of the bodies' orthogonality
     # potential, imported by the first solver
@@ -2425,17 +2772,72 @@ class SolverIPC(SolverBase):
         self._worlds = None
         self._ortho = None  # the engine's orthogonality potentials, whose stiffness follows dt (default body_kappa)
         self._default_control = None  # the Control of a step given none, built once (_control_of_model)
+        # CONTACT_F: whether a container requested it, and libuipc-warp's ContactForces of the engine then
+        # (allocated with the request and with every engine built after it, outside any capture)
+        self._contact_output = False
+        self._contact_export = None
         self._build_engine()
         self._check_start()
 
     @property
     def supported_observables(self) -> frozenset[str]:
-        """``STATUS`` and ``SOLVER_RESIDUAL``; with ``contact_constitution="al-ipc"`` ``STATUS`` only: the AL-IPC
-        frame ends on its own criterion and has no Newton residual."""
+        """``STATUS``, ``SOLVER_RESIDUAL`` and ``CONTACT_F``; with ``contact_constitution="al-ipc"`` ``STATUS`` only: the
+        AL-IPC frame ends on its own criterion, without a Newton residual, and its contact is an active set with
+        multipliers, not the barrier and friction terms the contact output exports."""
         config = getattr(self, "_config", None)
         if config is not None and config.contact_constitution == "al-ipc":
             return frozenset({self.ObservableKind.STATUS})
         return self.SUPPORTED_OBSERVABLES
+
+    @override
+    def observables(
+        self, kinds, *, contacts: Contacts | None = None, requires_grad: bool | None = None
+    ) -> SolverIPC.Observables:
+        """Allocate solver observables (see :meth:`SolverBase.observables`).
+
+        With ``CONTACT_F`` requested this also allocates what a step needs to write the solver's own contacts into the
+        step's :class:`~newton.Contacts` (see **Contact output** in the class docstring): libuipc-warp's records of
+        every slot of the solver's contact lists, about 64 bytes per slot, kept from then on and allocated again when
+        the solve is built again. ``contacts`` sizes ``contact_f``; any capacity is taken, the rows past it are
+        dropped (:meth:`get_max_contact_count` and :meth:`get_max_soft_contact_count` give the capacities that drop
+        none). Allocate before graph capture.
+        """
+        observables = super().observables(kinds, contacts=contacts, requires_grad=requires_grad)
+        if observables.is_requested(SolverBase.ObservableKind.CONTACT_F) and not self._contact_output:
+            self._contact_output = True
+            self._make_contact_export()
+        return observables
+
+    def _contact_term_capacity(self) -> int:
+        """The most contact terms a step can export: every slot of the engine's contact lists (libuipc-warp's
+        ``ContactForces.segment_capacities``)."""
+        if self._engine is None:
+            return 0
+        return int(self._uipc_warp.arrays.ContactForces.segment_capacities(self._engine).sum())
+
+    def get_max_contact_count(self) -> int:
+        """The rigid rows a step with ``CONTACT_F`` can write: the size of ``rigid_contact_max`` that drops none.
+
+        Every contact term between two shapes is a row (see **Contact output** in the class docstring), so this is the
+        number of slots of the solver's contact lists, active and friction terms together, or 0 when fewer than two
+        shapes collide. It is a worst case, several times the rows a step usually writes; a smaller buffer is taken,
+        and the rows past it are dropped while ``rigid_contact_count`` counts them. :meth:`grow` and an eager step
+        that overflows enlarge the lists, and this with them. 0 for a model without particles and bodies.
+        """
+        if self._engine is None or len(self._contact_shapes) < 2:
+            return 0
+        return self._contact_term_capacity()
+
+    def get_max_soft_contact_count(self) -> int:
+        """The soft rows a step with ``CONTACT_F`` can write: the size of ``soft_contact_max`` that drops none.
+
+        Every contact term between a particle feature (a particle, an edge or a face of cloth or tetrahedra) and a
+        shape is a row, so this is the number of slots of the solver's contact lists, or 0 without particles or
+        without colliding shapes. As :meth:`get_max_contact_count`, it is a worst case, and a smaller buffer is taken.
+        """
+        if self._engine is None or self.model.particle_count == 0 or len(self._contact_shapes) == 0:
+            return 0
+        return self._contact_term_capacity()
 
     @classmethod
     def _import_uipc_warp(cls):
@@ -2472,6 +2874,7 @@ class SolverIPC(SolverBase):
             (uipc_warp.backend.engine, "subscene_restarts"),
             (uipc_warp.arrays.ArrayScene, "add_stitches"),
             (uipc_warp.arrays.ArrayScene, "add_soft_transform_constraints"),
+            (uipc_warp.arrays, "ContactForces"),
         )
         missing = [f"{owner.__name__}.{name}" for owner, name in needed if not hasattr(owner, name)]
         if missing:
@@ -2506,7 +2909,7 @@ class SolverIPC(SolverBase):
         ``state_in``."""
         model = self.model
         device = model.device
-        self._engine = self._frame_graph = self._forces = None
+        self._engine = self._frame_graph = self._forces = self._contact_export = None
         if model.particle_count == 0 and model.body_count == 0:
             return
         # the global world's gravity, which every part overrides with the gravity of its own world
@@ -2552,6 +2955,15 @@ class SolverIPC(SolverBase):
         self._control = None  # of the last step, whose joint terms a redone frame takes again
 
         layout = scene.layout()
+        # CONTACT_F's contact rows: the shape of every engine vertex on a shape (-1 elsewhere: particles, the bodies'
+        # pseudo-vertices and anchors), and the shapes that hold contact primitives, the planes' among them
+        vertex_shape = np.full(layout.n, -1, np.int32)
+        for k, shape in enumerate(self._obstacle_shapes):
+            vertex_shape[layout.obstacle_offsets[k] : layout.obstacle_offsets[k + 1]] = shape
+        for b, shapes in enumerate(self._body_vertex_shape):
+            vertex_shape[layout.body_vertex_offsets[b] : layout.body_vertex_offsets[b + 1]] = shapes
+        self._vertex_shape = vertex_shape
+        self._contact_shapes = np.union1d(vertex_shape[vertex_shape >= 0], np.asarray(self._planes[2], np.int32))
         # the external accelerations: one row per free particle, then four per dynamic body (p and the rows of A)
         free = np.flatnonzero(~self._fixed_particle).astype(np.int32)
         dynamic = np.flatnonzero(~self._kinematic_body).astype(np.int32)
@@ -3016,6 +3428,33 @@ class SolverIPC(SolverBase):
             for g in self._uipc_warp.arrays.stitch_groups(self._engine)
         ]
         self._find_body_stiffness()
+        self._make_contact_export()
+
+    def _make_contact_export(self) -> None:
+        """libuipc-warp's ``ContactForces`` of the engine and what the contact rows read besides it, once a container
+        requested ``CONTACT_F`` (class docstring, **Contact output**): at the request and whenever the engine is built
+        again, outside any capture. None otherwise, and for a model whose contact holds no shape, which has no rows."""
+        self._contact_export = None
+        if not self._contact_output or self._engine is None or len(self._contact_shapes) == 0:
+            return
+        device = self.model.device
+        self._contact_export = self._uipc_warp.arrays.ContactForces(self._engine)
+        self._contact_vertex_shape = wp.array(self._vertex_shape, dtype=wp.int32, device=device)
+        P, N, shapes = self._planes
+        n_planes = max(len(shapes), 1)
+        self._contact_plane_shape = wp.array(
+            np.asarray(shapes, np.int32) if len(shapes) else np.full(1, -1, np.int32), dtype=wp.int32, device=device
+        )
+        self._contact_plane_P = wp.array(np.asarray(P, np.float64).reshape(-1, 3), dtype=wp.vec3d, device=device)
+        self._contact_plane_N = wp.array(np.asarray(N, np.float64).reshape(-1, 3), dtype=wp.vec3d, device=device)
+        if not len(shapes):
+            self._contact_plane_P = wp.zeros(n_planes, dtype=wp.vec3d, device=device)
+            self._contact_plane_N = wp.zeros(n_planes, dtype=wp.vec3d, device=device)
+        self._no_transform = wp.zeros(1, dtype=wp.transform, device=device)
+        self._no_vec3 = wp.zeros(1, dtype=wp.vec3, device=device)
+        records = self._contact_export.capacity
+        blocks = max(1, min(-(-records // _CONTACT_ROW_BLOCK), 4 * device.sm_count))
+        self._contact_threads = blocks * _CONTACT_ROW_BLOCK
 
     def _find_body_stiffness(self) -> None:
         """With the default ``body_kappa``: the engine's group of orthogonality potentials, whose stiffness array a
@@ -3379,6 +3818,13 @@ class SolverIPC(SolverBase):
                     self._obstacle_shapes.append(s)
                 else:
                     meshes[b].append((v, f, s))
+        # the shape of every surface vertex of a body, in the order of its parts (the contact rows of CONTACT_F)
+        self._body_vertex_shape = [
+            np.concatenate([np.full(len(v), s, np.int32) for v, _, s in meshes[b]])
+            if meshes[b]
+            else np.zeros(0, np.int32)
+            for b in range(model.body_count)
+        ]
 
         mass, first, second = self._body_mass_moments(stacklevel=5)
         # kinematic_motion="aim": the kinematic bodies with colliding shapes, which move toward their aims
@@ -3635,8 +4081,9 @@ class SolverIPC(SolverBase):
         *,
         observables: SolverBase.Observables | None = None,
     ) -> None:
-        self.validate_observables(observables)
+        self.validate_observables(observables, contacts)
         if self._engine is None:
+            self._write_contacts(observables, None)  # no particles and no bodies: no contact
             return
         if control is None:
             control = self._control_of_model()
@@ -3655,12 +4102,12 @@ class SolverIPC(SolverBase):
         else:
             status = self._advance_eager(dt)
             if status.failed:
-                self._write_observables(observables)
+                self._write_observables(observables, state_out)
                 self._forget_written()  # the engine holds the failed solve: the next step takes state_in
                 raise RuntimeError(self._failure(status))
         self._shift_joint_history()
         self._store(state_in.body_q, state_in.body_qd, state_out)
-        self._write_observables(observables)
+        self._write_observables(observables, state_out)
 
     def _control_of_model(self) -> Control:
         """The control of a step given none: the model's own control inputs, ``model.control(clone_variables=False)``
@@ -4030,8 +4477,8 @@ class SolverIPC(SolverBase):
         loop = old.solver.pcg.loop
         forces = None if self._forces is None else self._forces.a
         aims = None if self._aim_group is None else self._aim_group
-        # release the old engine before the new one allocates
-        self._engine = self._frame_graph = self._forces = old = None
+        # release the old engine before the new one allocates (the contact export holds it too)
+        self._engine = self._frame_graph = self._forces = self._contact_export = old = None
         self._make_engine(capacity)
         self._engine.load_state(**start)
         for e, group_state in zip(self._engine.elements, kept, strict=True):
@@ -4063,9 +4510,10 @@ class SolverIPC(SolverBase):
             "Surfaces must start apart (outside their contact thickness), and the state must stay finite."
         )
 
-    def _write_observables(self, observables: SolverBase.Observables | None) -> None:
+    def _write_observables(self, observables: SolverBase.Observables | None, state_out: State | None) -> None:
         if observables is None:
             return
+        self._write_contacts(observables, state_out)
         status = observables.status if observables.is_requested(self.ObservableKind.STATUS) else None
         residual = (
             observables.solver_residual if observables.is_requested(SolverBase.ObservableKind.SOLVER_RESIDUAL) else None
@@ -4093,6 +4541,72 @@ class SolverIPC(SolverBase):
                 self._residual_scratch if residual is None else residual,
             ],
             device=self.model.device,
+        )
+
+    def _write_contacts(self, observables: SolverBase.Observables | None, state_out: State | None) -> None:
+        """With ``CONTACT_F`` requested: the solver's contact terms of the step into the step's ``Contacts``, one row
+        per term with a force, and their forces into ``contact_f`` (class docstring, **Contact output**), on the
+        device. The counts and the forces are zeroed first; a step that failed has no rows."""
+        if observables is None or not observables.is_requested(SolverBase.ObservableKind.CONTACT_F):
+            return
+        contacts, contact_f = observables.contacts, observables.contact_f
+        contacts.rigid_contact_count.zero_()
+        contacts.soft_contact_count.zero_()
+        contact_f.zero_()
+        export = self._contact_export
+        if export is None or state_out is None:
+            return
+        export.update()
+        model = self.model
+        body_q = state_out.body_q if model.body_count and state_out.body_q is not None else self._no_transform
+        body_com = model.body_com if model.body_count else self._no_vec3
+        wp.launch(
+            _contact_rows,
+            self._contact_threads,
+            inputs=[
+                export.vertices,
+                export.forces,
+                export.counts,
+                export.segment_offsets,
+                self._contact_threads,
+                self._engine.vm.x,
+                model.particle_count,
+                self._contact_vertex_shape,
+                self._contact_plane_shape,
+                self._contact_plane_P,
+                self._contact_plane_N,
+                model.shape_body,
+                model.shape_margin,
+                body_q,
+                body_com,
+                contacts.rigid_contact_max,
+                contacts.soft_contact_max,
+            ],
+            outputs=[
+                contacts.rigid_contact_count,
+                contacts.rigid_contact_shape0,
+                contacts.rigid_contact_shape1,
+                contacts.rigid_contact_point0,
+                contacts.rigid_contact_point1,
+                contacts.rigid_contact_normal,
+                contacts.rigid_contact_margin0,
+                contacts.rigid_contact_margin1,
+                contacts.rigid_contact_offset0,
+                contacts.rigid_contact_offset1,
+                contacts.rigid_contact_surface_velocity,
+                contacts.soft_contact_count,
+                contacts.soft_contact_shape,
+                contacts.soft_contact_indices,
+                contacts.soft_contact_barycentric,
+                contacts.soft_contact_particle,
+                contacts.soft_contact_body_pos,
+                contacts.soft_contact_body_vel,
+                contacts.soft_contact_normal,
+                contacts.soft_contact_rigid_indices,
+                contact_f,
+            ],
+            block_dim=_CONTACT_ROW_BLOCK,
+            device=model.device,
         )
 
     def grow(self) -> None:
