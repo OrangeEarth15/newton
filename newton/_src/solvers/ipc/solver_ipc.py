@@ -1160,10 +1160,6 @@ class _ContactElements:
         return len(self.enabled)
 
 
-# libuipc-warp's engine refuses contact tables of more elements (a dense mask of contact x subscene elements)
-_MAX_CONTACT_ELEMENTS = 2048
-
-
 def _filter_classes(world: np.ndarray, filters: np.ndarray, ns: int) -> np.ndarray:
     """A key for every shape in a filter pair (-1 for the other shapes) that the copies of the shape in replicated
     worlds share: its offset in its world (a global shape: ``-1 - index``) and the offsets of its filter partners,
@@ -1198,7 +1194,8 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
     dynamic body, on a kinematic body (``_kinematic_bodies``), or static; the pairs of two shapes that are each
     kinematic or static are disabled, and ``Model.shape_contact_pairs`` less those pairs is the set compared. Raises
     ``NotImplementedError`` when the shape pairs the elements enable on different bodies are not exactly that set (a
-    pair array assigned to the model), or when there are more elements, times the subscenes, than the engine takes.
+    pair array assigned to the model). The engine tests the elements' table and the subscenes' table apart, so their
+    sizes are not multiplied; it refuses what it cannot hold itself, naming the sizes.
     """
     ns, n_particles = model.shape_count, model.particle_count
     shape_element = np.full(ns, -1, np.int64)
@@ -1246,14 +1243,6 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
         classes = len(first)
         rep = colliding[first[order]]  # one shape of each class
     count = 1 + classes + (3 if n_particles else 0)
-    subscenes = 1 if worlds is None else worlds.count
-    if count * subscenes > _MAX_CONTACT_ELEMENTS:
-        detail = f" times {subscenes} subscenes (the worlds and the global one)" if worlds is not None else ""
-        raise NotImplementedError(
-            f"SolverIPC needs {count} contact elements for this model (one per class of shapes that collide alike, "
-            f"one per shape in a filter pair){detail}, more than libuipc-warp's engine takes "
-            f"({_MAX_CONTACT_ELEMENTS})."
-        )
     enabled = np.zeros((count, count), bool)
     mu = np.zeros((count, count))
     shapes = slice(1, 1 + classes)
@@ -1770,7 +1759,8 @@ class SolverIPC(SolverBase):
     :attr:`~newton.Model.shape_material_mu`, of a particle and a shape the mean
     of :attr:`~newton.Model.soft_contact_mu` and the shape's, and of two
     particles :attr:`~newton.Model.particle_mu`, as in Newton's semi-implicit,
-    Featherstone and XPBD solvers. The engine takes at most 2048 elements.
+    Featherstone and XPBD solvers. The engine tests the table of the elements
+    and that of the worlds (see **Worlds**) apart, as libuipc does.
 
     Contact thickness, libuipc's distance at which the barrier diverges: a
     free particle is a sphere of its :attr:`~newton.Model.particle_radius`, so
@@ -1895,8 +1885,9 @@ class SolverIPC(SolverBase):
     (libuipc-warp's requests per subscene; libuipc discards friction for a
     whole scene); with ``adaptive_kappa`` the stiffness range is that of the
     whole scene. A model with content in one local world is solved as without
-    the option. The engine takes at most 2048 contact elements times
-    subscenes.
+    the option. The engine takes up to 32,768 subscenes, and contact elements
+    times the subscene count rounded up to a power of two below :math:`2^{31}`;
+    the start check forms no pair of parts of two worlds.
 
     **Kinematic bodies.** By default (``kinematic_motion="jump"``) a
     kinematic body is a fixed affine body whose pose the solver writes from
@@ -2676,19 +2667,21 @@ class SolverIPC(SolverBase):
         reports, and surfaces that cross without such a pair (an edge through a triangle, away from its vertices) step
         on with the barrier keeping them crossed. As libuipc's sanity check does at init, this tests the model's state
         once, without the surfaces that never move (static shapes, kinematic particles and bodies), whose contact the
-        solve skips, and without the pairs whose contact elements do not collide. The gap of a pair is its distance
-        less its contact thickness, the sum of its two primitives' thicknesses, each that of its vertices (a free
-        particle's radius, a shape's margin, the ``thickness`` of cloth and tetrahedra). Every contact point that moves
-        is tested against every half plane. Triangle meshes and particles are tested part pair by part pair, a part
-        being a contact body's primitives in one contact element, with the particles on no cloth or tetrahedron taken
-        together per element and also tested among themselves: for the pairs of parts whose bounding boxes come within
-        their thickness of each other, libuipc-warp's brute-force ``SurfaceChecker`` counts the edge-triangle crossings
-        and finds the smallest gap over the point-triangle, point-edge, edge-edge and point-point pairs. A gap above
-        0, also inside ``d_hat``, is a valid start, unless it is within a few float32 steps of 0: Newton's positions
-        are float32, and surfaces placed in touching contact come out that far apart. Not tested: the inside of a body
-        (contact ignores crossings inside a rigid body made of overlapping shapes, and inside a cloth or a soft body the
-        checker cannot tell the nearly coplanar triangles of a flat sheet from crossing ones). A pair of parts of more
-        than ``_START_CHECK_PAIRS`` primitive pairs is skipped with a warning.
+        solve skips, and without the pairs whose contact elements do not collide or whose subscenes do not interact (the
+        two tables tested apart, as the engine tests them). The gap of a pair is its distance less its contact
+        thickness, the sum of its two primitives' thicknesses, each that of its vertices (a free particle's radius, a
+        shape's margin, the ``thickness`` of cloth and tetrahedra). Every contact point that moves is tested against
+        every half plane. Triangle meshes and particles are tested part pair by part pair, a part being a contact body's
+        primitives in one contact element and one subscene, with the particles on no cloth or tetrahedron taken together
+        per element and subscene and also tested among themselves: for the pairs of parts whose subscenes interact (with
+        ``coupled_worlds`` no pair of two worlds is formed) and whose bounding boxes come within their thickness of each
+        other, libuipc-warp's brute-force ``SurfaceChecker`` counts the edge-triangle crossings and finds the smallest
+        gap over the point-triangle, point-edge, edge-edge and point-point pairs. A gap above 0, also inside ``d_hat``,
+        is a valid start, unless it is within a few float32 steps of 0: Newton's positions are float32, and surfaces
+        placed in touching contact come out that far apart. Not tested: the inside of a body (contact ignores crossings
+        inside a rigid body made of overlapping shapes, and inside a cloth or a soft body the checker cannot tell the
+        nearly coplanar triangles of a flat sheet from crossing ones). A pair of parts of more than
+        ``_START_CHECK_PAIRS`` primitive pairs is skipped with a warning.
         """
         eng = self._engine
         if eng is None:
@@ -2718,11 +2711,12 @@ class SolverIPC(SolverBase):
         group = body.copy()
         lone_group = int(group.max()) + 1
         group[lone] = lone_group
-        # parts: the groups split by contact element, compared only where their elements collide
-        cid, enabled = self._cids, self._enabled
-        key = group * len(enabled) + cid
+        # parts: the groups split by contact element and subscene, compared only where both tables let them collide
+        cid, sid, enabled, subscenes = self._cids, self._scids, self._enabled, self._subscene_enabled
+        n_el, n_sub = len(enabled), len(subscenes)
+        key = (group * n_el + cid) * n_sub + sid
         ids, point_group = np.unique(key[points], return_inverse=True)
-        ids_group, ids_element = ids // len(enabled), ids % len(enabled)
+        ids_group, ids_element, ids_subscene = ids // (n_el * n_sub), ids // n_sub % n_el, ids % n_sub
         # Newton's positions are float32: surfaces placed in touching contact come out up to a few float32 steps
         # apart, which the barrier would take as a valid, nearly singular start. Such a gap counts as contact.
         slack = 4.0 * float(np.spacing(np.float32(np.abs(x[points]).max())))
@@ -2740,6 +2734,7 @@ class SolverIPC(SolverBase):
             t = thickness[moving][:, None] + margin
             gap = d - t
             meets = enabled[cid[moving][:, None], self._plane_cids[None, :]]
+            meets &= subscenes[sid[moving][:, None], self._plane_scids[None, :]]
             owner = point_group[moves]
             for j in range(len(P)):
                 hit = np.flatnonzero(meets[:, j] & (gap[:, j] <= slack))
@@ -2774,17 +2769,20 @@ class SolverIPC(SolverBase):
                 ~still[rows[order]].all(axis=1),
                 np.searchsorted(part_of[order], np.arange(len(ids) + 1)),
             )
-        pairs = self._near_boxes(lo, hi, reach, slack)
-        # the particles on no surface meet each other where their element meets itself
-        lone_parts = np.flatnonzero((ids_group == lone_group) & enabled[ids_element, ids_element])
+        pairs = self._near_parts(lo, hi, reach, slack, ids_subscene)
+        # the particles on no surface meet each other where their element and their subscene meet themselves
+        lone_parts = np.flatnonzero(
+            (ids_group == lone_group) & enabled[ids_element, ids_element] & subscenes[ids_subscene, ids_subscene]
+        )
         pairs = np.concatenate([pairs, np.stack([lone_parts, lone_parts], axis=1)])
-        # not tested: two parts that never move, the inside of a body, two parts whose elements do not collide (such
-        # as worlds that overlap in space)
+        # not tested: two parts that never move, the inside of a body, two parts whose elements do not collide or
+        # whose subscenes do not interact (worlds that overlap in space)
         a, b = pairs[:, 0], pairs[:, 1]
         pairs = pairs[
             ~(all_still[a] & all_still[b])
             & ~((a != b) & (ids_group[a] == ids_group[b]))
             & enabled[ids_element[a], ids_element[b]]
+            & subscenes[ids_subscene[a], ids_subscene[b]]
         ]
         device = self.model.device
         arrays = (wp.array(body.astype(np.int32), device=device), wp.array(thickness, dtype=wp.float64, device=device))
@@ -2833,14 +2831,54 @@ class SolverIPC(SolverBase):
             f"({t:.6g} m{rounding}){more}. The barrier needs a gap larger than the thickness at the start: {fix}."
         )
 
+    def _near_parts(self, lo: np.ndarray, hi: np.ndarray, reach: np.ndarray, slack: float, sub: np.ndarray):
+        """The pairs ``(a, b)``, ``a < b``, of the parts ``_near_boxes`` finds, but where the subscene table has the
+        form of separate worlds (``coupled_worlds``): there no pair of two worlds is formed, which with worlds at one
+        place would be every pair of their parts. The parts of the subscenes that meet every subscene (the global
+        entities) are tested against every part, those of the others in one band per subscene (``_near_boxes``'s
+        ``band``). Other tables keep every near pair, which the caller tests against the table."""
+        table = self._subscene_enabled
+        meets_all = table.all(axis=1)
+        diagonal = np.diagonal(table)
+        separate = np.array_equal(
+            table, meets_all[:, None] | meets_all[None, :] | (np.eye(len(table), dtype=bool) & diagonal[:, None])
+        )
+        if len(table) == 1 or not separate:
+            return self._near_boxes(lo, hi, reach, slack)
+        wide = np.flatnonzero(meets_all[sub])
+        local = np.flatnonzero(~meets_all[sub])
+        out = [local[self._near_boxes(lo[local], hi[local], reach[local], slack, band=sub[local])]]
+        chunk = max(1, 1_000_000 // max(len(lo), 1))  # the wide parts' tests against every part, a block at a time
+        for k in range(0, len(wide), chunk):
+            a = wide[k : k + chunk]
+            apart = np.maximum(lo[None, :, :] - hi[a][:, None, :], lo[a][:, None, :] - hi[None, :, :]).max(axis=2)
+            i, b = np.nonzero(apart <= reach[a][:, None] + reach[None, :] + slack)
+            b_wide = meets_all[sub[b]]
+            keep = (a[i] != b) & (~b_wide | (a[i] < b))  # a pair of two wide parts once
+            out.append(np.stack([np.minimum(a[i], b), np.maximum(a[i], b)], axis=1)[keep])
+        return np.concatenate(out).reshape(-1, 2)
+
     @staticmethod
-    def _near_boxes(lo: np.ndarray, hi: np.ndarray, reach: np.ndarray, slack: float) -> np.ndarray:
+    def _near_boxes(
+        lo: np.ndarray, hi: np.ndarray, reach: np.ndarray, slack: float, band: np.ndarray | None = None
+    ) -> np.ndarray:
         """The pairs ``(a, b)``, ``a < b``, of boxes ``[lo, hi]`` that come within ``reach[a] + reach[b] + slack`` of
-        each other, by sweep and prune along the axis on which the boxes spread most."""
+        each other, by sweep and prune along the axis on which the boxes spread most. With ``band`` (an integer per
+        box) only boxes of one band pair: the sweep runs over the bands laid end to end along that axis, each farther
+        from the next than any box reaches."""
+        if len(lo) == 0:
+            return np.zeros((0, 2), np.int64)
         axis = int(np.argmax(np.ptp(lo + hi, axis=0)))
-        order = np.argsort(lo[:, axis], kind="stable")
-        start = lo[order, axis]
-        end = np.searchsorted(start, hi[order, axis] + reach[order] + reach.max() + slack, side="right")
+        key_lo, key_hi = lo[:, axis], hi[:, axis]
+        pad = 0.0
+        if band is not None:  # the gap between two bands exceeds the reach of any box by 1 (m)
+            width = float(key_hi.max() - key_lo.min()) + 2.0 * float(reach.max()) + slack + 1.0
+            shift = (band - band.min()).astype(np.float64) * width
+            key_lo, key_hi = key_lo + shift, key_hi + shift
+            pad = 4.0 * float(np.spacing(np.abs(key_hi).max()))  # the rounding of the shifted ends
+        order = np.argsort(key_lo, kind="stable")
+        start = key_lo[order]
+        end = np.searchsorted(start, key_hi[order] + reach[order] + reach.max() + slack + pad, side="right")
         count = np.maximum(end - np.arange(len(order)) - 1, 0)
         first = np.repeat(np.arange(len(order)), count)
         second = first + 1 + np.arange(count.sum()) - np.repeat(np.cumsum(count) - count, count)
@@ -2951,24 +2989,22 @@ class SolverIPC(SolverBase):
         )
         # the Newton and PCG iterations of the captured steps since the last graph_outdated()
         self._iterations = wp.zeros(2, dtype=wp.int64, device=device)
-        # what the start check needs of the tabular: the element of every vertex and half plane, and their pairs
+        # what the start check needs of the tabular, its two tables apart as the engine tests them: the contact
+        # element and the subscene of every vertex and half plane, the elements' mask and the subscenes' mask
         self._vertex_thickness = np.asarray(inputs["thickness"], np.float64)
         tabular = inputs["contact_tabular"]
+        n, n_planes = len(inputs["x"]), len(inputs["plane_P"])
         if tabular is None:
-            self._cids, self._plane_cids = (
-                np.zeros(len(inputs["x"]), np.int64),
-                np.zeros(len(inputs["plane_P"]), np.int64),
-            )
-            self._enabled = np.ones((1, 1), bool)
+            self._cids, self._scids = np.zeros(n, np.int64), np.zeros(n, np.int64)
+            self._plane_cids, self._plane_scids = np.zeros(n_planes, np.int64), np.zeros(n_planes, np.int64)
+            self._enabled, self._subscene_enabled = np.ones((1, 1), bool), np.ones((1, 1), bool)
         else:
-            # the engine's ids, contact element * S + subscene, and the product of the two masks: with one subscene
-            # the contact elements and their mask
-            n_sub = len(tabular["subscene_enabled"])
-            self._cids = np.asarray(tabular["cids"], np.int64) * n_sub + np.asarray(tabular["scids"], np.int64)
-            self._plane_cids = np.asarray(tabular["plane_cids"], np.int64) * n_sub + np.asarray(
-                tabular["plane_scids"], np.int64
+            self._cids, self._scids = (np.asarray(tabular[k], np.int64) for k in ("cids", "scids"))
+            self._plane_cids, self._plane_scids = (
+                np.asarray(tabular[k], np.int64) for k in ("plane_cids", "plane_scids")
             )
-            self._enabled = np.kron(np.asarray(tabular["enabled"]) != 0, np.asarray(tabular["subscene_enabled"]) != 0)
+            self._enabled = np.asarray(tabular["enabled"]) != 0
+            self._subscene_enabled = np.asarray(tabular["subscene_enabled"]) != 0
         if self.model.body_count and self._config.contact_constitution != "al-ipc":
             # notify_model_changed may have changed them since the scene was laid out (AL-IPC: it builds it again)
             self._engine.set_dyadic_mass(*self._engine_dyadic(self._dyadic))

@@ -6,6 +6,7 @@ import importlib
 import importlib.util
 import pathlib
 import re
+import types
 import unittest
 import warnings
 from unittest import mock
@@ -2227,7 +2228,7 @@ def _pair_subscenes(solver):
     """The subscenes of the vertices of every stored, candidate and active simplex pair of the solver's last step, one
     array per list, padded with -1 to four vertices."""
     f = solver._engine.simplex
-    sub = solver._cids % solver._worlds.count  # the engine's ids: contact element * S + subscene
+    sub = solver._scids  # the subscene of every vertex
     sv, cv = f.info.surf_verts.numpy(), f.info.codim_verts.numpy()
     ed, tr = f.info.edges.numpy().reshape(-1, 2), f.info.tris.numpy().reshape(-1, 3)
     out = []
@@ -2387,15 +2388,100 @@ def test_coupled_worlds_fall_with_their_gravity(test, device):
     np.testing.assert_allclose(traj, expected, rtol=0.0, atol=1e-5)
 
 
-def test_coupled_worlds_element_limit(test, device):
-    """More contact elements times subscenes than libuipc-warp's engine takes are refused, naming both."""
-    builder = newton.ModelBuilder()
+def test_coupled_worlds_beyond_the_old_element_limit(test, device):
+    """1100 worlds at one place, each a box and a particle dropped onto the global ground: five contact elements times
+    1101 subscenes, beyond the 2048 that the engine took before it tested the two tables apart. The solver builds, its
+    start check keeps the two tables (no table of their product), and in 20 steps every box and particle lands on the
+    ground in its own world: no stored, candidate or active pair joins two worlds."""
+    worlds = 1100
     world = newton.ModelBuilder()
-    world.add_particle(wp.vec3(0.0, 0.0, 1.0), wp.vec3(0.0, 0.0, 0.0), 1.0, radius=0.01)
-    builder.replicate(world, 1100)
-    model = builder.finalize(device=device)
-    with test.assertRaisesRegex(NotImplementedError, r"4 contact elements .* times 1101 subscenes"):
-        newton.solvers.SolverIPC(model, coupled_worlds=True)
+    _box_body(world, (0.0, 0.0, 0.07), (0.05, 0.05, 0.05))
+    world.add_particle(wp.vec3(0.2, 0.0, 0.03), wp.vec3(0.0, 0.0, 0.0), 0.01, radius=0.01)
+    scene = newton.ModelBuilder()
+    scene.add_ground_plane()
+    scene.replicate(world, worlds)
+    model = scene.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model, coupled_worlds=True)
+    n_el, n_sub = len(solver._enabled), len(solver._subscene_enabled)
+    test.assertEqual(n_sub, worlds + 1)
+    test.assertGreater(n_el * n_sub, 2048)
+    test.assertEqual(solver._enabled.shape, (n_el, n_el))
+    s0, s1 = model.state(), model.state()
+    for _ in range(20):
+        solver.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+        for sub in _pair_subscenes(solver):
+            test.assertEqual(_pairs_across_worlds(sub)[0], 0)
+    z_box, z_particle = s0.body_q.numpy()[:, 2], s0.particle_q.numpy()[:, 2]
+    test.assertGreater(z_box.min(), 0.05)
+    test.assertLess(z_box.max(), 0.05 + D_HAT)
+    test.assertGreater(z_particle.min(), 0.01)
+    test.assertLess(z_particle.max(), 0.01 + D_HAT)
+
+
+def test_start_check_of_many_worlds(test, device):
+    """5000 worlds of a particle at one place over the global ground: the start check keeps the contact elements' table
+    and the subscenes' apart (their product would hold 6.3e8 entries) and forms no pair of two worlds, whose particles
+    all overlap; the model is accepted. With world 3172's particle placed through the ground it is refused, naming
+    that particle."""
+    worlds = 5000
+    for inside in (False, True):
+        world = newton.ModelBuilder()
+        world.add_particle(wp.vec3(0.0, 0.0, 0.05), wp.vec3(0.0, 0.0, 0.0), 0.01, radius=0.01)
+        scene = newton.ModelBuilder()
+        scene.add_ground_plane()
+        scene.replicate(world, worlds)
+        model = scene.finalize(device=device)
+        if inside:
+            q = model.particle_q.numpy()
+            q[3172, 2] = 0.005
+            model.particle_q.assign(q)
+            with test.assertRaisesRegex(ValueError, r"particle 3172 and plane shape 0 start"):
+                newton.solvers.SolverIPC(model, coupled_worlds=True)
+            continue
+        solver = newton.solvers.SolverIPC(model, coupled_worlds=True)
+        n_el = len(solver._enabled)
+        test.assertEqual(solver._enabled.shape, (n_el, n_el))
+        test.assertEqual(solver._subscene_enabled.shape, (worlds + 1, worlds + 1))
+        test.assertGreater(n_el * (worlds + 1), 2048)
+
+
+def test_near_parts_forms_no_pair_of_two_worlds(test, device):
+    """The sweep of the start check against a brute-force test of every pair of boxes, on random boxes in 40 worlds
+    at one place and a few global ones, with subscene tables of the form of separate worlds (some worlds meeting
+    themselves, some not, the global subscene meeting all) and one of another form: every near pair the table lets
+    meet, each once, and with the form of separate worlds no pair of two worlds (the caller tests the pairs within a
+    world against the table)."""
+    del device
+    rng = np.random.default_rng(7)
+    solver = newton.solvers.SolverIPC
+    for trial in range(6):
+        n_sub = 41
+        table = np.eye(n_sub, dtype=bool) & (rng.uniform(size=n_sub) < 0.8)[:, None]
+        table[0, :] = table[:, 0] = True
+        if trial == 5:  # two worlds that meet: not the form of separate worlds, every near pair kept
+            table[3, 4] = table[4, 3] = True
+        n = 600
+        sub = np.where(rng.uniform(size=n) < 0.05, 0, rng.integers(1, n_sub, n))
+        centre = rng.uniform(-0.2, 0.2, (n, 3))
+        half = rng.uniform(0.0, 0.03, (n, 3))
+        lo, hi = centre - half, centre + half
+        reach = rng.uniform(0.0, 0.01, n)
+        slack = 1e-6
+        owner = types.SimpleNamespace(_subscene_enabled=table, _near_boxes=solver._near_boxes)
+        got = solver._near_parts(owner, lo, hi, reach, slack, sub)
+        a, b = np.triu_indices(n, 1)
+        apart = np.maximum(lo[b] - hi[a], lo[a] - hi[b]).max(axis=1)
+        near = apart <= reach[a] + reach[b] + slack
+        brute = {(int(i), int(j)) for i, j in zip(a[near], b[near], strict=True)}
+        meets = {(i, j) for i, j in brute if table[sub[i], sub[j]]}
+        found = {(int(i), int(j)) for i, j in got}
+        test.assertEqual(len(found), len(got))  # no pair twice
+        test.assertTrue(meets <= found, trial)
+        test.assertTrue(found <= brute, trial)
+        if trial < 5:  # no pair of two worlds is formed: those the table refuses are pairs within a world
+            test.assertTrue(all(sub[i] == sub[j] for i, j in found - meets), trial)
+            test.assertTrue(all(sub[i] == 0 or sub[j] == 0 or sub[i] == sub[j] for i, j in found), trial)
 
 
 # ---------------------------------------------------------------------------- joints
@@ -2432,7 +2518,7 @@ def test_coupled_worlds_with_attachments(test, device):
         if n > 1:
             layout = solver._scene.layout()
             anchors = np.arange(layout.body_anchor_offsets[0], layout.body_anchor_offsets[-1])
-            np.testing.assert_array_equal(solver._cids[anchors] % solver._worlds.count, [1, 2, 3])
+            np.testing.assert_array_equal(solver._scids[anchors], [1, 2, 3])
         rows = _world_rows(model, n)
         s0, s1 = model.state(), model.state()
         q, iterations = [], []
@@ -4635,7 +4721,9 @@ for name, func in (
     ("test_coupled_worlds_share_filter_classes", test_coupled_worlds_share_filter_classes),
     ("test_coupled_worlds_status_in_every_world", test_coupled_worlds_status_in_every_world),
     ("test_coupled_worlds_fall_with_their_gravity", test_coupled_worlds_fall_with_their_gravity),
-    ("test_coupled_worlds_element_limit", test_coupled_worlds_element_limit),
+    ("test_coupled_worlds_beyond_the_old_element_limit", test_coupled_worlds_beyond_the_old_element_limit),
+    ("test_start_check_of_many_worlds", test_start_check_of_many_worlds),
+    ("test_near_parts_forms_no_pair_of_two_worlds", test_near_parts_forms_no_pair_of_two_worlds),
     ("test_coupled_worlds_with_attachments", test_coupled_worlds_with_attachments),
     ("test_coupled_worlds_with_kinematic_aims", test_coupled_worlds_with_kinematic_aims),
     ("test_reset_of_one_world_keeps_the_others", test_reset_of_one_world_keeps_the_others),
