@@ -38,7 +38,7 @@ from newton import (
     StateFlags,
     eval_fk,
 )
-from newton.math import velocity_at_point
+from newton.math import quat_decompose, velocity_at_point
 from newton.solvers import SolverBase
 
 # typing.override from Python 3.12, typing_extensions' on Python 3.11, else no check, as Newton takes it
@@ -720,6 +720,197 @@ def _store_joints(
         written[i + k] = joint_q[i + k]
 
 
+@wp.func
+def _d6_angular_axes(axis_0: wp.vec3, axis_1: wp.vec3, axis_2: wp.vec3, q0: float, q1: float):
+    """The three angular axes of a D6 joint at its coordinates ``(q0, q1)``, in its parent joint frame: ``axis_0`` and
+    each later axis carried by the rotations before it (Newton's ``transform_3d_rotational_axes`` in
+    ``newton._src.sim.articulation``, which has no public name; copied unchanged)."""
+    q_0 = wp.quat_from_axis_angle(axis_0, q0)
+
+    axis_1_w = wp.quat_rotate(q_0, axis_1)
+    q_1 = wp.quat_from_axis_angle(axis_1_w, q1)
+
+    axis_2_w = wp.quat_rotate(q_1 * q_0, axis_2)
+
+    return axis_0, axis_1_w, axis_2_w
+
+
+@wp.func
+def _d6_angular_coordinates(
+    axis_0: wp.vec3, axis_1: wp.vec3, axis_2: wp.vec3, q_p: wp.quat, q_c: wp.quat, w_err: wp.vec3
+):
+    """The three angular coordinates and rates of a D6 joint from its frames' rotations ``q_p``, ``q_c`` and the
+    bodies' angular velocity difference ``w_err``, as ``newton.eval_ik`` computes them (Newton's
+    ``invert_3d_rotational_dofs`` in ``newton._src.sim.articulation``, which has no public name; copied unchanged):
+    the XYZ Euler angles of the relative rotation in the right-handed basis ``(axis_0, axis_1, axis_0 x axis_1)``,
+    the third negated for a left-handed triple."""
+    axis_2_rh = wp.cross(axis_0, axis_1)
+    s = float(1.0)
+    if wp.dot(axis_2_rh, axis_2) < 0.0:
+        s = float(-1.0)
+
+    q_off = wp.quat_from_matrix(wp.matrix_from_cols(axis_0, axis_1, axis_2_rh))
+    q_pc = wp.quat_inverse(q_off) * wp.quat_inverse(q_p) * q_c * q_off
+
+    # decompose to a compound rotation each axis in the canonical right-handed basis
+    angles = quat_decompose(q_pc)
+
+    # find rotation axes (canonical right-handed basis)
+    local_0 = wp.quat_rotate(q_off, wp.vec3(1.0, 0.0, 0.0))
+    local_1 = wp.quat_rotate(q_off, wp.vec3(0.0, 1.0, 0.0))
+    local_2 = wp.quat_rotate(q_off, wp.vec3(0.0, 0.0, 1.0))
+
+    a0 = local_0
+    q_0 = wp.quat_from_axis_angle(a0, angles[0])
+
+    a1 = wp.quat_rotate(q_0, local_1)
+    q_1 = wp.quat_from_axis_angle(a1, angles[1])
+
+    a2 = wp.quat_rotate(q_1 * q_0, local_2)
+
+    # convert angular velocity to local space
+    w_err_p = wp.quat_rotate_inv(q_p, w_err)
+
+    # given joint axes and angular velocity error, solve for joint velocities in the canonical basis
+    c12 = wp.cross(a1, a2)
+    c02 = wp.cross(a0, a2)
+    c01 = wp.cross(a0, a1)
+
+    velocities = wp.vec3(
+        wp.dot(w_err_p, c12) / wp.dot(a0, c12),
+        wp.dot(w_err_p, c02) / wp.dot(a1, c02),
+        wp.dot(w_err_p, c01) / wp.dot(a2, c01),
+    )
+
+    # Map canonical-basis result back to the user's axes: rotation/velocity around axis_2 equals
+    # ``s`` times the same quantity around axis_2_rh (s = -1 iff the user's triple is left-handed).
+    return wp.vec3(angles[0], angles[1], s * angles[2]), wp.vec3(velocities[0], velocities[1], s * velocities[2])
+
+
+@wp.kernel
+def _store_d6_joints(
+    joints: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_X_p: wp.array[wp.transform],
+    joint_X_c: wp.array[wp.transform],
+    joint_axis: wp.array[wp.vec3],
+    joint_dof_dim: wp.array2d[wp.int32],
+    joint_q_start: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    joint_q: wp.array[wp.float32],
+    joint_qd: wp.array[wp.float32],
+    written: wp.array[wp.float32],
+):
+    """``joint_q`` and ``joint_qd`` of a D6 joint of three angular axes, with or without three linear ones, from the
+    bodies' state, as ``newton.eval_ik`` computes them: the projections of the joint frames' offset and of their
+    velocity difference on the linear axes, in the parent joint frame, then Newton's angular coordinates
+    (``_d6_angular_coordinates``); ``written`` keeps the positions."""
+    k = wp.tid()
+    j = joints[k]
+    p = joint_parent[j]
+    c = joint_child[j]
+    i = joint_q_start[j]
+    d = joint_qd_start[j]
+    lin = joint_dof_dim[j, 0]
+    X_wpj = joint_X_p[j]
+    w_p = wp.vec3()
+    if p >= 0:
+        X_wpj = body_q[p] * X_wpj
+        w_p = wp.spatial_bottom(body_qd[p])
+    X_wcj = body_q[c] * joint_X_c[j]
+    x_p = wp.transform_get_translation(X_wpj)
+    x_c = wp.transform_get_translation(X_wcj)
+    q_p = wp.transform_get_rotation(X_wpj)
+    q_c = wp.transform_get_rotation(X_wcj)
+    if lin > 0:
+        x_err = wp.quat_rotate_inv(q_p, x_c - x_p)
+        v_err = wp.quat_rotate_inv(
+            q_p,
+            _joint_point_velocity(c, body_q, body_qd, body_com, x_c)
+            - _joint_point_velocity(p, body_q, body_qd, body_com, x_p),
+        )
+        for a in range(lin):
+            joint_q[i + a] = wp.dot(x_err, joint_axis[d + a])
+            joint_qd[d + a] = wp.dot(v_err, joint_axis[d + a])
+    w_err = wp.spatial_bottom(body_qd[c]) - w_p
+    coords, rates = _d6_angular_coordinates(
+        joint_axis[d + lin], joint_axis[d + lin + 1], joint_axis[d + lin + 2], q_p, q_c, w_err
+    )
+    for a in range(3):
+        joint_q[i + lin + a] = coords[a]
+        joint_qd[d + lin + a] = rates[a]
+    for a in range(joint_q_start[j + 1] - i):
+        written[i + a] = joint_q[i + a]
+
+
+@wp.kernel
+def _d6_joint_wrenches(
+    joints: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_X_p: wp.array[wp.transform],
+    joint_X_c: wp.array[wp.transform],
+    joint_axis: wp.array[wp.vec3],
+    joint_dof_dim: wp.array2d[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_enabled: wp.array[wp.bool],
+    joint_f: wp.array[wp.float32],
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    wrench: wp.array[wp.spatial_vector],
+):
+    """The ``joint_f`` of a D6 joint of three angular axes, with or without three linear ones, as wrenches at the
+    centres of mass of its bodies: Featherstone's generalized forces, a force along the linear axes (in the parent
+    joint frame) on the child's joint frame origin, and the torque ``sum_k tau_k c_k`` of the angular coordinates,
+    ``c_k`` the dual basis of the angular axes that ``_d6_angular_axes`` carries to the bodies' pose (the covectors of
+    Newton's ``eval_angular_coordinates``, which map the angular velocity difference to the coordinates' rates). The
+    parent takes the reaction on the same line."""
+    k = wp.tid()
+    j = joints[k]
+    if not joint_enabled[j]:
+        return
+    p = joint_parent[j]
+    c = joint_child[j]
+    d = joint_qd_start[j]
+    lin = joint_dof_dim[j, 0]
+    X_wpj = joint_X_p[j]
+    if p >= 0:
+        X_wpj = body_q[p] * X_wpj
+    X_wcj = body_q[c] * joint_X_c[j]
+    q_p = wp.transform_get_rotation(X_wpj)
+    x_c = wp.transform_get_translation(X_wcj)
+    f = wp.vec3()
+    for a in range(lin):
+        f += joint_f[d + a] * wp.quat_rotate(q_p, joint_axis[d + a])
+    axis_0 = joint_axis[d + lin]
+    axis_1 = joint_axis[d + lin + 1]
+    axis_2 = joint_axis[d + lin + 2]
+    coords, _rates = _d6_angular_coordinates(
+        axis_0, axis_1, axis_2, q_p, wp.transform_get_rotation(X_wcj), wp.vec3(0.0)
+    )
+    a0, a1, a2 = _d6_angular_axes(axis_0, axis_1, axis_2, coords[0], coords[1])
+    a0 = wp.quat_rotate(q_p, a0)
+    a1 = wp.quat_rotate(q_p, a1)
+    a2 = wp.quat_rotate(q_p, a2)
+    # the dual basis of the carried axes, bounded near gimbal lock as Newton bounds it
+    det = wp.dot(a0, wp.cross(a1, a2))
+    inv_det = 1.0 / (wp.sign(det) * wp.max(wp.abs(det), 1.0e-4))
+    t = (
+        joint_f[d + lin] * wp.cross(a1, a2)
+        + joint_f[d + lin + 1] * wp.cross(a2, a0)
+        + joint_f[d + lin + 2] * wp.cross(a0, a1)
+    ) * inv_det
+    arm_c = x_c - wp.transform_point(body_q[c], body_com[c])
+    wp.atomic_add(wrench, c, wp.spatial_vector(f, t + wp.cross(arm_c, f)))
+    if p >= 0:
+        arm_p = x_c - wp.transform_point(body_q[p], body_com[p])
+        wp.atomic_sub(wrench, p, wp.spatial_vector(f, t + wp.cross(arm_p, f)))
+
+
 @wp.kernel
 def _copy_status(
     entries: wp.array[wp.int32],
@@ -1198,9 +1389,97 @@ def _default_d_hat(model: Model) -> float:
     return d_hat
 
 
-def _check_supported(model: Model, coupled_worlds: bool = False) -> None:
+@dataclass(frozen=True)
+class _JointOptions:
+    """The joints SolverIPC maps beyond revolute, prismatic, fixed, ball and free joints, on request (class
+    docstring, **Joints**): ``d6``, D6 joints that lock what one of libuipc's joints locks."""
+
+    d6: bool = False
+
+
+@dataclass(frozen=True)
+class _JointMap:
+    """How every joint of a model maps onto libuipc (``_map_joints``).
+
+    ``kind``: the joint type whose libuipc joint the joint becomes, REVOLUTE, PRISMATIC, FIXED or BALL, or FREE for
+    none. ``store``: the type ``_store_joints`` and ``_joint_wrenches`` take the joint for, its own but for a D6 joint:
+    that of its libuipc joint, or FIXED (skipped) for one whose coordinates and ``joint_f`` the D6 kernels take.
+    ``d6``: those joints, D6 joints of three angular axes, with or without three linear ones."""
+
+    kind: np.ndarray
+    store: np.ndarray
+    d6: np.ndarray
+    relabeled: bool  # whether a joint is stored as another type than its own
+
+
+# what libuipc's joints lock, by the (linear, angular) axes a D6 joint keeps free: all six (fixed), all but one
+# rotation (revolute), all but one translation (prismatic), the translations (ball) or nothing
+_D6_KINDS = {
+    (0, 0): JointType.FIXED,
+    (0, 1): JointType.REVOLUTE,
+    (1, 0): JointType.PRISMATIC,
+    (0, 3): JointType.BALL,
+    (3, 3): JointType.FREE,
+}
+
+
+def _orthonormal(axes: np.ndarray) -> bool:
+    """Whether the rows of ``axes`` are orthonormal (to float32's rounding)."""
+    return bool(np.abs(axes @ axes.T - np.eye(len(axes))).max() < 1.0e-5)
+
+
+def _map_joints(model: Model, options: _JointOptions) -> _JointMap:
+    """How every joint maps onto libuipc (``_JointMap``), or ``NotImplementedError`` for the first joint that does
+    not: a joint type libuipc has no joint for (``_UNMAPPED_JOINTS``), and without ``options.d6`` every D6 joint; with
+    it a D6 joint that locks other degrees of freedom than one of libuipc's joints does, or that takes Newton's
+    coordinates of three axes that are not orthonormal."""
+    joint_type = model.joint_type.numpy().astype(np.int32)
+    kind, store = joint_type.copy(), joint_type.copy()
+    supported = [int(t) for t in (JointType.FREE, JointType.REVOLUTE, JointType.PRISMATIC, JointType.FIXED)]
+    supported.append(int(JointType.BALL))
+    if options.d6:
+        supported.append(int(JointType.D6))
+    other = np.flatnonzero(~np.isin(joint_type, supported))
+    if len(other):
+        j = int(other[0])
+        t = JointType(int(joint_type[j]))
+        why = _UNMAPPED_JOINTS.get(t, "libuipc's affine-body joints are revolute, prismatic, fixed and ball joints")
+        if t == JointType.D6:
+            why += (
+                "; with enable_d6_joints=True SolverIPC takes a D6 joint that locks what one of them locks, or nothing"
+            )
+        raise NotImplementedError(f"SolverIPC does not simulate {t.name} joints (joint {j}): {why}.")
+    d6 = np.flatnonzero(joint_type == int(JointType.D6))
+    if len(d6):
+        dof_dim = model.joint_dof_dim.numpy()
+        qd_start = model.joint_qd_start.numpy()
+        axes = model.joint_axis.numpy().astype(np.float64).reshape(-1, 3)
+    for j in d6:
+        lin, ang = (int(n) for n in dof_dim[j])
+        t = _D6_KINDS.get((lin, ang))
+        if t is None:
+            raise NotImplementedError(
+                f"SolverIPC does not simulate the D6 joint {j}: its {lin} linear and {ang} angular axes lock "
+                f"{3 - lin} translations and {3 - ang} rotations, and libuipc's joints lock all six (fixed), all but "
+                "one rotation (revolute), all but one translation (prismatic), the translations (ball) or nothing."
+            )
+        if ang == 3:
+            s = int(qd_start[j])
+            for name, rows in (("linear", axes[s : s + lin]), ("angular", axes[s + lin : s + lin + ang])):
+                if len(rows) and not _orthonormal(rows):
+                    raise NotImplementedError(
+                        f"SolverIPC does not simulate the D6 joint {j}: its {name} axes are not orthogonal, which "
+                        "Newton's coordinates of a D6 joint of three axes assume."
+                    )
+        kind[j] = int(t)
+        store[j] = int(JointType.FIXED) if ang == 3 else int(t)
+    three = (d6[dof_dim[d6, 1] == 3] if len(d6) else d6).astype(np.int32)
+    return _JointMap(kind, store, three, bool(np.any(store != joint_type)))
+
+
+def _check_supported(model: Model, coupled_worlds: bool = False, joints: _JointOptions | None = None) -> None:
     """Reject model content the solver would otherwise accept and ignore; content in more than one world unless
-    ``coupled_worlds``."""
+    ``coupled_worlds``; joints as ``joints`` maps them (``_JointOptions``)."""
     if model.requires_grad:
         raise NotImplementedError("SolverIPC does not support gradients (model.requires_grad=True).")
     for name, count in (
@@ -1226,7 +1505,7 @@ def _check_supported(model: Model, coupled_worlds: bool = False) -> None:
     for name, activations in (("triangle", model.tri_activations), ("tetrahedron", model.tet_activations)):
         if activations is not None and len(activations) and np.any(activations.numpy() != 0.0):
             raise NotImplementedError(f"SolverIPC does not take {name} activations; the model has non-zero ones.")
-    _check_joints(model)
+    _check_joints(model, joints)
     _check_springs(model)
     _check_attachments(model)
     if not coupled_worlds:
@@ -1280,27 +1559,20 @@ def _check_attachments(model: Model) -> None:
             )
 
 
-def _check_joints(model: Model) -> None:
+def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
     """Joints that libuipc's affine-body joints represent (class docstring, **Joints**): revolute, prismatic, fixed,
-    ball and free joints; drives, passive springs, damping and limits on revolute and prismatic joints only; no
-    armature, no joint friction, and no effort limit on a driven degree of freedom."""
+    ball and free joints, and with ``options`` the joints ``_map_joints`` maps; drives, passive springs, damping and
+    limits on revolute and prismatic joints only; no armature, no joint friction, and no effort limit on a driven
+    degree of freedom."""
     if model.joint_count == 0:
         return
     joint_type = model.joint_type.numpy()
-    supported = [
-        int(t) for t in (JointType.FREE, JointType.REVOLUTE, JointType.PRISMATIC, JointType.FIXED, JointType.BALL)
-    ]
-    other = np.flatnonzero(~np.isin(joint_type, supported))
-    if len(other):
-        j = int(other[0])
-        t = JointType(int(joint_type[j]))
-        why = _UNMAPPED_JOINTS.get(t, "libuipc's affine-body joints are revolute, prismatic, fixed and ball joints")
-        raise NotImplementedError(f"SolverIPC does not simulate {t.name} joints (joint {j}): {why}.")
+    kind = _map_joints(model, options or _JointOptions()).kind
     if model.joint_dof_count == 0:
         return
     qd_start = model.joint_qd_start.numpy()
     dof_joint = np.repeat(np.arange(model.joint_count), np.diff(qd_start))
-    dof_type = joint_type[dof_joint]
+    dof_type = kind[dof_joint]
 
     def per_dof(name: str) -> np.ndarray:
         a = getattr(model, name)
@@ -1348,7 +1620,8 @@ def _check_joints(model: Model) -> None:
         drive,
         "drives, springs and damps revolute and prismatic joints only: libuipc's driving term (constitutions 19 "
         "and 21) is a quadratic potential of one hinge angle or one distance, its ball joint has none (constitution "
-        "27 is only registered) and a free body has no joint; Control.joint_f acts on every joint",
+        "27 is only registered) and a free body has no joint (a D6 joint of three angular axes is a ball joint or "
+        "no joint); Control.joint_f acts on every joint",
     )
     refuse(
         np.flatnonzero(other & limited),
@@ -1928,7 +2201,8 @@ class SolverIPC(SolverBase):
     - revolute, prismatic, fixed and ball joints between bodies or to the
       world, with drives, passive springs and damping, limits and
       :attr:`~newton.Control.joint_f` (see **Joints** below); ``joint_q`` and
-      ``joint_qd`` are written at every step.
+      ``joint_qd`` are written at every step. With ``enable_d6_joints``, D6
+      joints that lock what one of these locks, or nothing.
     - external forces: :attr:`~newton.State.particle_f`, :attr:`~newton.State.body_f`
       and :attr:`~newton.Control.joint_f`, held constant over the step as
       libuipc holds its external forces (a constant acceleration in the
@@ -2383,11 +2657,33 @@ class SolverIPC(SolverBase):
     wrote, it picks the turn of the bodies' angle (the pose decides the angle
     modulo :math:`2\\pi`).
 
+    **D6 joints** (``enable_d6_joints=True``). libuipc has no D6 joint (its
+    constitution 28 is only registered). A D6 joint whose free axes leave
+    locked what one of libuipc's joints locks is that joint, exactly: no
+    axis is a fixed joint, one angular axis a revolute joint about it, one
+    linear axis a prismatic joint along it, with their drives, springs,
+    damping, limits and ``joint_f``; three orthonormal angular axes are a
+    ball joint, and three orthonormal linear and three orthonormal angular
+    axes lock nothing, as a free joint. ``joint_q`` and ``joint_qd`` hold
+    Newton's coordinates of the D6 joint: a revolute or prismatic one's as
+    above, of three angular axes the angles :func:`newton.eval_ik` takes
+    (the XYZ Euler angles in the basis of the first two axes), of linear
+    axes the projections of the joint frames' offset. ``joint_f`` of a D6
+    joint of three angular axes is Featherstone's generalized force: a
+    torque along the dual basis of the axes as the coordinates carry them,
+    and with linear axes a force along them on the child's joint frame,
+    the parent taking the reaction on the same line. Other D6 joints (two
+    angular axes, which lock one rotation, or linear and angular axes
+    together but three and three) lock what no libuipc joint locks, and
+    three axes that are not orthonormal have no coordinates in Newton's
+    decomposition: both are rejected, and so are drives, springs, damping
+    and limits on the D6 joints that become a ball or no joint.
+
     Rejected (:class:`NotImplementedError`), each for the libuipc
-    constitution it lacks: distance and D6 joints, which libuipc does not
-    have (its D6 joint, constitution 28, is only registered), and rod
-    joints, which no libuipc constitution between two affine bodies
-    represents; drives, springs, damping and limits on ball and free joints,
+    constitution it lacks: distance joints and D6 joints but those above,
+    which libuipc does not have, and rod joints, which no libuipc
+    constitution between two affine bodies represents; drives, springs,
+    damping and limits on ball and free joints,
     since libuipc's driving term and limits act on one hinge angle or one
     distance and its ball joint has neither (its ball driving term,
     constitution 27, is only registered); ``joint_armature`` other than 0,
@@ -2570,6 +2866,9 @@ class SolverIPC(SolverBase):
             bodies**).
         kinematic_strength_ratio: The strength ratio of the aims of
             ``kinematic_motion="aim"`` (libuipc's soft transform constraint).
+        enable_d6_joints: Simulate the D6 joints that lock what one of
+            libuipc's joints locks, as that joint (see **D6 joints**); without
+            it every D6 joint is rejected.
 
     Note:
         A step ends once the Newton update moves no vertex by more than
@@ -2724,12 +3023,14 @@ class SolverIPC(SolverBase):
         fem_preconditioner: str = "diag",
         kinematic_motion: str = "jump",
         kinematic_strength_ratio: float = 100.0,
+        enable_d6_joints: bool = False,
     ):
         if not model.device.is_cuda:
             raise NotImplementedError(f"SolverIPC runs on CUDA devices only; the model is on {model.device}.")
         super().__init__(model)
         self._coupled_worlds = bool(coupled_worlds)
-        _check_supported(model, self._coupled_worlds)
+        self._joint_options = _JointOptions(d6=bool(enable_d6_joints))
+        _check_supported(model, self._coupled_worlds, self._joint_options)
         _check_choice("integrator", integrator, ("bdf1", "bdf2"))
         _check_choice("contact_constitution", contact_constitution, ("ipc", "al-ipc"))
         _check_choice("fem_preconditioner", fem_preconditioner, ("diag", "mas"))
@@ -3799,7 +4100,8 @@ class SolverIPC(SolverBase):
         if model.joint_count == 0:
             return ()
         arrays = (model.joint_type, model.joint_parent, model.joint_child, model.joint_X_p, model.joint_X_c)
-        return tuple(a.numpy().copy() for a in (*arrays, model.joint_axis, model.joint_qd_start))
+        arrays = (*arrays, model.joint_axis, model.joint_qd_start, model.joint_dof_dim)
+        return tuple(a.numpy().copy() for a in arrays)
 
     def _add_shapes_and_bodies(self, scene, elements: _ContactElements) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Static non-plane shapes as fixed triangle meshes; every body as an affine body. Returns the bodies'
@@ -3960,8 +4262,9 @@ class SolverIPC(SolverBase):
         return body_q, body_qd
 
     def _add_joints(self, scene) -> None:
-        """Newton's revolute, prismatic, fixed and ball joints as libuipc's (class docstring, **Joints**), joint frames
-        taken as the reference rotations, a fixed affine body without mass standing for the world. Sets up what the
+        """Newton's revolute, prismatic, fixed and ball joints as libuipc's (class docstring, **Joints**), and with
+        ``enable_d6_joints`` the D6 joints that lock what one of them locks (``_map_joints``), joint frames taken as the
+        reference rotations, a fixed affine body without mass standing for the world. Sets up what the
         per-step kernels read: per kind the joint of every group row and the row's penalty (``_joint_strength``,
         0 without a dynamic body), per joint its row (``_joint_element``), and the free and ball joints, whose
         ``joint_f`` acts through the bodies' wrenches."""
@@ -3970,12 +4273,19 @@ class SolverIPC(SolverBase):
         self._joint_rows, self._joint_strength, self._joint_history = {}, {}, {}
         if model.joint_count == 0:
             return
-        joint_type = model.joint_type.numpy()
+        # the libuipc joint of every joint: its own type, but for a D6 joint (enable_d6_joints) that of the joint
+        # that locks what it locks; the type the kernels that write the coordinates and joint_f take it for
+        mapping = _map_joints(model, self._joint_options)
+        joint_type = mapping.kind
+        self._joint_store_type = model.joint_type
+        if mapping.relabeled:
+            self._joint_store_type = wp.array(mapping.store, dtype=wp.int32, device=device)
+        self._d6_joints = wp.array(mapping.d6, dtype=wp.int32, device=device)
         parent, child = model.joint_parent.numpy(), model.joint_child.numpy()
         X_p, X_c = model.joint_X_p.numpy().astype(np.float64), model.joint_X_c.numpy().astype(np.float64)
         axis = model.joint_axis.numpy().astype(np.float64).reshape(-1, 3)
         qd_start = model.joint_qd_start.numpy()
-        wrenched = np.isin(joint_type, [int(JointType.FREE), int(JointType.BALL)])
+        wrenched = np.isin(mapping.store, [int(JointType.FREE), int(JointType.BALL)])
         self._wrenched_joints = wp.array(np.flatnonzero(wrenched).astype(np.int32), dtype=wp.int32, device=device)
         element = np.full(model.joint_count, -1, np.int32)
         joints = np.flatnonzero(joint_type != int(JointType.FREE))
@@ -4260,10 +4570,31 @@ class SolverIPC(SolverBase):
                     self._wrenched_joints.shape[0],
                     inputs=[
                         self._wrenched_joints,
-                        model.joint_type,
+                        self._joint_store_type,
                         model.joint_parent,
                         model.joint_child,
                         model.joint_X_p,
+                        model.joint_qd_start,
+                        model.joint_enabled,
+                        control.joint_f,
+                        state_in.body_q,
+                        model.body_com,
+                    ],
+                    outputs=[self._joint_wrench],
+                    device=model.device,
+                )
+            if model.joint_count and control.joint_f is not None and self._d6_joints.shape[0]:
+                wp.launch(
+                    _d6_joint_wrenches,
+                    self._d6_joints.shape[0],
+                    inputs=[
+                        self._d6_joints,
+                        model.joint_parent,
+                        model.joint_child,
+                        model.joint_X_p,
+                        model.joint_X_c,
+                        model.joint_axis,
+                        model.joint_dof_dim,
                         model.joint_qd_start,
                         model.joint_enabled,
                         control.joint_f,
@@ -4423,7 +4754,7 @@ class SolverIPC(SolverBase):
                 _store_joints,
                 model.joint_count,
                 inputs=[
-                    model.joint_type,
+                    self._joint_store_type,
                     model.joint_parent,
                     model.joint_child,
                     model.joint_X_p,
@@ -4441,6 +4772,27 @@ class SolverIPC(SolverBase):
                 outputs=[state_out.joint_q, state_out.joint_qd, self._joint_q_written],
                 device=model.device,
             )
+            if self._d6_joints.shape[0]:
+                wp.launch(
+                    _store_d6_joints,
+                    self._d6_joints.shape[0],
+                    inputs=[
+                        self._d6_joints,
+                        model.joint_parent,
+                        model.joint_child,
+                        model.joint_X_p,
+                        model.joint_X_c,
+                        model.joint_axis,
+                        model.joint_dof_dim,
+                        model.joint_q_start,
+                        model.joint_qd_start,
+                        state_out.body_q,
+                        state_out.body_qd,
+                        model.body_com,
+                    ],
+                    outputs=[state_out.joint_q, state_out.joint_qd, self._joint_q_written],
+                    device=model.device,
+                )
 
     def _advance_eager(self, dt: float):
         """The solve outside a caller's capture, its status read back; on an overflow the frame again on an engine
@@ -4879,7 +5231,7 @@ class SolverIPC(SolverBase):
             | ModelFlags.JOINT_REFERENCE_POSE_PROPERTIES
         )
         if flags & dof_flags:
-            _check_joints(model)  # the other joint data are read at every step
+            _check_joints(model, self._joint_options)  # the other joint data are read at every step
         if flags & ModelFlags.CONSTRAINT_PROPERTIES and model.attachment_particle_body_count:
             _check_attachments(model)  # their stiffness and enabled flags are read at every step
             body, particle, point = self._attachment_inputs or (None, None, None)
@@ -4905,7 +5257,7 @@ class SolverIPC(SolverBase):
                 aims = self._aim_bodies
                 rebuild |= any(not np.array_equal(a[aims], b[aims]) for a, b in zip(dyadic, self._dyadic, strict=True))
         if rebuild:
-            _check_supported(model, self._coupled_worlds)
+            _check_supported(model, self._coupled_worlds, self._joint_options)
             self._build_engine()
             return
         if flags & ModelFlags.MODEL_PROPERTIES:

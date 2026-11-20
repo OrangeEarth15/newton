@@ -4750,6 +4750,221 @@ def test_contact_output_coupled_worlds(test, device):
     np.testing.assert_array_equal(observables.contact_f.numpy(), 0.0)
 
 
+# ---------------------------------------------------------------------------- joints on request (enable_*)
+
+
+def _group_arrays(solver):
+    """Every device array of every joint group of ``solver``'s engine, by kind and name, on the host."""
+    groups = solver._uipc_warp.arrays.joint_groups(solver._engine)
+    out = {}
+    for kind in ("revolute", "prismatic", "fixed", "spherical"):
+        group = getattr(groups, kind)
+        if group is not None:
+            for name, value in vars(group).items():
+                if isinstance(value, wp.array):
+                    out[kind, name] = value.numpy().copy()
+    return out
+
+
+def _d6_twins(device, d6):
+    """A chain of every joint SolverIPC maps a D6 joint onto, y up with gravity: an arm on a driven, limited revolute
+    joint from the world, a box welded to it, a bob on a ball joint from it, and a slider on a driven, limited
+    prismatic joint from the world. With ``d6`` every joint is the D6 joint of the same axes (one angular, none, three
+    angular, one linear)."""
+    D = newton.ModelBuilder.JointDofConfig
+    builder = newton.ModelBuilder(gravity=(0.0, -10.0, 0.0), up_axis=newton.Axis.Y)
+    arm = builder.add_link(xform=wp.transform((0.0, -0.5, 0.0), wp.quat_identity()))
+    builder.add_shape_box(arm, hx=0.05, hy=0.5, hz=0.05)
+    weld = builder.add_link(xform=wp.transform((0.15, -0.9, 0.0), wp.quat_identity()))
+    builder.add_shape_box(weld, hx=0.1, hy=0.05, hz=0.05)
+    bob = builder.add_link(xform=wp.transform((0.0, -1.3, 0.0), wp.quat_identity()))
+    builder.add_shape_sphere(bob, radius=0.1)
+    slider = builder.add_link(xform=wp.transform((1.0, 0.0, 0.0), wp.quat_identity()))
+    builder.add_shape_box(slider, hx=0.1, hy=0.1, hz=0.1)
+    drive = {"target_ke": 20.0, "target_kd": 1.0, "limit_lower": -0.6, "limit_upper": 0.6, "limit_ke": 1.0e4}
+    hinge = {"child_xform": wp.transform((0.0, 0.5, 0.0), wp.quat_identity())}
+    weld_at = {"parent_xform": wp.transform((0.15, -0.4, 0.0), wp.quat_identity())}
+    ball_at = {
+        "parent_xform": wp.transform((0.0, -0.6, 0.0), wp.quat_identity()),
+        "child_xform": wp.transform((0.0, 0.2, 0.0), wp.quat_identity()),
+    }
+    slide_at = {"parent_xform": wp.transform((1.0, 0.0, 0.0), wp.quat_identity())}
+    if d6:
+        joints = [
+            builder.add_joint_d6(-1, arm, angular_axes=[D(axis=newton.Axis.Z, **drive)], **hinge),
+            builder.add_joint_d6(arm, weld, **weld_at),
+            builder.add_joint_d6(arm, bob, angular_axes=[D(axis=a) for a in "XYZ"], **ball_at),
+            builder.add_joint_d6(-1, slider, linear_axes=[D(axis=newton.Axis.Y, **drive)], **slide_at),
+        ]
+    else:
+        joints = [
+            builder.add_joint_revolute(-1, arm, axis=newton.Axis.Z, **drive, **hinge),
+            builder.add_joint_fixed(arm, weld, **weld_at),
+            builder.add_joint_ball(arm, bob, **ball_at),
+            builder.add_joint_prismatic(-1, slider, axis=newton.Axis.Y, **drive, **slide_at),
+        ]
+    builder.add_articulation(joints)
+    model = builder.finalize(device=device)
+    state = model.state()
+    q = model.joint_q.numpy()
+    q[0] = 0.5  # the arm's angle, the first coordinate either way
+    state.joint_q.assign(q)
+    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+    return model, state
+
+
+def test_d6_joints_take_libuipcs_joints(test, device):
+    """With enable_d6_joints=True a D6 joint of one angular axis is libuipc's revolute joint about it, of one linear
+    axis its prismatic joint along it, of no axis its fixed joint and of three orthonormal angular axes its ball joint,
+    with their drives, limits and joint_f: a chain of the four built with D6 joints gives the engine the joint groups of
+    the same chain built with Newton's revolute, fixed, ball and prismatic joints, array by array, bit for bit, and
+    steps as it does, the revolute and prismatic coordinates included. Without the option the D6 joints are refused."""
+    with test.assertRaisesRegex(NotImplementedError, "D6 joints \\(joint 0\\).*enable_d6_joints=True"):
+        newton.solvers.SolverIPC(_d6_twins(device, True)[0])
+    runs = []
+    for d6 in (False, True):
+        model, state = _d6_twins(device, d6)
+        solver = newton.solvers.SolverIPC(model, enable_d6_joints=d6)
+        groups = _group_arrays(solver)
+        control = model.control()
+        f = np.zeros(model.joint_dof_count, np.float32)
+        f[0], f[-1] = 0.3, -2.0  # the arm's torque and the slider's force, the first and the last DOF either way
+        control.joint_f.assign(f)
+        control.joint_target_q.assign(np.where(np.arange(model.joint_coord_count) == 0, -0.2, 0.0).astype(np.float32))
+        frames, _ = _steps(
+            model, solver, state, 60, 0.01, control,
+            lambda s: np.concatenate([s.body_q.numpy().ravel(), s.joint_q.numpy()[[0, -1]]]),
+        )  # fmt: skip
+        runs.append((groups, frames))
+    (native_groups, native), (d6_groups, d6) = runs
+    test.assertEqual(sorted(native_groups), sorted(d6_groups))
+    for key, value in native_groups.items():
+        np.testing.assert_array_equal(d6_groups[key], value, err_msg=str(key))
+    test.assertGreater(native[:, -2].max() - native[:, -2].min(), 0.3)  # the arm swings
+    np.testing.assert_allclose(d6, native, rtol=0.0, atol=1e-6)
+
+
+def _d6_body(device, lin, axes, q, qd, gravity=0.0, offset=0.2):
+    """A body of mass 1 and inertia diag(0.1, 0.2, 0.15) on a D6 joint from the world, posed by eval_fk at the
+    coordinates ``q`` and rates ``qd`` (z up), with three linear axes when ``lin``, a sphere of radius 0.05 for its
+    collision shape and its joint frame ``offset`` along its z axis. Returns the model, the posed state and the
+    joint."""
+    D = newton.ModelBuilder.JointDofConfig
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -gravity))
+    body = builder.add_link(mass=1.0, inertia=wp.mat33(np.diag([0.1, 0.2, 0.15])))
+    builder.add_shape_sphere(body, radius=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+    linear = [D.create_unlimited(a) for a in "XYZ"] if lin else []
+    j = builder.add_joint_d6(
+        -1, body, linear_axes=linear, angular_axes=[D.create_unlimited(a) for a in axes],
+        parent_xform=wp.transform((0.0, 0.0, 1.0), wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.3)),
+        child_xform=wp.transform((0.0, 0.0, offset), wp.quat_identity()),
+    )  # fmt: skip
+    builder.add_articulation([j])
+    model = builder.finalize(device=device)
+    state = model.state()
+    state.joint_q.assign(np.array(q, np.float32))
+    state.joint_qd.assign(np.array(qd, np.float32))
+    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+    return model, state, j
+
+
+def test_d6_coordinates_are_newtons(test, device):
+    """A body on a D6 joint of three angular axes, a ball joint for libuipc (in Newton's (X, Z, Y) order of the
+    nv_humanoid hips, a left-handed triple, and in (X, Y, Z)), and one of three linear and three angular axes, no joint
+    for libuipc, swings and tumbles under gravity from a turned pose: after every step joint_q and joint_qd hold the
+    coordinates newton.eval_ik computes from the bodies' state."""
+    for lin, axes in ((False, "XZY"), (False, "XYZ"), (True, "XZY")):
+        with test.subTest(lin=lin, axes=axes):
+            q = ([0.1, -0.2, 0.05] if lin else []) + [0.5, -0.4, 0.7]
+            qd = ([0.3, 0.0, -0.1] if lin else []) + [0.9, -0.6, 0.3]
+            model, state, _ = _d6_body(device, lin, axes, q, qd, gravity=10.0)
+            solver = newton.solvers.SolverIPC(model, enable_d6_joints=True)
+            s0, s1 = state, model.state()
+            moved = 0.0
+            for _ in range(40):
+                solver.step(s0, s1, None, None, 0.01)
+                s0, s1 = s1, s0
+                written_q, written_qd = s0.joint_q.numpy().copy(), s0.joint_qd.numpy().copy()
+                newton.eval_ik(model, s0, s0.joint_q, s0.joint_qd)
+                np.testing.assert_allclose(written_q, s0.joint_q.numpy(), rtol=0.0, atol=1e-5)
+                np.testing.assert_allclose(written_qd, s0.joint_qd.numpy(), rtol=0.0, atol=1e-4)
+                moved = max(moved, float(np.abs(written_q - q).max()))
+            test.assertGreater(moved, 0.1)
+
+
+def test_d6_joint_f_is_featherstones(test, device):
+    """joint_f on a D6 joint is Featherstone's generalized force: on the third coordinate of three angular axes in the
+    (X, Z, Y) order, from the pose (0.5, -0.4, 0.7), the joint rates after ten steps of 1 ms are SolverFeatherstone's
+    to 2e-3 (Newton's own test of this), and so are those of three linear and three angular axes pushed along one
+    linear and turned about one angular coordinate, whose joint frame is 0.2 m off the centre of mass; with the joint
+    frame at the centre of mass, from the zero pose, the body moves along and turns about the axes of the forces as
+    implicit Euler integrates F = m a and tau = I alpha, and the other coordinates stay at rest."""
+    cases = (
+        (False, "XZY", [0.5, -0.4, 0.7], [0.0, 0.0, 1.0]),
+        (True, "XYZ", [0.1, 0.0, -0.1, 0.3, -0.2, 0.4], [0.0, 2.0, 0.0, 0.0, 0.0, 0.05]),
+    )
+    for lin, axes, q0, f in cases:
+        with test.subTest(lin=lin):
+            rates = []
+            for make in (
+                lambda m: newton.solvers.SolverFeatherstone(m, angular_damping=0.0),
+                lambda m: newton.solvers.SolverIPC(m, enable_d6_joints=True),
+            ):
+                model, state, _ = _d6_body(device, lin, axes, q0, [0.0] * len(q0))
+                control = model.control()
+                control.joint_f.assign(np.array(f, np.float32))
+                solver, s1 = make(model), model.state()
+                for _ in range(10):
+                    solver.step(state, s1, control, None, 1.0e-3)
+                    state, s1 = s1, state
+                newton.eval_ik(model, state, state.joint_q, state.joint_qd)
+                rates.append(state.joint_qd.numpy().copy())
+            test.assertGreater(float(np.abs(rates[0]).max()), 0.02)
+            np.testing.assert_allclose(rates[1], rates[0], rtol=0.0, atol=2.0e-3)
+
+    h, steps = 0.01, 10
+    model, state, _ = _d6_body(device, True, "XYZ", [0.0] * 6, [0.0] * 6, offset=0.0)
+    control = model.control()
+    control.joint_f.assign(np.array([0.0, 2.0, 0.0, 0.0, 0.0, 0.3], np.float32))
+    solver = newton.solvers.SolverIPC(model, enable_d6_joints=True, **_CONVERGED)
+    q, _ = _steps(model, solver, state, steps, h, control)
+    n = np.arange(1, steps + 1)
+    # implicit Euler from rest under a constant acceleration a: q_n = a h^2 n (n + 1) / 2; the angle to the float32
+    # rounding of the quaternion it is decomposed from
+    np.testing.assert_allclose(q[:, 1], 2.0 * h * h * n * (n + 1) / 2.0, rtol=1e-3, atol=0.0)
+    np.testing.assert_allclose(q[:, 5], 0.3 / 0.15 * h * h * n * (n + 1) / 2.0, rtol=1e-3, atol=1e-6)
+    np.testing.assert_allclose(q[:, [0, 2, 3, 4]], 0.0, rtol=0.0, atol=1e-6)
+
+
+def test_rejects_d6_joints_libuipc_lacks(test, device):
+    """With enable_d6_joints=True the D6 joints that lock what no libuipc joint locks are refused, naming what they
+    lock: two angular axes, three linear axes, one linear and one angular; and three angular axes that are not
+    orthonormal, and drives and limits on the D6 joints that become a ball joint or no joint."""
+    D = newton.ModelBuilder.JointDofConfig
+
+    def model(linear=(), angular=(), **dof):
+        builder = newton.ModelBuilder()
+        link = builder.add_link(xform=wp.transform((0.0, 0.0, 1.0), wp.quat_identity()))
+        builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1)
+        lin = [D(axis=a, **dof) for a in linear]
+        ang = [D(axis=a, **dof) for a in angular]
+        builder.add_articulation([builder.add_joint_d6(-1, link, linear_axes=lin, angular_axes=ang)])
+        return builder.finalize(device=device)
+
+    skew = (1.0, 1.0, 0.0)
+    for name, m, pattern in (
+        ("universal", model(angular="XY"), "0 linear and 2 angular axes lock 3 translations and 1 rotations"),
+        ("translations", model(linear="XYZ"), "3 linear and 0 angular axes lock 0 translations and 3 rotations"),
+        ("cylindrical", model(linear="X", angular="X"), "1 linear and 1 angular axes lock 2 translations"),
+        ("skew axes", model(angular=("X", skew, "Z")), "its angular axes are not orthogonal"),
+        ("ball drive", model(angular="XYZ", target_ke=10.0), "D6 joint 0 has the target mode POSITION"),
+        ("free limit", model(linear="XYZ", angular="XYZ", limit_lower=-0.1), "limits revolute and prismatic"),
+    ):
+        with test.subTest(name):
+            with test.assertRaisesRegex(NotImplementedError, pattern):
+                newton.solvers.SolverIPC(m, enable_d6_joints=True)
+
+
 class TestSolverIPC(unittest.TestCase):
     pass
 
@@ -5076,6 +5291,12 @@ class TestSolverIPCAttachments(unittest.TestCase):
 
 
 @requires("uipc_warp")
+class TestSolverIPCJointOptions(unittest.TestCase):
+    """Joints on request (enable_d6_joints and the other enable_* options): Newton's joints that map onto libuipc's
+    own constitutions beyond the revolute, prismatic, fixed, ball and free joints."""
+
+
+@requires("uipc_warp")
 class TestSolverIPCKinematicAims(unittest.TestCase):
     """kinematic_motion="aim": kinematic bodies moved inside the step toward their aims by libuipc's soft transform
     constraint, swept by the CCD."""
@@ -5278,6 +5499,13 @@ for name, func in (
     ("test_contact_output_coupled_worlds", test_contact_output_coupled_worlds),
 ):
     add_function_test(TestSolverIPCContactOutput, name, func, devices=devices)
+for name, func in (
+    ("test_d6_joints_take_libuipcs_joints", test_d6_joints_take_libuipcs_joints),
+    ("test_d6_coordinates_are_newtons", test_d6_coordinates_are_newtons),
+    ("test_d6_joint_f_is_featherstones", test_d6_joint_f_is_featherstones),
+    ("test_rejects_d6_joints_libuipc_lacks", test_rejects_d6_joints_libuipc_lacks),
+):
+    add_function_test(TestSolverIPCJointOptions, name, func, devices=devices)
 
 
 if __name__ == "__main__":

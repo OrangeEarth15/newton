@@ -356,7 +356,7 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
      - |yes|
      - |yes|
      - |no|
-     - |no|
+     - 🟨 :sup:`17`
    * - ROD
      - |no|
      - |no|
@@ -369,6 +369,10 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
 
 | :sup:`1` DISTANCE joints are treated as FREE (no distance constraint enforcement).
 | :sup:`2` See :ref:`kamino-rod-joints` for the supported rod joint properties.
+| :sup:`17` With ``enable_d6_joints=True``, SolverIPC takes a D6 joint that locks what one of libuipc's joints
+  locks: no axis (fixed), one angular axis (revolute), one linear axis (prismatic), three orthonormal angular axes
+  (ball), or three orthonormal linear and three orthonormal angular axes (no joint). Other D6 joints raise
+  ``NotImplementedError``.
 
 **Joint properties**
 
