@@ -43,6 +43,13 @@ _D_HAT = 0.01
 _D_HAT_SHAPE_SHARE = 0.25
 _D_HAT_MESH_SHARE = 0.5
 
+# libuipc's orthogonality stiffness of an affine body (AffineBodyConstitution's kappa, 100 MPa) [Pa]
+_BODY_KAPPA = 1.0e8
+# the turn [rad] of a body in one step, about the axis of its largest principal moment of inertia, that the first Newton
+# iteration takes in full under the default body_kappa: libuipc's stiffness is lowered where the orthogonality term of
+# a step's incremental potential would exceed 1 / (4 _BODY_TURN^2) times that moment (class docstring, **Rigid bodies**)
+_BODY_TURN = 0.1
+
 # libuipc's strength ratio of a joint (the default of its joints' apply_to): the default joint_strength_ratio
 _JOINT_STRENGTH_RATIO = 100.0
 # the overshoot [rad or m] at which libuipc's cubic joint limit pushes back with the force of Newton's linear limit
@@ -554,6 +561,24 @@ def _copy_status(
         status[entries[k]] = status_in[0]
     if write_residual != 0:
         residual[entries[k]] = residual_in[0]
+
+
+@wp.kernel
+def _body_stiffness(
+    inertia_per_volume: wp.array[wp.float64],
+    cap: wp.float64,
+    scale: wp.float64,
+    kappa: wp.array[wp.float64],
+):
+    """The orthogonality stiffness of every body for the step: ``cap`` (libuipc's), lowered to ``scale`` times the
+    body's largest principal moment of inertia over its volume where that is lower; a body without one (0) keeps
+    ``cap``."""
+    i = wp.tid()
+    k = cap
+    r = inertia_per_volume[i]
+    if r > wp.float64(0.0):
+        k = wp.min(cap, scale * r)
+    kappa[i] = k
 
 
 @wp.kernel
@@ -1498,13 +1523,43 @@ class SolverIPC(SolverBase):
     :math:`\\sum m \\bar x \\bar x^T = \\tfrac{1}{2}\\mathrm{tr}(I)\\,1 - I + m c c^T`, so the
     affine kinetic energy equals the rigid one for every rigid motion. The
     orthogonality potential :math:`\\kappa V \\Delta t^2 \\|A A^T - I\\|_F^2` with
-    ``body_kappa`` and the volume :math:`V` of the body's collision meshes
-    keeps :math:`A` within a small strain of a rotation; this is libuipc's
-    near-rigid body, not an exactly rigid one. Within a step a turning body
-    moves along a straight line in its 12 coordinates and the orthogonality
-    potential pulls it back onto the rotations, so under implicit Euler a free
-    spin at :math:`\\omega` loses about :math:`(\\omega \\Delta t)^2` of its
-    angular velocity per step: 1e-4 at 1 rad/s and :math:`\\Delta t` = 0.01 s.
+    the stiffness :math:`\\kappa` (below) and the volume :math:`V` of the body's
+    collision meshes keeps :math:`A` within a small strain of a rotation; this
+    is libuipc's near-rigid body, not an exactly rigid one. Within a step a
+    turning body moves along a straight line in its 12 coordinates and the
+    orthogonality potential pulls it back onto the rotations, so under implicit
+    Euler a free spin at :math:`\\omega` loses about :math:`(\\omega \\Delta t)^2`
+    of its angular velocity per step: 1e-4 at 1 rad/s and :math:`\\Delta t` = 0.01 s.
+
+    The stiffness is ``body_kappa`` at every step when it is given. By default
+    it is libuipc's 1e8 Pa, lowered for a body and a step to
+    :math:`\\kappa = 25\\, I_{max} / (V \\Delta t^2)` where that is lower,
+    :math:`I_{max}` being the body's largest principal moment of inertia. The
+    straight line to a turn :math:`\\theta` stretches the body by about
+    :math:`\\theta^2 / 2`, and the first Newton iteration of a step takes the
+    turn in full while that stretch's energy,
+    :math:`2 \\theta^4 \\kappa V \\Delta t^2`, stays below the inertia term
+    :math:`\\theta^2 I / 2` of the incremental potential that it removes,
+    :math:`I` being the moment of inertia about the axis of the turn. With the
+    lowered stiffness the first iteration takes a turn of up to 0.1 rad about
+    the axis of the largest moment and of up to
+    :math:`0.1 \\sqrt{I / I_{max}}` rad about an axis of moment :math:`I`:
+    0.1 rad about any axis of a compact body, less about the long axis of a
+    thin one, which keeps its stiffness along its length. With a stiffer body
+    the line search cuts the iteration short, and the next Newton directions,
+    held back by the stretched potential, become small enough to pass the
+    displacement test of the Newton loop long before the turn is complete: at
+    1e8 Pa a 1 m cube that a torque turns by 0.06 rad in a 0.1 s step ends at
+    31% of its angular velocity, and a 10 cm cube spinning at 0.6 rad/s keeps
+    33% of it over six steps of 1/60 s, where the converged solve keeps 99.9%.
+    The lowered stiffness costs rigidity in proportion to :math:`\\Delta t^2`
+    where it applies: the lowest of five 10 cm cubes stacked on the ground is
+    compressed by 4e-5 at :math:`\\Delta t` = 1/600 s and by 4e-3 at 1/60 s
+    (6e-6 at 1e8 Pa), a 30 cm by 1 cm finger swinging from a hinge stretches
+    by up to 8e-6 and 7e-4, and a box of unequal sides that a torque starts
+    turning runs ahead of a rigid one by 7e-4 of its turn after one step of
+    0.01 s and by 1e-5 after ten. Pass ``body_kappa=1e8`` for libuipc's
+    stiffness at every step.
     Gravity acts on :math:`p`; with the full dyadic mass this is the exact
     gravity force on the affine body.
     An external force :math:`f` at the centre of mass is the generalized force
@@ -1665,7 +1720,11 @@ class SolverIPC(SolverBase):
         cloth_strain_rate: Strain-limiting coefficient :math:`\\eta` of the cloth
             membrane (libuipc's default 100); 0 makes the membrane quadratic.
         body_kappa: Orthogonality stiffness :math:`\\kappa` of rigid bodies [Pa]
-            (libuipc's affine-body stiffness).
+            (libuipc's affine-body stiffness), taken as given at every step.
+            ``None`` takes libuipc's 1e8 Pa, lowered for a body and a step
+            whose turn of 0.1 rad about the axis of its largest moment of
+            inertia it would not take in one Newton iteration (see
+            **Rigid bodies**).
         joint_strength_ratio: Penalty of the joints relative to the mass of the
             dynamic bodies they join (libuipc's ``strength_ratio``; see **Joints**).
         shape_segments: Segments around a sphere, capsule, cylinder, cone or
@@ -1791,9 +1850,11 @@ class SolverIPC(SolverBase):
 
     SUPPORTED_OBSERVABLES = frozenset({SolverBase.ObservableKind.SOLVER_RESIDUAL, ObservableKind.STATUS})
 
-    # libuipc-warp and its external-acceleration element group, imported by the first solver
+    # libuipc-warp, its external-acceleration element group and the element group of the bodies' orthogonality
+    # potential, imported by the first solver
     _uipc_warp: ClassVar = None
     _external_acceleration: ClassVar = None
+    _ortho_potential: ClassVar = None
 
     def __init__(
         self,
@@ -1812,7 +1873,7 @@ class SolverIPC(SolverBase):
         semi_implicit_k_min: int = 6,
         eps_velocity: float = 0.01,
         cloth_strain_rate: float = 100.0,
-        body_kappa: float = 1.0e8,
+        body_kappa: float | None = None,
         joint_strength_ratio: float = _JOINT_STRENGTH_RATIO,
         shape_segments: int = 24,
         coupled_worlds: bool = False,
@@ -1826,6 +1887,8 @@ class SolverIPC(SolverBase):
             raise ValueError("SolverIPC: kappa=None, libuipc's default stiffness, needs adaptive_kappa=True.")
         if kappa is not None and not (np.isfinite(kappa) and kappa > 0.0):
             raise ValueError(f"SolverIPC: kappa must be a finite positive stiffness, got {kappa}.")
+        if body_kappa is not None and not (np.isfinite(body_kappa) and body_kappa > 0.0):
+            raise ValueError(f"SolverIPC: body_kappa must be a finite positive stiffness, got {body_kappa}.")
         uipc_warp = self._import_uipc_warp()
         self._d_hat_given = d_hat is not None
         self._config = uipc_warp.SimConfig(
@@ -1843,7 +1906,7 @@ class SolverIPC(SolverBase):
         self._adaptive_kappa = bool(adaptive_kappa)
         self._thickness = float(thickness)
         self._cloth_strain_rate = float(cloth_strain_rate)
-        self._body_kappa = float(body_kappa)
+        self._body_kappa = None if body_kappa is None else float(body_kappa)
         self._joint_strength_ratio = float(joint_strength_ratio)
         self._shape_segments = int(shape_segments)
         self._dt = self._config.dt  # of the last step, which grow() solves again
@@ -1851,6 +1914,7 @@ class SolverIPC(SolverBase):
         self._clamp_reported = False
         self._engine = None
         self._worlds = None
+        self._ortho = None  # the engine's orthogonality potentials, whose stiffness follows dt (default body_kappa)
         self._build_engine()
         self._check_start()
 
@@ -1864,6 +1928,7 @@ class SolverIPC(SolverBase):
             import uipc_warp  # noqa: PLC0415
             import uipc_warp.arrays  # noqa: PLC0415
             import uipc_warp.validation  # noqa: PLC0415
+            from uipc_warp.backend.affine_body.constitutions import ortho_potential  # noqa: PLC0415
             from uipc_warp.backend.external_force import external_acceleration  # noqa: PLC0415
         except ImportError as e:
             raise ImportError(
@@ -1904,6 +1969,7 @@ class SolverIPC(SolverBase):
             )
         cls._uipc_warp = uipc_warp
         cls._external_acceleration = external_acceleration.ExternalAcceleration
+        cls._ortho_potential = ortho_potential.OrthoPotential
         return uipc_warp
 
     # ------------------------------------------------------------------ setup
@@ -2295,6 +2361,57 @@ class SolverIPC(SolverBase):
             # notify_model_changed may have changed them since the scene was laid out
             self._engine.set_dyadic_mass(*self._engine_dyadic(self._dyadic))
         self._joint_groups = self._uipc_warp.arrays.joint_groups(self._engine)
+        self._find_body_stiffness()
+
+    def _find_body_stiffness(self) -> None:
+        """With the default ``body_kappa``: the engine's group of orthogonality potentials, whose stiffness array a
+        kernel writes before every step, and the largest principal moment of inertia over the volume of the body
+        of each of its rows (0 for a kinematic body and the world's). None without bodies or with a given
+        ``body_kappa``, which the engine is built with."""
+        self._ortho = self._ortho_inertia = None
+        if self._body_kappa is not None or self.model.body_count == 0:
+            return
+        groups = [e for e in self._engine.elements if isinstance(e, self._ortho_potential)]
+        if len(groups) != 1:
+            raise RuntimeError(f"SolverIPC: the engine has {len(groups)} groups of orthogonality potentials, not 1.")
+        self._ortho = groups[0]
+        base = self._scene.layout().body_base
+        rows = self._ortho.rows.numpy().astype(np.int64) - 1  # the rows of A follow the body's translation
+        order = np.argsort(base)
+        body = order[np.searchsorted(base[order], rows)]
+        if not np.array_equal(base[body], rows):
+            raise RuntimeError("SolverIPC: the orthogonality potentials do not match the engine's bodies.")
+        self._ortho_body = body
+        self._ortho_inertia = wp.array(self._ortho_ratios(), dtype=wp.float64, device=self.model.device)
+
+    def _ortho_ratios(self) -> np.ndarray:
+        """For every row of the orthogonality group, its body's largest principal moment of inertia about the
+        centre of mass over its volume, from the dyadic mass the engine holds; 0 for a kinematic body and the
+        world's."""
+        mass, first, second = self._dyadic
+        nb = self.model.body_count
+        ratio = np.zeros(len(self._ortho_body))
+        for i, b in enumerate(self._ortho_body):
+            if b >= nb or self._kinematic_body[b] or mass[b] <= 0.0:
+                continue
+            c = first[b] / mass[b]
+            spread = np.linalg.eigvalsh(second[b] - mass[b] * np.outer(c, c))
+            ratio[i] = (spread.sum() - spread.min()) / self._body_volume[b]
+        return ratio
+
+    def _write_body_stiffness(self, dt: float) -> None:
+        """The orthogonality stiffness of every body for a step of ``dt`` (default ``body_kappa``, class docstring,
+        **Rigid bodies**): libuipc's, lowered to 1 / (4 _BODY_TURN^2) times the largest principal moment of inertia
+        over ``V dt^2``, on the device, so that a captured step takes the stiffness of its own ``dt``."""
+        if self._ortho is None:
+            return
+        wp.launch(
+            _body_stiffness,
+            len(self._ortho_body),
+            inputs=[self._ortho_inertia, wp.float64(_BODY_KAPPA), wp.float64(1.0 / (4.0 * _BODY_TURN**2 * dt * dt))],
+            outputs=[self._ortho.kappa],
+            device=self.model.device,
+        )
 
     def _add_particles_and_tets(self, scene, elements: _ContactElements) -> np.ndarray:
         """Every particle as a finite-element vertex (engine index = particle index), and the tetrahedra."""
@@ -2514,6 +2631,7 @@ class SolverIPC(SolverBase):
         body_com = model.body_com.numpy().astype(np.float64)
         body_mass = model.body_mass.numpy().astype(np.float64)
         body_gravity = self._world_gravity()[model.body_world.numpy()]
+        self._body_volume = np.zeros(model.body_count)
         for b in range(model.body_count):
             parts = meshes[b]
             offsets = np.cumsum([0] + [len(v) for v, _, _ in parts])
@@ -2533,6 +2651,7 @@ class SolverIPC(SolverBase):
             if volume <= 0.0:
                 # no closed collision mesh: the volume of water of that mass
                 volume = max(body_mass[b], 1.0e-12) / 1000.0
+            self._body_volume[b] = volume
             R = _quat_to_matrix_np(body_q[b, 3:7])
             w = body_qd[b, 3:6]
             W = np.array([[0.0, -w[2], w[1]], [w[2], 0.0, -w[0]], [-w[1], w[0], 0.0]])
@@ -2543,7 +2662,7 @@ class SolverIPC(SolverBase):
                 first_moment=first[b],
                 second_moment=second[b],
                 volume=volume,
-                kappa=self._body_kappa,
+                kappa=_BODY_KAPPA if self._body_kappa is None else self._body_kappa,
                 p=body_q[b, :3],
                 A=R,
                 p_dot=body_qd[b, :3] - np.cross(w, R @ body_com[b]),
@@ -2700,6 +2819,7 @@ class SolverIPC(SolverBase):
         self._load(state_in)
         self._write_forces(state_in, control)
         self._write_joint_controls(control, dt)
+        self._write_body_stiffness(dt)
         if self.model.device.is_capturing:
             # the solve joins the caller's graph; it cannot synchronize, grow or raise (see the class docstring)
             self._engine.stop_on_overflow = False
@@ -3005,6 +3125,7 @@ class SolverIPC(SolverBase):
         if forces is not None:
             wp.copy(self._forces.a, forces)
         self._write_joint_controls(self._control or self.model.control(clone_variables=False), self._dt)
+        self._write_body_stiffness(self._dt)
 
     def _failure(self, status) -> str:
         """Why a step failed, with what libuipc would print."""
@@ -3263,6 +3384,8 @@ class SolverIPC(SolverBase):
             self._body_mass_inv.assign(self._mass_inverse(*dyadic))
             for kind in self._joint_bodies:  # the joints' penalties follow the masses
                 self._joint_strength[kind].assign(self._joint_strengths(kind, dyadic[0])[1])
+            if self._ortho is not None:  # and the default body stiffness the inertia
+                self._ortho_inertia.assign(self._ortho_ratios())
 
     def contact_stiffness(self, dt: float) -> float:
         """The contact stiffness [Pa] of every contact pair in a step of length ``dt`` [s]: ``kappa``, or with

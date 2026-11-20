@@ -843,7 +843,12 @@ def test_external_forces_match_closed_form(test, device):
         )
         bodies.append(b)
     model = builder.finalize(device=device)
-    solver = newton.solvers.SolverIPC(model, newton_velocity_tol=1e-6, linear_tol_rate=1e-12, semi_implicit=False)
+    # libuipc's body stiffness: the closed forms are rigid ones, and with the default stiffness a box of unequal sides
+    # that a torque starts turning runs 7e-4 of its turn ahead of a rigid one after a step (class docstring, **Rigid
+    # bodies**)
+    solver = newton.solvers.SolverIPC(
+        model, newton_velocity_tol=1e-6, linear_tol_rate=1e-12, semi_implicit=False, body_kappa=1.0e8
+    )
     m = model.body_mass.numpy()[bodies[0]]
     I_zz = model.body_inertia.numpy()[bodies[0]][2, 2]
     com = model.body_com.numpy()[bodies[0]].astype(np.float64)
@@ -1581,7 +1586,10 @@ def test_notify_updates_gravity_and_inertia_in_place(test, device):
     builder.add_particle(wp.vec3(0.0, 1.0, 1.0), wp.vec3(0.0, 0.0, 0.0), 0.5)
     b = _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.05, 0.08))
     model = builder.finalize(device=device)
-    solver = newton.solvers.SolverIPC(model, newton_velocity_tol=1e-6, linear_tol_rate=1e-12, semi_implicit=False)
+    # libuipc's body stiffness, for the rigid closed form (see test_external_forces_match_closed_form)
+    solver = newton.solvers.SolverIPC(
+        model, newton_velocity_tol=1e-6, linear_tol_rate=1e-12, semi_implicit=False, body_kappa=1.0e8
+    )
     m = float(model.body_mass.numpy()[b])
     I_zz = float(model.body_inertia.numpy()[b][2, 2])
     wrench = np.array([[2.0 * m, 0.0, 0.0, 0.0, 0.0, I_zz]], np.float32)  # 2 m/s^2, 1 rad/s^2
@@ -2325,8 +2333,16 @@ def test_fixed_and_ball_joints_hold(test, device):
     state = model.state()
     state.joint_q.assign(q)
     newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+    # libuipc's body stiffness: with the default one the arm's own stretch under the swing takes the ball joint's
+    # anchors 1.03e-4 m apart, past the joints' penalty (class docstring, **Rigid bodies**)
     body_q, _ = _steps(
-        model, newton.solvers.SolverIPC(model), state, 100, 0.01, None, lambda s: s.body_q.numpy().copy()
+        model,
+        newton.solvers.SolverIPC(model, body_kappa=1.0e8),
+        state,
+        100,
+        0.01,
+        None,
+        lambda s: s.body_q.numpy().copy(),
     )
 
     def transforms(rows):
@@ -2594,6 +2610,83 @@ def _libuipc_corridor(model, dt, d_hat):
     points = np.vstack([model.particle_q.numpy().astype(np.float64), np.zeros((1, 3))])
     mean_mass = model.particle_mass.numpy().astype(np.float64).sum() / len(points)
     return kappa_corridor(scene_diagonal(points), mean_mass, d_hat, dt, 1.0e-16)
+
+
+def test_body_stiffness_takes_a_turn_in_one_iteration(test, device):
+    """By default a body's orthogonality stiffness is libuipc's 1e8 Pa, lowered in a step of length dt to
+    25 I_max / (V dt^2), I_max the body's largest principal moment of inertia, so that the first Newton iteration takes
+    a turn of up to 0.1 rad about that moment's axis in full: a 1 m cube that a torque turns by 0.06 rad in one 0.1 s
+    step (Newton's body-force test) and a 10 cm cube spinning at 0.6 rad/s over six steps of 1/60 s end where the
+    converged solve does, as a rotation projected back after every step ends. At libuipc's stiffness, given as
+    body_kappa, the line search cuts the turn short and the next directions pass the displacement test long before it
+    is done (31% and 33% of the angular velocity). Eager and captured steps of two sizes take the stiffness of their own
+    dt; a given body_kappa is taken at every step."""
+
+    def cube(half, torque=0.0, spin=0.0, **kwargs):
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        rot = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.pi * 0.5)
+        _box_body(builder, (1.0, 2.0, 3.0), (half, half, half), rot)
+        model = builder.finalize(device=device)
+        solver = newton.solvers.SolverIPC(model, **kwargs)
+        s0, s1 = model.state(), model.state()
+        s0.body_qd.assign(np.array([[0.0, 0.0, 0.0, 0.0, 0.0, spin]], np.float32))
+        s0.body_f.assign(np.array([[0.0, 0.0, 0.0, 0.0, 0.0, torque]], np.float32))
+        return model, solver, s0, s1
+
+    def spin_after(half, dt, steps, torque=0.0, spin=0.0, **kwargs):
+        model, solver, s0, s1 = cube(half, torque, spin, **kwargs)
+        for _ in range(steps):
+            solver.step(s0, s1, None, None, dt)
+            s0, s1 = s1, s0
+            s0.body_f.assign(np.array([[0.0, 0.0, 0.0, 0.0, 0.0, torque]], np.float32))
+        return float(s0.body_qd.numpy()[0, 5]), model, solver
+
+    # one 0.1 s step of 1000 N m on a 1 m cube: a rigid body reaches 0.6 rad/s, an affine one projected back onto the
+    # rotations sin(atan(0.06)) / 0.1
+    omega, model, solver = spin_after(0.5, 0.1, 1, torque=1000.0)
+    inertia = float(model.body_inertia.numpy()[0][2, 2])
+    turn = 1000.0 / inertia * 0.1 * 0.1
+    test.assertAlmostEqual(turn, 0.06, places=5)
+    test.assertAlmostEqual(omega, np.sin(np.arctan(turn)) / 0.1, delta=1e-3)
+    given, _, _ = spin_after(0.5, 0.1, 1, torque=1000.0, body_kappa=1.0e8)
+    test.assertLess(given, 0.5 * omega)
+    # a 10 cm cube at 0.6 rad/s over six steps of 1/60 s, which lose about (omega dt)^2 = 1e-4 each
+    omega, _, _ = spin_after(0.05, 1.0 / 60.0, 6, spin=0.6)
+    alpha = np.arctan(0.6 / 60.0)
+    for _ in range(5):
+        alpha = np.arctan(np.sin(alpha) / (2.0 - np.cos(alpha)))
+    test.assertAlmostEqual(omega, np.sin(alpha) * 60.0, delta=5e-4)
+    given, _, _ = spin_after(0.05, 1.0 / 60.0, 6, spin=0.6, body_kappa=1.0e8)
+    test.assertLess(given, 0.5 * omega)
+
+    # the stiffness of each step: eager steps of 1/600 s, and a captured step of 0.1 s replayed between them
+    model, solver, s0, s1 = cube(0.5)
+    i_max = float(np.linalg.eigvalsh(model.body_inertia.numpy()[0].astype(np.float64)).max())
+
+    def stiffness():
+        return float(solver._ortho.kappa.numpy()[list(solver._ortho_body).index(0)])
+
+    def expected(dt):
+        return min(1.0e8, 25.0 * i_max / (1.0 * dt * dt))  # a 1 m cube: V = 1 m^3
+
+    solver.step(s0, s1, None, None, 0.1)
+    with wp.ScopedCapture(device=device) as capture:
+        solver.step(s1, s0, None, None, 0.1)
+    for dt in (1.0 / 600.0, 0.1, 1.0 / 600.0):
+        if dt == 0.1:
+            wp.capture_launch(capture.graph)
+        else:
+            solver.step(s0, s1, None, None, dt)
+        np.testing.assert_allclose(stiffness(), expected(dt), rtol=1e-6)
+    test.assertEqual(expected(1.0 / 600.0), 1.0e8)
+    test.assertLess(expected(0.1), 1.0e6)
+    _, _, solver = spin_after(0.5, 0.1, 1, body_kappa=1.0e7)
+    (ortho,) = (e for e in solver._engine.elements if isinstance(e, solver._ortho_potential))
+    np.testing.assert_array_equal(ortho.kappa.numpy(), 1.0e7)
+    test.assertIsNone(solver._ortho)
+    for kappa in (0.0, -1.0e8, float("nan"), float("inf")):
+        with test.assertRaisesRegex(ValueError, "body_kappa must be a finite positive stiffness"):
+            newton.solvers.SolverIPC(model, body_kappa=kappa)
 
 
 def test_kappa_is_taken_as_given(test, device):
@@ -2905,6 +2998,12 @@ add_function_test(
     TestSolverIPC,
     "test_rigid_spin_slows_as_implicit_euler_turns_an_affine_body",
     test_rigid_spin_slows_as_implicit_euler_turns_an_affine_body,
+    devices=devices,
+)
+add_function_test(
+    TestSolverIPC,
+    "test_body_stiffness_takes_a_turn_in_one_iteration",
+    test_body_stiffness_takes_a_turn_in_one_iteration,
     devices=devices,
 )
 add_function_test(
