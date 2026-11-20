@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
 """Incremental Potential Contact (IPC) solver backed by libuipc-warp."""
@@ -439,16 +439,17 @@ def _joint_terms(
         drv_ratio[e] = drive_scale * K * dt * dt / m
     lo = limit_lower[d]
     hi = limit_upper[d]
-    lke = wp.float64(limit_ke[d])
-    limited = on and lke > zero and (lo > -_MAXVAL or hi < _MAXVAL)
+    limit_k = wp.float64(limit_ke[d])
+    limited = on and limit_k > zero and (lo > -_MAXVAL or hi < _MAXVAL)
     lim_on[e] = wp.where(limited, 1, 0)
     if limited:
-        # libuipc's penalty s ((x - u) / (u - l))^3 is, at an overshoot delta, the energy dt^2 lke delta^3 / (3 delta_r)
+        # libuipc's penalty s ((x - u) / (u - l))^3 is, at an overshoot delta, the energy
+        # dt^2 limit_k delta^3 / (3 delta_r)
         w = wp.float64(hi) - wp.float64(lo)
         w3 = wp.where(w > zero, w * w * w, wp.float64(1.0))
         lim_lower[e] = wp.float64(lo)
         lim_upper[e] = wp.float64(hi)
-        lim_strength[e] = dt * dt * lke * w3 / (wp.float64(3.0) * _LIMIT_OVERSHOOT)
+        lim_strength[e] = dt * dt * limit_k * w3 / (wp.float64(3.0) * _LIMIT_OVERSHOOT)
     value = zero
     if has_joint_f != 0:
         value = wp.float64(joint_f[d])
@@ -864,8 +865,8 @@ def _check_joints(model: Model) -> None:
     actuated = np.isin(
         mode, [int(m) for m in (JointTargetMode.POSITION, JointTargetMode.VELOCITY, JointTargetMode.POSITION_VELOCITY)]
     )
-    lo, hi, lke = per_dof("joint_limit_lower"), per_dof("joint_limit_upper"), per_dof("joint_limit_ke")
-    limited = ((lo > -MAXVAL) | (hi < MAXVAL)) & (lke > 0.0)
+    lo, hi, limit_k = per_dof("joint_limit_lower"), per_dof("joint_limit_upper"), per_dof("joint_limit_ke")
+    limited = ((lo > -MAXVAL) | (hi < MAXVAL)) & (limit_k > 0.0)
     other = np.isin(dof_type, [int(JointType.BALL), int(JointType.FREE)])
 
     def drive(d: int) -> str:
@@ -885,7 +886,7 @@ def _check_joints(model: Model) -> None:
     )
     refuse(
         np.flatnonzero(other & limited),
-        lambda d: f"the limits [{float(lo[d])!r}, {float(hi[d])!r}] with limit_ke {float(lke[d])!r}",
+        lambda d: f"the limits [{float(lo[d])!r}, {float(hi[d])!r}] with limit_ke {float(limit_k[d])!r}",
         "limits revolute and prismatic joints only (libuipc's ball joint has no limit)",
     )
     effort = per_dof("joint_effort_limit")
