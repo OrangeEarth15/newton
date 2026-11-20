@@ -1244,15 +1244,20 @@ def _shape_mesh(model: Model, s: int, segments: int) -> tuple[np.ndarray, np.nda
 def _heightfield_mesh(model: Model, s: int) -> tuple[np.ndarray, np.ndarray]:
     """The collision triangles of height field shape ``s`` in its frame, as Newton's narrow phase makes them
     (``get_triangle_shape_from_heightfield``): sample ``(r, c)`` at ``x = -hx + c dx``, ``y = -hy + r dy``,
-    ``z = min_z + h (max_z - min_z)``, every cell ``(r, c)`` split into ``(p00, p10, p11)`` and ``(p00, p11, p01)``,
-    from :attr:`~newton.Model.heightfield_data`, whose extents carry the shape's scale. An open surface; none for a
-    field of fewer than two rows or columns, which Newton's collision ignores too."""
-    field = model.heightfield_data.numpy()[int(model.shape_heightfield_index.numpy()[s])]
-    nrow, ncol, start = int(field["nrow"]), int(field["ncol"]), int(field["data_offset"])
-    if nrow < 2 or ncol < 2:
+    ``z = min_z + h (max_z - min_z)``, every cell ``(r, c)`` split into ``(p00, p10, p11)`` and ``(p00, p11, p01)``.
+    The field is the shape's :class:`~newton.Heightfield` (:attr:`~newton.Model.shape_source`), its extents scaled by
+    :attr:`~newton.Model.shape_scale` and rounded to float32 with its heights, as ``ModelBuilder.finalize`` stores them
+    for Newton's collision. An open surface; none for a field of fewer than two rows or columns or without a source,
+    which Newton's collision ignores too."""
+    field = model.shape_source[s]
+    if field is None or field.nrow < 2 or field.ncol < 2:
         return np.zeros((0, 3)), np.zeros((0, 3), np.int64)
-    hx, hy, min_z, max_z = (float(field[k]) for k in ("hx", "hy", "min_z", "max_z"))
-    h = model.heightfield_elevations.numpy()[start : start + nrow * ncol].astype(np.float64).reshape(nrow, ncol)
+    nrow, ncol = int(field.nrow), int(field.ncol)
+    sx, sy, sz = (float(k) for k in model.shape_scale.numpy()[s])
+    hx, hy, min_z, max_z = (
+        float(np.float32(k)) for k in (abs(field.hx * sx), abs(field.hy * sy), field.min_z * sz, field.max_z * sz)
+    )
+    h = np.asarray(field.data, np.float32).astype(np.float64).reshape(nrow, ncol)
     y, x = np.meshgrid(np.linspace(-hy, hy, nrow), np.linspace(-hx, hx, ncol), indexing="ij")
     v = np.stack([x, y, min_z + h * (max_z - min_z)], axis=-1).reshape(-1, 3)
     r, c = np.meshgrid(np.arange(nrow - 1), np.arange(ncol - 1), indexing="ij")
