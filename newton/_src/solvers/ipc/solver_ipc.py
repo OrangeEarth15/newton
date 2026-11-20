@@ -41,8 +41,6 @@ from newton import (
 from newton.math import velocity_at_point
 from newton.solvers import SolverBase
 
-from ...geometry.rest_shape import _dihedral_angles, _triangle_rest_geometry
-
 # typing.override from Python 3.12, typing_extensions' on Python 3.11, else no check, as Newton takes it
 if TYPE_CHECKING:
     from typing_extensions import override
@@ -621,6 +619,32 @@ def _any_selected(world_mask: wp.array[wp.bool], entries: wp.array[wp.int32], se
         if world_mask[entries[k]]:
             s = 1
     selected[0] = s
+
+
+# A copy of Newton's normalize_reset_world_mask (newton/_src/core/reset.py), which SolverBase.reset calls and which has
+# no public name. test_reset_checks_world_mask_as_newton_does fails when the two check a mask differently.
+def _normalize_reset_world_mask(
+    world_mask: wp.array[wp.bool] | None, *, world_count: int, device: wp.Device
+) -> wp.array[wp.bool] | None:
+    """Validate a reset mask with shape ``(world_count + 1,)``.
+
+    The final entry selects global entities in world ``-1``. Returns the mask
+    unchanged, or ``None`` if no mask was given.
+    """
+    if world_mask is None:
+        return None
+    if not isinstance(world_mask, wp.array):
+        raise TypeError("'world_mask' must be a Warp array or None.")
+    if world_mask.dtype != wp.bool:
+        raise TypeError("'world_mask' must have dtype bool.")
+    if world_mask.ndim != 1:
+        raise ValueError("'world_mask' must be one-dimensional.")
+    if world_mask.device != device:
+        raise ValueError(f"'world_mask' device {world_mask.device} does not match expected device {device}.")
+    mask_size = world_mask.shape[0]
+    if mask_size != world_count + 1:
+        raise ValueError(f"'world_mask' length {mask_size} must equal model.world_count + 1 ({world_count + 1}).")
+    return world_mask
 
 
 def _release(version: str) -> tuple[int, ...]:
@@ -1281,6 +1305,51 @@ def _winding_signs(tris: np.ndarray, rows: np.ndarray, names: np.ndarray) -> np.
                 f"{int(r[0])} and {int(r[1])}) {why}."
             )
     return np.where(forward0, 1.0, -1.0)
+
+
+# Copies of Newton's rest-shape helpers (newton/_src/geometry/rest_shape.py), which have no public name. Newton's
+# builders compute tri_poses and edge_rest_angle with them; _rest_edges and _add_cloth compute them again to tell
+# whether a cloth was built at rest. test_rest_shape_copies_match_newtons_builders fails when they no longer reproduce
+# what the builders store.
+
+
+def _normalize_vectors(vectors: np.ndarray) -> np.ndarray:
+    """Normalize vectors along the last axis, leaving zero vectors unchanged."""
+    lengths = np.linalg.norm(vectors, axis=-1, keepdims=True)
+    lengths[lengths == 0.0] = 1.0
+    return vectors / lengths
+
+
+def _triangle_rest_geometry(qp: np.ndarray, rp: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return triangle rest bases and areas from two edges, preserving input precision."""
+    normal = _normalize_vectors(np.cross(qp, rp))
+    e1 = _normalize_vectors(qp)
+    e2 = _normalize_vectors(np.cross(normal, e1))
+    frame = np.stack((e1, e2), axis=-1)
+    edges = np.stack((qp, rp), axis=-1)
+    basis = np.swapaxes(frame, -2, -1) @ edges
+    return basis, np.linalg.det(basis) / 2.0
+
+
+def _dihedral_angles(
+    x1: np.ndarray,
+    x2: np.ndarray,
+    x3: np.ndarray,
+    x4: np.ndarray,
+    x3_other: np.ndarray,
+    x4_other: np.ndarray,
+) -> np.ndarray:
+    """Return signed dihedrals for triangles (x1, x3, x4) and (x2, x4_other, x3_other).
+
+    The second triangle can use separate copies of the shared edge for disjoint rest
+    topology. Welded geometry passes x3 and x4 for both copies.
+    """
+    n1 = _normalize_vectors(np.cross(x3 - x1, x4 - x1))
+    n2 = _normalize_vectors(np.cross(x4_other - x2, x3_other - x2))
+    edge = _normalize_vectors(x4 - x3)
+    cos_theta = np.clip((n1 * n2).sum(axis=-1), -1.0, 1.0)
+    sin_theta = (np.cross(n1, n2) * edge).sum(axis=-1)
+    return np.arctan2(sin_theta, cos_theta)
 
 
 def _rest_edges(x: np.ndarray, tris: np.ndarray, poses: np.ndarray) -> np.ndarray | None:
@@ -3373,7 +3442,9 @@ class SolverIPC(SolverBase):
             flags: Unused.
         """
         del state, flags
-        world_mask = self._normalize_reset_world_mask(world_mask)
+        world_mask = _normalize_reset_world_mask(
+            world_mask, world_count=int(self.model.world_count), device=self.model.device
+        )
         if self._engine is None:
             return
         if world_mask is None:

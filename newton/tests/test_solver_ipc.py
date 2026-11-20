@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
+import importlib
+import importlib.util
+import pathlib
 import re
 import unittest
 import warnings
@@ -1576,6 +1580,42 @@ def test_reset_inside_captured_graph(test, device):
     np.testing.assert_allclose(runs["world 0 only"][1], runs["none"][1], rtol=0.0, atol=1e-6)
 
 
+def test_reset_checks_world_mask_as_newton_does(test, device):
+    """reset checks world_mask with SolverIPC's copy of Newton's check, which has no public name: for a model of one
+    world and one of three coupled worlds, it accepts the masks that SolverBase.reset accepts and raises the same
+    error for the others (another length, dtype, rank or device, a NumPy array, a list)."""
+
+    def outcome(solver, state, mask):
+        try:
+            solver.reset(state, world_mask=mask)
+        except (TypeError, ValueError) as error:
+            return type(error).__name__, str(error)
+        return "accepted"
+
+    for copies in (1, 3):
+        with test.subTest(copies=copies):
+            model = _worlds(device, copies)
+            n = model.world_count + 1
+            masks = [
+                None,
+                wp.array([True] * n, dtype=wp.bool, device=device),
+                wp.zeros(n, dtype=wp.bool, device=device),
+                wp.ones(n - 1, dtype=wp.bool, device=device),
+                wp.ones(n + 1, dtype=wp.bool, device=device),
+                wp.ones(n, dtype=wp.int32, device=device),
+                wp.ones(n, dtype=wp.uint8, device=device),
+                wp.ones((n, 1), dtype=wp.bool, device=device),
+                wp.ones(n, dtype=wp.bool, device="cpu"),
+                np.ones(n, dtype=bool),
+                [True] * n,
+            ]
+            state = model.state()
+            expected = [outcome(newton.solvers.SolverBase(model), state, m) for m in masks]
+            test.assertEqual(expected.count("accepted"), 3)
+            solver = newton.solvers.SolverIPC(model, coupled_worlds=copies > 1)
+            test.assertEqual([outcome(solver, state, m) for m in masks], expected)
+
+
 def test_notify_updates_gravity_and_inertia_in_place(test, device):
     """Gravity, mass and inertia changed after a capture take effect in its replays.
 
@@ -1721,8 +1761,9 @@ def _sheet(builder, x, tris, rows=None, rest=None, mass=0.01, tri_k=1.0e3, edge_
 
 
 def _newton_angles(model, x):
-    """Newton's angle of every bending edge row at the positions ``x``, as it measures rest angles."""
-    from newton._src.geometry.rest_shape import _dihedral_angles  # noqa: PLC0415
+    """Newton's angle of every bending edge row at the positions ``x``, as it measures rest angles (SolverIPC's copy of
+    Newton's helper, which test_rest_shape_copies_match_newtons_builders holds to the builders)."""
+    from newton._src.solvers.ipc.solver_ipc import _dihedral_angles  # noqa: PLC0415
 
     e = model.edge_indices.numpy().reshape(-1, 4)
     x = np.asarray(x, np.float64)
@@ -2860,6 +2901,92 @@ class TestSolverIPCInputs(unittest.TestCase):
         for uipc_warp, warp in (("0.3.0", "1.19.0"), ("0.5.0", "1.19.0"), ("0.4.0", "1.20.0"), ("0.4.0", "1.18.1")):
             self.assertEqual(len(_version_mismatches(uipc_warp, warp, ">=1.19,<1.20")), 1, (uipc_warp, warp))
 
+    def test_imports_only_public_newton_names(self):
+        """SolverIPC's modules import Newton through its public modules only: no import of theirs resolves under
+        newton._src outside SolverIPC's own package."""
+        module = importlib.import_module(newton.solvers.SolverIPC.__module__)
+        package = module.__package__
+        private = []
+        for path in sorted(pathlib.Path(module.__file__).parent.glob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    names = [importlib.util.resolve_name("." * node.level + (node.module or ""), package)]
+                else:
+                    continue
+                for name in names:
+                    own = name == package or name.startswith(package + ".")
+                    if (name == "newton._src" or name.startswith("newton._src.")) and not own:
+                        private.append(f"{path.name}:{node.lineno} {name}")
+        self.assertEqual(private, [])
+
+    def test_rest_shape_copies_match_newtons_builders(self):
+        """SolverIPC's copies of Newton's rest-shape helpers, which have no public name, reproduce bit for bit the
+        tri_poses, tri_areas and edge_rest_angle that ModelBuilder stores, computed from particle_q as the solver
+        computes them to tell a cloth built at rest: random sheets from add_cloth_grid, from add_cloth_mesh (bent)
+        and from add_triangles with add_edges (random particles, the hinge rows in both orders)."""
+        from newton._src.solvers.ipc.solver_ipc import _dihedral_angles, _triangle_rest_geometry  # noqa: PLC0415
+
+        rng = np.random.default_rng(3)
+
+        def rotation():
+            axis = rng.normal(size=3)
+            return wp.quat_from_axis_angle(wp.vec3(*(axis / np.linalg.norm(axis))), float(rng.uniform(0.0, 6.0)))
+
+        bent = 0.0
+        for trial in range(12):
+            builder = newton.ModelBuilder()
+            kind = ("grid", "mesh", "triangles")[trial % 3]
+            if kind == "grid":
+                builder.add_cloth_grid(
+                    pos=wp.vec3(*rng.uniform(-1.0, 1.0, 3)),
+                    rot=rotation(),
+                    vel=wp.vec3(0.0, 0.0, 0.0),
+                    dim_x=int(rng.integers(2, 8)),
+                    dim_y=int(rng.integers(2, 8)),
+                    cell_x=float(rng.uniform(0.005, 0.2)),
+                    cell_y=float(rng.uniform(0.005, 0.2)),
+                    mass=0.1,
+                )
+            elif kind == "mesh":
+                nx, ny = (int(k) for k in rng.integers(3, 7, size=2))
+                u, v = np.meshgrid(np.linspace(0.0, 0.4, nx), np.linspace(0.0, 0.3, ny), indexing="ij")
+                vertices = np.stack([u, v, 0.05 * rng.normal(size=u.shape)], axis=-1).reshape(-1, 3)
+                corners = [(ny * i + j, ny * (i + 1) + j) for i in range(nx - 1) for j in range(ny - 1)]
+                builder.add_cloth_mesh(
+                    pos=wp.vec3(*rng.uniform(-1.0, 1.0, 3)),
+                    rot=rotation(),
+                    scale=float(rng.uniform(0.5, 2.0)),
+                    vel=wp.vec3(0.0, 0.0, 0.0),
+                    vertices=[wp.vec3(*p) for p in vertices],
+                    indices=[k for a, b in corners for k in (a, b, b + 1, a, b + 1, a + 1)],
+                    density=0.1,
+                )
+            else:
+                # a fan of triangles about particle 0, at float32 positions, its hinges given in both orders
+                n = int(rng.integers(4, 9))
+                x = rng.uniform(-1.0, 1.0, (n + 2, 3)).astype(np.float32).astype(np.float64)
+                builder.add_particles(x.tolist(), [(0.0, 0.0, 0.0)] * (n + 2), [0.1] * (n + 2))
+                tris = np.array([(0, k, k + 1) for k in range(1, n + 1)])
+                builder.add_triangles(tris[:, 0], tris[:, 1], tris[:, 2])
+                rows = np.array([(k - 1, k + 1, 0, k) if k % 2 else (k + 1, k - 1, k, 0) for k in range(2, n + 1)])
+                builder.add_edges(rows[:, 0], rows[:, 1], rows[:, 2], rows[:, 3])
+            model = builder.finalize(device="cpu")
+            x = model.particle_q.numpy().astype(np.float64)
+            t = model.tri_indices.numpy().reshape(-1, 3)
+            edges, area = _triangle_rest_geometry(x[t[:, 1]] - x[t[:, 0]], x[t[:, 2]] - x[t[:, 0]])
+            np.testing.assert_array_equal(np.linalg.inv(edges).astype(np.float32), model.tri_poses.numpy(), kind)
+            np.testing.assert_array_equal(area.astype(np.float32), model.tri_areas.numpy(), kind)
+            rows = model.edge_indices.numpy().reshape(-1, 4)
+            hinge = (rows[:, 0] >= 0) & (rows[:, 1] >= 0)
+            e = rows[hinge]
+            angles = _dihedral_angles(x[e[:, 0]], x[e[:, 1]], x[e[:, 2]], x[e[:, 3]], x[e[:, 2]], x[e[:, 3]])
+            np.testing.assert_array_equal(angles.astype(np.float32), model.edge_rest_angle.numpy()[hinge], kind)
+            if kind != "grid":
+                bent = max(bent, float(np.abs(angles).max()))
+        self.assertGreater(bent, 1.0)  # folded hinges too, not only flat ones
+
     def test_import_names_missing_calls(self):
         """Refuse a libuipc-warp that lacks a call the solver makes, naming it."""
         import uipc_warp.arrays  # noqa: PLC0415
@@ -3131,6 +3258,7 @@ for name, func in (
     ("test_overflow_grows", test_overflow_grows),
     ("test_teleport_equals_fresh_solver", test_teleport_equals_fresh_solver),
     ("test_reset_inside_captured_graph", test_reset_inside_captured_graph),
+    ("test_reset_checks_world_mask_as_newton_does", test_reset_checks_world_mask_as_newton_does),
     ("test_notify_updates_gravity_and_inertia_in_place", test_notify_updates_gravity_and_inertia_in_place),
     ("test_gravity_per_world", test_gravity_per_world),
 ):
