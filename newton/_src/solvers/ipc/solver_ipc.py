@@ -1419,11 +1419,12 @@ class SolverIPC(SolverBase):
     build is needed). Each :meth:`step` is one implicit time step, by default
     of implicit Euler (BDF1): a Newton iteration with a backtracking line
     search, a block-Jacobi PCG linear solve, barrier contact and continuous
-    collision detection. ``integrator="bdf2"`` and
-    ``contact_constitution="al-ipc"`` take libuipc's BDF2 and its
-    augmented-Lagrangian contact instead (see **BDF2** and **AL-IPC
-    contact** below). The Newton loop, the PCG loop and the line search run on
-    the device under ``wp.capture_while``, so a step never synchronizes with the
+    collision detection. ``integrator="bdf2"``,
+    ``contact_constitution="al-ipc"`` and ``fem_preconditioner="mas"`` take
+    libuipc's BDF2, its augmented-Lagrangian contact and its MAS
+    preconditioner instead (see **BDF2**, **AL-IPC contact** and **MAS**
+    below). The Newton loop, the PCG loop and the line search run on the
+    device under ``wp.capture_while``, so a step never synchronizes with the
     host when it is captured in a CUDA graph. A step that is not captured
     captures the solve itself and checks how it ended (see below).
 
@@ -1679,6 +1680,18 @@ class SolverIPC(SolverBase):
     ``SOLVER_RESIDUAL`` is not offered. A change of the bodies' masses
     (:meth:`notify_model_changed`) builds the solve again, since the penalty
     follows the masses the solve was built with.
+
+    **MAS.** ``fem_preconditioner="mas"`` is libuipc's multilevel additive
+    Schwarz preconditioner (its ``linear_system/fem_preconditioner``) on the
+    vertices of particles, cloth and tetrahedra (bodies
+    keep their 12 x 12 blocks): it inverts the system exactly on clusters of up
+    to 16 vertices and corrects between them on coarser levels made of
+    neighbouring clusters. libuipc takes the clusters from METIS; libuipc-warp's
+    array path makes them itself, by recursive inertial bisection of every
+    connected cloth, soft body and spring network at its rest positions. The
+    preconditioner is libuipc's on another partition: the PCG iterations
+    differ from libuipc's, and the result is the same to the tolerance of the
+    linear solve. Particles on no element keep their 3 x 3 blocks.
 
     **Worlds.** Particles, bodies and colliding shapes in more than one local
     world are refused unless ``coupled_worlds=True``. With it every local world
@@ -1944,6 +1957,8 @@ class SolverIPC(SolverBase):
         integrator: ``"bdf1"`` (implicit Euler) or ``"bdf2"`` (see **BDF2**).
         contact_constitution: ``"ipc"`` (barrier contact) or ``"al-ipc"`` (see
             **AL-IPC contact**).
+        fem_preconditioner: ``"diag"`` (block diagonal) or ``"mas"`` for
+            particles, cloth and tetrahedra (see **MAS**).
 
     Note:
         A step ends once the Newton update moves no vertex by more than
@@ -2092,6 +2107,7 @@ class SolverIPC(SolverBase):
         coupled_worlds: bool = False,
         integrator: str = "bdf1",
         contact_constitution: str = "ipc",
+        fem_preconditioner: str = "diag",
     ):
         if not model.device.is_cuda:
             raise NotImplementedError(f"SolverIPC runs on CUDA devices only; the model is on {model.device}.")
@@ -2100,6 +2116,7 @@ class SolverIPC(SolverBase):
         _check_supported(model, self._coupled_worlds)
         _check_choice("integrator", integrator, ("bdf1", "bdf2"))
         _check_choice("contact_constitution", contact_constitution, ("ipc", "al-ipc"))
+        _check_choice("fem_preconditioner", fem_preconditioner, ("diag", "mas"))
         if adaptive_kappa and contact_constitution == "al-ipc":
             raise ValueError(
                 "SolverIPC: adaptive_kappa sets the stiffness of the barrier, which contact_constitution='al-ipc' "
@@ -2126,6 +2143,7 @@ class SolverIPC(SolverBase):
             eps_velocity=eps_velocity,
             integrator=integrator,
             contact_constitution=contact_constitution,
+            fem_preconditioner=fem_preconditioner,
         )
         # a BDF2 history starts with an implicit Euler step: at the first step, and at every step from a state the
         # solver did not write (class docstring, **BDF2**)

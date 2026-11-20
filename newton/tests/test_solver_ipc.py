@@ -3316,6 +3316,40 @@ def test_al_ipc_status_and_new_masses(test, device):
     test.assertFalse(solver.check_status(observables))
 
 
+def test_mas_matches_the_block_diagonal_preconditioner(test, device):
+    """With fem_preconditioner="mas" (libuipc's linear_system/fem_preconditioner; other values refused) a stiff beam
+    hanging from one end, and a soft cube and a cloth falling onto the ground, end where they end under the block
+    diagonal preconditioner, to the tolerance of the solves, in at most 85% of its PCG iterations."""
+    out = {}
+    for preconditioner in ("diag", "mas"):
+        builder = newton.ModelBuilder()
+        builder.add_soft_grid(
+            pos=wp.vec3(0.0, 0.5, 0.5), rot=wp.quat_identity(), vel=wp.vec3(0.0, 0.0, 0.0), dim_x=16, dim_y=2,
+            dim_z=2, cell_x=0.02, cell_y=0.02, cell_z=0.02, density=1000.0, k_mu=1.0e6, k_lambda=4.0e6, k_damp=0.0,
+            fix_left=True,
+        )  # fmt: skip
+        builder.add_soft_grid(
+            pos=wp.vec3(-0.25, -0.1, 0.02), rot=wp.quat_identity(), vel=wp.vec3(0.0, 0.0, 0.0), dim_x=4, dim_y=4,
+            dim_z=4, cell_x=0.05, cell_y=0.05, cell_z=0.05, density=1000.0, k_mu=3.4e5, k_lambda=1.6e6, k_damp=0.0,
+        )  # fmt: skip
+        _cloth(builder, 16, 0.02, 0.05, center=(0.3, -0.2))
+        builder.add_ground_plane()
+        model = builder.finalize(device=device)
+        if preconditioner == "mas":
+            with test.assertRaisesRegex(ValueError, "fem_preconditioner"):
+                newton.solvers.SolverIPC(model, fem_preconditioner="jacobi")
+        solver = newton.solvers.SolverIPC(model, fem_preconditioner=preconditioner, **_TIGHT)
+        s0, s1 = model.state(), model.state()
+        pcg = 0
+        for _ in range(15):
+            solver.step(s0, s1, None, None, 0.01)
+            s0, s1 = s1, s0
+            pcg += solver.frame_stats()["pcg_iterations"]
+        out[preconditioner] = (s0.particle_q.numpy(), pcg)
+    np.testing.assert_allclose(out["mas"][0], out["diag"][0], rtol=0.0, atol=1e-5)
+    test.assertLess(out["mas"][1], 0.85 * out["diag"][1])
+
+
 @requires("uipc_warp")
 class TestSolverIPC(unittest.TestCase):
     pass
@@ -3598,7 +3632,7 @@ class TestSolverIPCJoints(unittest.TestCase):
 
 @requires("uipc_warp")
 class TestSolverIPCOptions(unittest.TestCase):
-    """libuipc's options: BDF2 and AL-IPC contact."""
+    """libuipc's options: BDF2, AL-IPC contact and the MAS preconditioner."""
 
 
 devices = get_cuda_test_devices()
@@ -3744,6 +3778,7 @@ for name, func in (
     ("test_bdf2_drives", test_bdf2_drives),
     ("test_al_ipc_rests_at_d_hat", test_al_ipc_rests_at_d_hat),
     ("test_al_ipc_status_and_new_masses", test_al_ipc_status_and_new_masses),
+    ("test_mas_matches_the_block_diagonal_preconditioner", test_mas_matches_the_block_diagonal_preconditioner),
 ):
     add_function_test(TestSolverIPCOptions, name, func, devices=devices)
 
