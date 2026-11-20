@@ -2035,6 +2035,7 @@ class SolverIPC(SolverBase):
         self._engine = None
         self._worlds = None
         self._ortho = None  # the engine's orthogonality potentials, whose stiffness follows dt (default body_kappa)
+        self._default_control = None  # the Control of a step given none, built once (_control_of_model)
         self._build_engine()
         self._check_start()
 
@@ -2950,7 +2951,7 @@ class SolverIPC(SolverBase):
         if self._engine is None:
             return
         if control is None:
-            control = self.model.control(clone_variables=False)
+            control = self._control_of_model()
         self._dt, self._control = dt, control
         self._report_clamp(dt)
         self._load(state_in)
@@ -2969,6 +2970,17 @@ class SolverIPC(SolverBase):
                 raise RuntimeError(self._failure(status))
         self._store(state_in.body_q, state_in.body_qd, state_out)
         self._write_observables(observables)
+
+    def _control_of_model(self) -> Control:
+        """The control of a step given none: the model's own control inputs, ``model.control(clone_variables=False)``
+        built once, and again when the model holds other arrays for the inputs the solver reads."""
+        model, control = self.model, self._default_control
+        if control is None or any(
+            getattr(control, name) is not getattr(model, name)
+            for name in ("joint_target_q", "joint_target_qd", "joint_f")
+        ):
+            control = self._default_control = model.control(clone_variables=False)
+        return control
 
     def _report_clamp(self, dt: float) -> None:
         """Warn once when a step's ``dt`` clamps the given ``kappa`` into libuipc's stiffness range."""
@@ -3261,7 +3273,7 @@ class SolverIPC(SolverBase):
                 e.load_state(group_state)
         if forces is not None:
             wp.copy(self._forces.a, forces)
-        self._write_joint_controls(self._control or self.model.control(clone_variables=False), self._dt)
+        self._write_joint_controls(self._control or self._control_of_model(), self._dt)
         self._write_body_stiffness(self._dt)
 
     def _failure(self, status) -> str:

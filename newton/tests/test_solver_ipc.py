@@ -1639,6 +1639,34 @@ def test_reset_checks_world_mask_as_newton_does(test, device):
             test.assertEqual([outcome(solver, state, m) for m in masks], expected)
 
 
+def test_default_control_is_built_once(test, device):
+    """step(control=None) builds the model's Control once, not at every step, and again when the model holds other
+    arrays for the inputs the solver reads (here joint_f, which then drives a hinge)."""
+    model, state, _ = _hinged(device)
+    solver = newton.solvers.SolverIPC(model, **_CONVERGED)
+    built = []
+    control = model.control
+
+    def counted(*args, **kwargs):
+        built.append(1)
+        return control(*args, **kwargs)
+
+    model.control = counted
+    try:
+        s0, s1 = state, model.state()
+        for _ in range(3):
+            solver.step(s0, s1, None, None, 0.01)
+            s0, s1 = s1, s0
+        test.assertEqual(len(built), 1)
+        test.assertAlmostEqual(float(s0.joint_q.numpy()[0]), 0.0, delta=1e-7)
+        model.joint_f = wp.array([2.0], dtype=wp.float32, device=device)
+        solver.step(s0, s1, None, None, 0.01)
+        test.assertEqual(len(built), 2)
+        test.assertGreater(float(s1.joint_q.numpy()[0]), 0.0)
+    finally:
+        del model.control
+
+
 def test_notify_updates_gravity_and_inertia_in_place(test, device):
     """Gravity, mass and inertia changed after a capture take effect in its replays.
 
@@ -3284,6 +3312,7 @@ for name, func in (
     ("test_reset_checks_world_mask_as_newton_does", test_reset_checks_world_mask_as_newton_does),
     ("test_notify_updates_gravity_and_inertia_in_place", test_notify_updates_gravity_and_inertia_in_place),
     ("test_gravity_per_world", test_gravity_per_world),
+    ("test_default_control_is_built_once", test_default_control_is_built_once),
 ):
     add_function_test(TestSolverIPCStep, name, func, devices=devices)
 for name, func in (
