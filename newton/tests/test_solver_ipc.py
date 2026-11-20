@@ -2492,6 +2492,251 @@ def test_coupled_worlds_with_kinematic_aims(test, device):
     test.assertGreater(q1[-1, 0, 0], 0.05)  # the box was pushed
 
 
+def _reset_world():
+    """One world for the resets of one world: a box sliding at 0.2 m/s on the global static box of ``_worlds``, a
+    particle sliding at 0.3 m/s on the ground, and a sphere turned about a vertical hinge by a drive, a passive spring
+    and passive damping."""
+    world = newton.ModelBuilder()
+    box = _box_body(world, (0.35, 0.0, 0.1505), (0.05, 0.05, 0.05))
+    world.body_qd[box] = (0.2, 0.0, 0.0, 0.0, 0.0, 0.0)
+    world.add_particle(wp.vec3(-0.3, 0.0, 0.0101), wp.vec3(0.3, 0.0, 0.0), 0.01, radius=0.01)
+    link = world.add_link(xform=wp.transform(wp.vec3(-0.1, 0.4, 0.5), wp.quat_identity()))
+    world.add_shape_sphere(link, radius=0.05)
+    joint = world.add_joint_revolute(
+        -1,
+        link,
+        axis=newton.Axis.Z,
+        parent_xform=wp.transform(wp.vec3(0.0, 0.4, 0.5), wp.quat_identity()),
+        child_xform=wp.transform(wp.vec3(0.1, 0.0, 0.0), wp.quat_identity()),
+        target_ke=40.0,
+        target_kd=2.0,
+        stiffness=10.0,
+        damping=1.0,
+        target_q=0.5,
+        target_qd=0.1,
+        rest_q=-0.2,
+    )
+    world.add_articulation([joint])
+    return world
+
+
+def _row_worlds(solver, model):
+    """The world of every row of the solver's engine: a particle's, a body's for its pseudo-vertices and surface
+    vertices, -1 for the static shapes and the fixed body the world-attached joints hang from."""
+    layout = solver._scene.layout()
+    world = np.full(layout.n, -1, np.int64)
+    world[: model.particle_count] = model.particle_world.numpy()
+    body_world, offsets = model.body_world.numpy(), layout.body_vertex_offsets
+    for b in range(model.body_count):
+        world[layout.body_base[b] : layout.body_base[b] + 4] = body_world[b]
+        world[offsets[b] : offsets[b + 1]] = body_world[b]
+    return world
+
+
+def _solver_snapshot(solver):
+    """What a step changes: the engine's state (its dump) and the solver's own device state."""
+    arrays = [solver._body_q_written, solver._body_qd_written, solver._body_hold]
+    for history in solver._joint_history.values():
+        arrays += list(history)
+    return solver._engine.state_dict(), [(a, a.numpy().copy()) for a in arrays]
+
+
+def _restore(solver, snapshot):
+    """The solver at ``snapshot``: the engine recovered from its dump (the friction candidates of the next frame from
+    one DCD pass at its state, the same in every recovery) and the solver's device state."""
+    state, arrays = snapshot
+    solver._engine.load_state_dict(state)
+    for a, value in arrays:
+        a.assign(value)
+
+
+_FRICTION_LISTS = ("PP", "PE", "PT", "EE")  # the engine's simplex friction lists, in its friction_counts order
+_PAIR_WIDTH = {"PP": 2, "PE": 3, "PT": 4, "EE": 4, "PH": 2}  # the entries of a friction pair (PH: vertex, plane)
+
+
+def _frame_start(solver):
+    """What the engine's last frame started with, which its solve leaves: the friction candidates (per list, vertex
+    tuples; PH: vertex and plane) and the lagged records of the simplex ones (their bits), the prediction and the
+    kinetic masses of every row and body, the rows the frame restarted (BDF2), and the revolute drives' terms."""
+    eng = solver._engine
+    s, h, c = eng.simplex, eng.half_plane, eng.contact
+    counts = s.friction_counts.numpy()
+    lists = {name: getattr(s, f"friction_{name}s").numpy()[: counts[k]] for k, name in enumerate(_FRICTION_LISTS)}
+    lists["PH"] = h.friction_PHs.numpy()[: int(h.friction_count.numpy()[0])]
+    cPT, cEE, cPE, _, _ = c.fric.capacities  # the lagged records: PT, EE, PE, PP at fixed offsets
+    lagged = c.lagged.numpy().view(np.int64)
+    base = {"PT": 0, "EE": cPT, "PE": cPT + cEE, "PP": cPT + cEE + cPE}
+    rows = eng.subscene_restarts
+    group = solver._joint_groups.revolute
+    return {
+        "lists": lists,
+        "records": {name: lagged[base[name] : base[name] + len(lists[name])] for name in _FRICTION_LISTS},
+        "x_tilde": eng.vm.x_tilde.numpy().copy(),
+        "mass": eng.vm.mass.numpy().copy(),
+        "body_mass": np.concatenate([eng.abd.mass.numpy()[:, None], eng.abd.mx.numpy()], axis=1),
+        "restarted": None if rows is None else rows.rows.frame_requests(),
+        "drive": None if group is None else np.stack([group.drv_aim.numpy(), group.drv_ratio.numpy()], axis=1),
+    }
+
+
+def _check_friction_kept(test, got, full, world, flagged):
+    """``got``'s friction candidates are ``full``'s without those with a vertex in the worlds ``flagged``, each with
+    the same lagged record, bit for bit. The order is not compared: every case recovers one engine, whose stored pairs
+    carry over from the case before, and the engine's own tests compare the order on fresh engines."""
+    for name, listed in full["lists"].items():
+        pairs = np.asarray(listed).reshape(-1, _PAIR_WIDTH[name])
+        vertices = pairs[:, :1] if name == "PH" else pairs  # a PH pair: its vertex, then its plane
+        out = np.isin(world[vertices], flagged).any(axis=1)
+        kept = pairs[~out]
+        got_pairs = np.asarray(got["lists"][name]).reshape(-1, _PAIR_WIDTH[name])
+        order, got_order = np.lexsort(kept.T[::-1]), np.lexsort(got_pairs.T[::-1])
+        np.testing.assert_array_equal(got_pairs[got_order], kept[order], name)
+        if name != "PH":
+            np.testing.assert_array_equal(got["records"][name][got_order], full["records"][name][~out][order], name)
+
+
+def _branch_steps(solver, model, snapshot, state, cases, dt=0.01, control=None, pusher=None, after_reset=None):
+    """From ``snapshot``, one step for every case: ``"none"``, ``"all"`` (``reset`` without a mask), a world index
+    (``reset`` of that world) or ``("state", k)`` (a new velocity for world ``k``'s particles); ``pusher`` moves the
+    state's kinematic bodies before the step, and ``after_reset(case)`` looks at the solver between the reset and the
+    step. Returns the frame start of every case."""
+    out = {}
+    for case in cases:
+        _restore(solver, snapshot)
+        state_in = model.state()
+        state_in.assign(state)
+        if pusher is not None:
+            pusher(state_in)
+        if case == "all":
+            solver.reset(state_in)
+        elif isinstance(case, int):
+            mask = np.zeros(model.world_count + 1, bool)
+            mask[case] = True
+            solver.reset(state_in, world_mask=wp.array(mask, dtype=wp.bool, device=model.device))
+        elif isinstance(case, tuple):
+            qd = state_in.particle_qd.numpy()
+            qd[model.particle_world.numpy() == case[1]] += (0.0, 0.05, 0.0)
+            state_in.particle_qd.assign(qd)
+        if after_reset is not None:
+            after_reset(case)
+        solver.step(state_in, model.state(), control, None, dt)
+        out[case] = _frame_start(solver)
+    return out
+
+
+def test_reset_of_one_world_keeps_the_others(test, device):
+    """Three worlds at one place with coupled_worlds, each a box sliding on the global static box, a particle sliding on
+    the ground and a sphere driven about a hinge, under implicit Euler and BDF2. From one state of the solver, a step
+    after no reset, after a reset of world 1, after a reset of every world, and after a new velocity written for world
+    1's particle. The reset of world 1 and the new state record the friction candidates of the step without a reset but
+    those with a vertex in world 1, each with its lagged record, bit for bit; the reset of every world records none.
+    Under BDF2 the frame restarts world 1's rows and no other, and world 1's rows, bodies and drive take the prediction,
+    the masses and the terms of the reset of every world, the other worlds' those of no reset, bit for bit; under
+    implicit Euler there is no history, and the resets leave them as they are. The branches begin at the first step with
+    friction candidates in every world."""
+    for integrator in ("bdf1", "bdf2"):
+        with test.subTest(integrator=integrator):
+            model = _worlds(device, 3, _reset_world)
+            solver = newton.solvers.SolverIPC(model, coupled_worlds=True, integrator=integrator)
+            control = model.control()
+            s0, s1 = model.state(), model.state()
+            world = _row_worlds(solver, model)
+            for _ in range(100):  # until the boxes and particles rest on the static box and the ground in every world
+                solver.step(s0, s1, control, None, 0.01)
+                s0, s1 = s1, s0
+                pt = np.asarray(solver._engine.simplex.active_lists()["PT"]).reshape(-1, 4)
+                ph = np.asarray(solver._engine.half_plane.active_list()).reshape(-1, 2)
+                if all(np.isin(k, world[pt]) and np.isin(k, world[ph[:, 0]]) for k in range(3)):
+                    break
+            else:
+                test.fail("no step with friction candidates in every world")
+            one = world == 1
+            body_one = np.append(model.body_world.numpy() == 1, False)  # the fixed body of the hinges is global
+            joints = solver._joint_rows["revolute"].numpy()
+            drive_one = model.body_world.numpy()[model.joint_child.numpy()[joints]] == 1
+            frames = _branch_steps(
+                solver, model, _solver_snapshot(solver), s0, ("none", 1, "all", ("state", 1)), control=control
+            )
+            none, w1, every, new_state = frames["none"], frames[1], frames["all"], frames[("state", 1)]
+            for k in range(3):  # every world has friction candidates on the static box and the ground
+                for name in ("PT", "PH"):
+                    pairs = np.asarray(none["lists"][name]).reshape(-1, _PAIR_WIDTH[name])
+                    vertices = pairs[:, :1] if name == "PH" else pairs
+                    test.assertTrue(np.any(np.isin(world[vertices], [k]).any(axis=1)), (k, name))
+            _check_friction_kept(test, w1, none, world, [1])
+            _check_friction_kept(test, new_state, none, world, [1])
+            test.assertEqual(sum(len(p) for p in every["lists"].values()), 0)
+            for key in ("x_tilde", "mass"):
+                np.testing.assert_array_equal(w1[key][~one], none[key][~one], key)
+                np.testing.assert_array_equal(w1[key][one], every[key][one], key)
+                np.testing.assert_array_equal(new_state[key][~one], none[key][~one], key)
+            np.testing.assert_array_equal(w1["body_mass"][~body_one], none["body_mass"][~body_one])
+            np.testing.assert_array_equal(w1["body_mass"][body_one], every["body_mass"][body_one])
+            np.testing.assert_array_equal(w1["drive"][~drive_one], none["drive"][~drive_one])
+            np.testing.assert_array_equal(w1["drive"][drive_one], every["drive"][drive_one])
+            if integrator == "bdf1":
+                test.assertIsNone(w1["restarted"])
+                for key in ("x_tilde", "mass", "drive"):  # no history: the resets change no prediction or term
+                    np.testing.assert_array_equal(w1[key], none[key], key)
+                continue
+            np.testing.assert_array_equal(w1["restarted"], one.astype(np.int32))
+            np.testing.assert_array_equal(new_state["restarted"], one.astype(np.int32))
+            test.assertFalse(np.any(none["restarted"]))
+            test.assertFalse(np.all(w1["x_tilde"][one] == none["x_tilde"][one]))  # world 1 took an implicit Euler step
+            test.assertFalse(np.all(w1["drive"][drive_one] == none["drive"][drive_one]))
+
+
+def test_reset_of_one_world_keeps_the_other_worlds_aims(test, device):
+    """Three copies of the pushed box's world with kinematic_motion="aim" under BDF2, whose aim kernel writes the
+    history of every pusher at every step; each pusher moved by state_in. From one state, a step after no reset, after
+    a reset of world 1 and after a reset of every world: the reset of world 1 releases world 1's pusher alone (it takes
+    state_in), and the frame restarts world 1's rows alone: world 1's pusher and box take the prediction and the masses
+    of the reset of every world, the other worlds' pushers and boxes those of no reset, bit for bit; the aims are the
+    same in every case."""
+    scene = newton.ModelBuilder()
+    scene.add_ground_plane()
+    scene.replicate(_pushed_world(), 3)
+    model = scene.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model, coupled_worlds=True, kinematic_motion="aim", integrator="bdf2")
+    rows = _world_rows(model, 3)
+    pushers = [b[1] for _, b in rows]
+
+    def push(state, k):
+        body_q, body_qd = state.body_q.numpy(), state.body_qd.numpy()
+        body_q[pushers, 0] = -0.12 + 0.01 * k
+        body_qd[pushers] = (1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        state.body_q.assign(body_q)
+        state.body_qd.assign(body_qd)
+
+    s0, s1 = model.state(), model.state()
+    for k in range(6):
+        push(s0, k)
+        solver.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+    world = _row_worlds(solver, model)
+    one = world == 1
+    body_one = model.body_world.numpy() == 1
+    holds = {}
+
+    def hold(case):
+        holds[case] = solver._body_hold.numpy()[pushers]
+
+    frames = _branch_steps(
+        solver, model, _solver_snapshot(solver), s0, ("none", 1, "all"), pusher=lambda s: push(s, 6), after_reset=hold
+    )
+    np.testing.assert_array_equal(holds["none"], [1, 1, 1])
+    np.testing.assert_array_equal(holds[1], [1, 0, 1])
+    np.testing.assert_array_equal(holds["all"], [0, 0, 0])
+    none, w1, every = frames["none"], frames[1], frames["all"]
+    np.testing.assert_array_equal(w1["restarted"], one.astype(np.int32))
+    for key in ("x_tilde", "mass"):
+        np.testing.assert_array_equal(w1[key][~one], none[key][~one], key)
+        np.testing.assert_array_equal(w1[key][one], every[key][one], key)
+    np.testing.assert_array_equal(w1["body_mass"][~body_one], none["body_mass"][~body_one])
+    np.testing.assert_array_equal(w1["body_mass"][body_one], every["body_mass"][body_one])
+    test.assertFalse(np.all(w1["body_mass"][body_one] == none["body_mass"][body_one]))  # unscaled where restarted
+
+
 def _hinged(device, kind="revolute", gravity=0.0, axis=newton.Axis.Z, offset=(0.0, 0.0, 0.0), radius=0.1, **dof):
     """A sphere hanging from the world on a revolute or prismatic joint (y up); ``offset`` is the joint's origin in
     the sphere's frame, and ``dof`` the joint's arguments. Returns the model, a state at its joint coordinates and
@@ -4393,6 +4638,8 @@ for name, func in (
     ("test_coupled_worlds_element_limit", test_coupled_worlds_element_limit),
     ("test_coupled_worlds_with_attachments", test_coupled_worlds_with_attachments),
     ("test_coupled_worlds_with_kinematic_aims", test_coupled_worlds_with_kinematic_aims),
+    ("test_reset_of_one_world_keeps_the_others", test_reset_of_one_world_keeps_the_others),
+    ("test_reset_of_one_world_keeps_the_other_worlds_aims", test_reset_of_one_world_keeps_the_other_worlds_aims),
 ):
     add_function_test(TestSolverIPCWorlds, name, func, devices=devices)
 

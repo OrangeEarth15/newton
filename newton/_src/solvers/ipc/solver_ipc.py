@@ -138,13 +138,15 @@ def _load_particles(
     q: wp.array[wp.vec3],
     qd: wp.array[wp.vec3],
     fixed: wp.array[wp.int32],
+    subscene: wp.array[wp.int32],
     x: wp.array[wp.vec3d],
     v: wp.array[wp.vec3d],
     changed: wp.array[wp.int32],
 ):
     """Keep the float64 state where ``state_in`` holds its float32 rounding, take ``state_in`` elsewhere.
 
-    ``changed[0]`` is set where the state of a free particle was taken.
+    ``changed[s]`` is set where the state of a free particle of subscene ``s`` was taken (one entry, 0, without
+    ``coupled_worlds``).
     """
     i = wp.tid()
     taken = int(0)
@@ -155,7 +157,7 @@ def _load_particles(
         v[i] = _to64(qd[i])
         taken = 1
     if taken != 0 and fixed[i] == 0:
-        changed[0] = 1
+        changed[subscene[i]] = 1
 
 
 @wp.kernel
@@ -168,6 +170,7 @@ def _load_bodies(
     base: wp.array[wp.int32],
     kinematic: wp.array[wp.int32],
     hold: wp.array[wp.int32],
+    subscene: wp.array[wp.int32],
     x: wp.array[wp.vec3d],
     v: wp.array[wp.vec3d],
     changed: wp.array[wp.int32],
@@ -176,7 +179,7 @@ def _load_bodies(
     ``hold`` holds (a kinematic body moving toward its aim, ``kinematic_motion="aim"``); give another the rigid state
     of ``state_in``: q = (p, rows of R) and its rate from Newton's COM twist.
 
-    ``changed[0]`` is set where a dynamic body took ``state_in``.
+    ``changed[s]`` is set where a dynamic body of subscene ``s`` took ``state_in``.
     """
     b = wp.tid()
     if hold[b] != 0:
@@ -206,7 +209,7 @@ def _load_bodies(
     for i in range(3):
         v[o + 1 + i] = wp.vec3d(A_dot[i, 0], A_dot[i, 1], A_dot[i, 2])
     if kinematic[b] == 0:
-        changed[0] = 1
+        changed[subscene[b]] = 1
 
 
 @wp.kernel
@@ -455,6 +458,11 @@ def _joint_terms(
     q_prev: wp.array[wp.float64],
     bdf2: int,
     restart: wp.array[wp.int32],
+    restart_rows: wp.array[wp.int32],
+    per_row: int,
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    body_base: wp.array[wp.int32],
     dt: wp.float64,
     drive_scale: wp.float64,
     q_start: wp.array[wp.float64],
@@ -474,10 +482,11 @@ def _joint_terms(
     masses the joint was built with; the drive, passive spring and passive damping as one quadratic potential of the
     step (libuipc's driving term, ``drive_scale`` 1 for a revolute joint, 1/2 for a prismatic one, whose driving
     energy counts its distance twice), with the velocity at the step's end of the step's integrator: BDF1, or with
-    ``bdf2`` BDF2 from the coordinate ``q_prev`` at the start of the step before, unless the engine's frame starts its
-    history (``restart[0]``) with an implicit Euler step; the limit as libuipc's cubic penalty with Newton's limit
-    stiffness at ``_LIMIT_OVERSHOOT``; ``joint_f`` as libuipc's external torque or force. ``q_start`` takes the
-    coordinate at the step's start."""
+    ``bdf2`` BDF2 from the coordinate ``q_prev`` at the start of the step before, unless the engine's frame starts the
+    history of the joint's bodies with an implicit Euler step: that of every row (``restart[0]``), or with ``per_row``
+    that of the rows of a reset or a new state of their world (``restart_rows``, at the base row of the child or of the
+    parent); the limit as libuipc's cubic penalty with Newton's limit stiffness at ``_LIMIT_OVERSHOOT``; ``joint_f`` as
+    libuipc's external torque or force. ``q_start`` takes the coordinate at the step's start."""
     e = wp.tid()
     j = joints[e]
     d = joint_qd_start[j]
@@ -510,7 +519,15 @@ def _joint_terms(
     # minus the gradient of K/2 (q - q_hat)^2; BDF2: qd = 3/2 (q - (4 q_n - q_nm1) / 3) / dt
     K = ke + ks + (kd + c) / dt
     q_aim = zero
-    if bdf2 != 0 and restart[0] == 0:
+    restarted = restart[0] != 0
+    if per_row != 0:
+        if restart_rows[body_base[joint_child[j]]] != 0:
+            restarted = True
+        p = joint_parent[j]
+        if p >= 0:
+            if restart_rows[body_base[p]] != 0:
+                restarted = True
+    if bdf2 != 0 and not restarted:
         w = wp.float64(1.5) / dt
         K = ke + ks + (kd + c) * w
         q_bar = (wp.float64(4.0) * q_n - q_prev[e]) / wp.float64(3.0)
@@ -735,6 +752,15 @@ def _any_selected(world_mask: wp.array[wp.bool], entries: wp.array[wp.int32], se
         if world_mask[entries[k]]:
             s = 1
     selected[0] = s
+
+
+@wp.kernel
+def _subscenes_selected(world_mask: wp.array[wp.bool], entry: wp.array[wp.int32], selected: wp.array[wp.int32]):
+    """``selected[s]`` = 1 where ``world_mask`` selects the world of subscene ``s`` (``coupled_worlds``): its entry
+    ``entry[s]``, the global entities' (the mask's last) for subscene 0, the k-th local world with content for
+    subscene k + 1."""
+    s = wp.tid()
+    selected[s] = wp.where(world_mask[entry[s]], 1, 0)
 
 
 # A copy of Newton's normalize_reset_world_mask (newton/_src/core/reset.py), which SolverBase.reset calls and which has
@@ -1806,8 +1832,9 @@ class SolverIPC(SolverBase):
     good.) Within a history the velocity lags the same way behind a force that
     jumps: gravity changed by :math:`\\Delta g` through
     :meth:`notify_model_changed` leaves it :math:`\\Delta t \\, \\Delta g / 2`
-    behind. With ``coupled_worlds`` a new state in one world makes the step an
-    implicit Euler step in every world. As in libuipc the coefficients assume
+    behind. With ``coupled_worlds`` a new state in one world, or its reset,
+    makes the step an implicit Euler step of that world's particles and bodies,
+    and the other worlds go on with BDF2. As in libuipc the coefficients assume
     one ``dt`` for consecutive steps: a step of another ``dt`` is taken as it
     is. The drives, passive springs and damping of joints take BDF2's velocity
     at the end of the step (see **Joints**); the default body stiffness follows
@@ -1861,12 +1888,15 @@ class SolverIPC(SolverBase):
     iteration counts and the step lengths, and a failure or an overflow in one
     world fails the step in every world. Copies of one world take the
     iterations of one copy, and each follows the run of that world alone to
-    the rounding of the shared sums. A reset of one world, or a new state
-    written for one world, discards the friction of the next step in every
-    world, since libuipc discards friction for a whole scene; with
-    ``adaptive_kappa`` the stiffness range is that of the whole scene. A model
-    with content in one local world is solved as without the option. The
-    engine takes at most 2048 contact elements times subscenes.
+    the rounding of the shared sums. A reset of one world (:meth:`reset` with
+    a ``world_mask``), or a new state written for one world, discards the
+    friction of that world's contacts and starts its BDF2 history anew, and
+    leaves every other world's friction and history as they were, bit for bit
+    (libuipc-warp's requests per subscene; libuipc discards friction for a
+    whole scene); with ``adaptive_kappa`` the stiffness range is that of the
+    whole scene. A model with content in one local world is solved as without
+    the option. The engine takes at most 2048 contact elements times
+    subscenes.
 
     **Kinematic bodies.** By default (``kinematic_motion="jump"``) a
     kinematic body is a fixed affine body whose pose the solver writes from
@@ -2079,8 +2109,9 @@ class SolverIPC(SolverBase):
     pose and twist are what the solver last wrote, keep the float64 state;
     anything else is taken from ``state_in``, a body as the rigid motion of its
     pose and twist. Taking a new state for a particle or body that is not
-    kinematic discards the friction of that step's contacts, as libuipc does
-    after a state is written and as a solver started from that state does.
+    kinematic discards the friction of that step's contacts (with
+    ``coupled_worlds``, the contacts of its world), as libuipc does after a
+    state is written and as a solver started from that state does.
     :meth:`reset` does the same without a new state. Output is written to
     ``state_out`` in float32.
 
@@ -2434,8 +2465,9 @@ class SolverIPC(SolverBase):
         version = getattr(uipc_warp, "__version__", "0")
         # the newest calls of each kind the solver makes: the frame status, the contact and subscene tabulars and the
         # stiffness policy, the start check, the joints, the iterations of captured steps, the restart of a BDF2
-        # history, the stitches (with the anchors and stitch_groups of the same release), the soft transform constraint
-        # (with constraint_groups)
+        # history, the friction discard and the restart per subscene (the module of the restarts, with the friction's
+        # of the same release), the stitches (with the anchors and stitch_groups of the same release), the soft
+        # transform constraint (with constraint_groups)
         needed = (
             (uipc_warp.arrays, "write_frame_status"),
             (uipc_warp.arrays.ArrayScene, "contact_model"),
@@ -2446,6 +2478,7 @@ class SolverIPC(SolverBase):
             (uipc_warp.arrays, "add_frame_iterations"),
             (uipc_warp.SimEngine, "prepare_capture"),
             (uipc_warp.SimEngine, "restart_history"),
+            (uipc_warp.backend.engine, "subscene_restarts"),
             (uipc_warp.arrays.ArrayScene, "add_stitches"),
             (uipc_warp.arrays.ArrayScene, "add_soft_transform_constraints"),
         )
@@ -2536,8 +2569,18 @@ class SolverIPC(SolverBase):
         self._free_particles = wp.array(free, dtype=wp.int32, device=device)
         self._dynamic_bodies = wp.array(dynamic, dtype=wp.int32, device=device)
         self._body_mass_inv = wp.array(self._mass_inverse(*self._dyadic), dtype=wp.mat44d, device=device)
-        self._changed = wp.zeros(1, dtype=wp.int32, device=device)
-        self._selected = wp.zeros(1, dtype=wp.int32, device=device)
+        # the requests of a new state or a reset, one flag per subscene (one without coupled_worlds): which subscenes
+        # discard their friction and start their BDF2 history anew, libuipc-warp's requests per subscene
+        n_sub = 1 if self._worlds is None else self._worlds.count
+        self._changed = wp.zeros(n_sub, dtype=wp.int32, device=device)
+        self._selected = wp.zeros(n_sub, dtype=wp.int32, device=device)
+        for name, entity_world in (("_particle_subscene", model.particle_world), ("_body_subscene", model.body_world)):
+            w = np.zeros(0, np.int64) if entity_world is None else entity_world.numpy()
+            subscene = np.zeros(len(w)) if self._worlds is None else self._worlds.subscene(w)
+            setattr(self, name, wp.array(np.asarray(subscene, np.int32), dtype=wp.int32, device=device))
+        if self._worlds is not None:  # the world_mask entry of every subscene: the global entities', then the worlds'
+            entry = np.concatenate([[model.world_count], self._worlds.worlds]).astype(np.int32)
+            self._subscene_entry = wp.array(entry, dtype=wp.int32, device=device)
         worlds = np.unique(
             np.concatenate([w.numpy() for w in (model.particle_world, model.body_world) if w is not None and len(w)])
         )
@@ -3632,7 +3675,7 @@ class SolverIPC(SolverBase):
             wp.launch(
                 _load_particles,
                 model.particle_count,
-                inputs=[state_in.particle_q, state_in.particle_qd, vm.fixed],
+                inputs=[state_in.particle_q, state_in.particle_qd, vm.fixed, self._particle_subscene],
                 outputs=[vm.x, vm.v, self._changed],
                 device=device,
             )
@@ -3649,6 +3692,7 @@ class SolverIPC(SolverBase):
                     self._body_base,
                     self._body_kinematic,
                     self._body_hold,
+                    self._body_subscene,
                 ],
                 outputs=[vm.x, vm.v, self._changed],
                 device=device,
@@ -3656,8 +3700,10 @@ class SolverIPC(SolverBase):
             self._uipc_warp.arrays.update_body_vertices(eng)  # surface vertices x = A x_bar + p
             self._aim_bodies_of(state_in)
             self._load_joints(state_in)
+        # the subscenes of the particles and bodies that took state_in discard their friction, and under BDF2 their
+        # step is an implicit Euler step (BDF1: nothing); with coupled_worlds the other worlds go on as they were
         eng.discard_friction(where=self._changed)
-        eng.restart_history(where=self._changed)  # BDF2: the step is an implicit Euler step (BDF1: nothing)
+        eng.restart_history(where=self._changed)
 
     def _aim_bodies_of(self, state_in: State) -> None:
         """``kinematic_motion="aim"``: the aims of the kinematic bodies for the step, from ``state_in`` (the poses
@@ -3777,6 +3823,9 @@ class SolverIPC(SolverBase):
         target_q, target_qd, joint_f = control.joint_target_q, control.joint_target_qd, control.joint_f
         bdf2 = self._config.integrator == "bdf2"
         restart = self._engine.bdf1_frame[0:1] if bdf2 else self._no_restart
+        # with coupled_worlds a reset or a new state restarts the rows of its worlds only (reset, _load)
+        rows = self._engine.subscene_restarts if bdf2 else None
+        restart_rows = self._no_restart if rows is None else rows.rows.pending
         for kind, group, scale in (("revolute", groups.revolute, 1.0), ("prismatic", groups.prismatic, 0.5)):
             if group is None:
                 continue
@@ -3811,6 +3860,11 @@ class SolverIPC(SolverBase):
                     q_prev,
                     int(bdf2),
                     restart,
+                    restart_rows,
+                    int(rows is not None),
+                    model.joint_parent,
+                    model.joint_child,
+                    self._body_base,
                     wp.float64(dt),
                     wp.float64(scale),
                 ],
@@ -4165,9 +4219,12 @@ class SolverIPC(SolverBase):
 
         Args:
             state: Unused; the next step reads its own ``state_in``.
-            world_mask: Optional boolean mask of shape ``(world_count + 1,)``. The worlds share one solve, so
-                the reset applies to all of them when the mask selects a world that owns particles or bodies.
-                ``None`` resets.
+            world_mask: Optional boolean mask of shape ``(world_count + 1,)``, the last entry the global entities.
+                With ``coupled_worlds`` the reset applies to the worlds it selects: their friction is discarded and
+                their BDF2 history starts anew, and every other world keeps its own, bit for bit (the worlds still
+                share one solve, see **Worlds**). A reset of the global entities discards the friction of every pair
+                with a global entity, a global ground plane among them. Without ``coupled_worlds`` the reset applies
+                when the mask selects a world that owns particles or bodies. ``None`` resets.
             flags: Unused.
         """
         del state, flags
@@ -4190,13 +4247,22 @@ class SolverIPC(SolverBase):
                 outputs=[self._body_hold],
                 device=self.model.device,
             )
-        wp.launch(
-            _any_selected,
-            1,
-            inputs=[world_mask, self._world_entries_device],
-            outputs=[self._selected],
-            device=self.model.device,
-        )
+        if self._worlds is None:
+            wp.launch(
+                _any_selected,
+                1,
+                inputs=[world_mask, self._world_entries_device],
+                outputs=[self._selected],
+                device=self.model.device,
+            )
+        else:  # the subscenes of the selected worlds (libuipc-warp's requests per subscene)
+            wp.launch(
+                _subscenes_selected,
+                self._worlds.count,
+                inputs=[world_mask, self._subscene_entry],
+                outputs=[self._selected],
+                device=self.model.device,
+            )
         self._engine.discard_friction(where=self._selected)
         self._engine.restart_history(where=self._selected)
 
