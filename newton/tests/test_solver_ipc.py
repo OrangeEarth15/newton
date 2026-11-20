@@ -5082,9 +5082,55 @@ def test_limit_damping_is_implicit_euler(test, device):
     test.assertGreater(np.abs(at_end - damped).max(), 5e-4)
 
 
+def test_armature_is_implicit_euler(test, device):
+    """With enable_joint_armature=True a revolute and a prismatic joint driven from rest by target gains, a passive
+    spring, passive damping and joint_f take their joint_armature as the inertia of their coordinate: they follow the
+    recurrence of (I + a) q'' = ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd + f step by step to 1e-4 of
+    their motion, under implicit Euler and, from an implicit Euler step, under BDF2, where the recurrence of I alone
+    is farther off. A ball joint's armature is refused with the option, every armature without it."""
+    for integrator, recurrence in (("bdf1", _drive_recurrence), ("bdf2", _drive_recurrence_bdf2)):
+        for kind, length, scale, armature in (("revolute", 0.1, 1.0, 20.0), ("prismatic", 1.0, 10.0, 200.0)):
+            with test.subTest(integrator=integrator, kind=kind):
+                gains = {"target_ke": 40.0, "target_kd": 2.0, "stiffness": 10.0, "damping": 1.0}
+                gains = {name: scale * value for name, value in gains.items()}
+                targets = {"target_q": 0.5 * length, "target_qd": 0.1 * length, "rest_q": -0.2 * length}
+                model, state, _ = _hinged(
+                    device, kind, axis=newton.Axis.X, radius=0.5, armature=armature, **targets, **gains
+                )
+                if integrator == "bdf1":
+                    with test.assertRaisesRegex(NotImplementedError, "joint armature.*enable_joint_armature=True"):
+                        newton.solvers.SolverIPC(model)
+                solver = newton.solvers.SolverIPC(
+                    model, integrator=integrator, enable_joint_armature=True, **_CONVERGED
+                )
+                control = model.control()
+                control.joint_f.assign(np.array([0.2 * scale * length], np.float32))
+                m = float(model.body_mass.numpy()[0])
+                inertia = float(model.body_inertia.numpy()[0][0, 0]) if kind == "revolute" else m
+                h, steps = 0.01, 100
+                q, _ = _steps(model, solver, state, steps, h, control)
+                args = {
+                    "ke": gains["target_ke"], "kd": gains["target_kd"], "ks": gains["stiffness"],
+                    "c": gains["damping"], "q_target": targets["target_q"], "qd_target": targets["target_qd"],
+                    "q_rest": targets["rest_q"], "f": 0.2 * scale * length,
+                }  # fmt: skip
+                expected = recurrence(inertia + armature, h, steps, **args)
+                motion = np.abs(expected).max()
+                test.assertGreater(motion, 0.1 * length)
+                np.testing.assert_allclose(q[:, 0], expected, rtol=0.0, atol=1e-4 * motion)
+                test.assertGreater(np.abs(recurrence(inertia, h, steps, **args) - expected).max(), 1e-2 * motion)
+    builder = newton.ModelBuilder()
+    link = builder.add_link(xform=wp.transform((0.0, 0.0, 1.0), wp.quat_identity()))
+    builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1)
+    builder.add_articulation([builder.add_joint_ball(-1, link, armature=0.01)])
+    with test.assertRaisesRegex(NotImplementedError, "armature of revolute and prismatic joints only"):
+        newton.solvers.SolverIPC(builder.finalize(device=device), enable_joint_armature=True)
+
+
 def test_joint_options_change_nothing_unused(test, device):
     """The enable_* options leave a model that does not use them as it is: a revolute and a prismatic joint driven
-    within their limits, with joint_limit_kd that never acts, step bit for bit as without the options."""
+    within their limits, with joint_limit_kd that never acts and no armature, step bit for bit as without the
+    options."""
     runs = []
     for option in (False, True):
         steps = []
@@ -5094,7 +5140,7 @@ def test_joint_options_change_nothing_unused(test, device):
                 damping=1.0, target_q=0.5 * length, limit_lower=-length, limit_upper=length, limit_ke=1.0e4,
                 limit_kd=10.0,
             )  # fmt: skip
-            solver = newton.solvers.SolverIPC(model, enable_joint_limit_damping=option)
+            solver = newton.solvers.SolverIPC(model, enable_joint_limit_damping=option, enable_joint_armature=option)
             test.assertEqual(solver._joint_options.drive_terms, option)
             steps.append(_steps(model, solver, state, 50, 0.01, None, lambda s: s.body_q.numpy().copy())[0])
         runs.append(steps)
@@ -5674,6 +5720,7 @@ for name, func in (
     ("test_distance_joint_swings_as_a_pendulum", test_distance_joint_swings_as_a_pendulum),
     ("test_distance_joint_between_bodies", test_distance_joint_between_bodies),
     ("test_limit_damping_is_implicit_euler", test_limit_damping_is_implicit_euler),
+    ("test_armature_is_implicit_euler", test_armature_is_implicit_euler),
     ("test_joint_options_change_nothing_unused", test_joint_options_change_nothing_unused),
 ):
     add_function_test(TestSolverIPCJointOptions, name, func, devices=devices)

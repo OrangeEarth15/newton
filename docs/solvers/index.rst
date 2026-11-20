@@ -410,7 +410,7 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
      - |yes|
      - |no|
      - |yes|
-     - |no| :sup:`15`
+     - REVOLUTE, PRISMATIC :sup:`15`
    * - :attr:`~newton.Model.joint_stiffness` / :attr:`~newton.Model.joint_rest_q`
      - REVOLUTE, PRISMATIC, D6
      - REVOLUTE, PRISMATIC, D6
@@ -467,8 +467,9 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
      - |no|
 
 | :sup:`2` Not enforced for BALL joints in SemiImplicit.
-| :sup:`15` SolverIPC raises ``NotImplementedError`` instead of ignoring the property: for non-zero armature or
-  friction, and for an effort limit below 1e6 on a degree of freedom with a drive.
+| :sup:`15` SolverIPC raises ``NotImplementedError`` instead of ignoring the property: for non-zero armature, but
+  with ``enable_joint_armature=True`` on a revolute or prismatic joint, whose armature is then the inertia of its
+  coordinate; for non-zero friction; and for an effort limit below 1e6 on a degree of freedom with a drive.
 | :sup:`16` SolverIPC enforces a limit as libuipc's cubic penalty, set to push back with ``joint_limit_ke`` times
   the overshoot at an overshoot of 1e-3 rad or m, more steeply beyond; ``joint_limit_kd`` is not read unless
   ``enable_joint_limit_damping=True``, which damps a joint that starts a step past a limit by ``joint_limit_kd``, as
