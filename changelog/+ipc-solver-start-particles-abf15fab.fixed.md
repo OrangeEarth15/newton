@@ -1,0 +1,1 @@
+Check, in ``SolverIPC``'s start check, the free particles of a model with springs against each other: two particles joined by a spring and placed inside their radii were accepted, and the first step failed.

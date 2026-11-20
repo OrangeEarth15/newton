@@ -798,6 +798,9 @@ def test_rejects_start_in_contact(test, device):
     def thick_ground(builder):
         builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(margin=0.01))
 
+    def spring(builder):
+        builder.add_spring(0, 1, 10.0, 0.0, 0.0)
+
     for case, parts, kwargs, pattern in (
         ("on the ground", (ground, box(0.125)), {}, r"body 0 and plane shape 0 start 0 m apart"),
         ("into the ground", (ground, box(0.12)), {}, r"body 0 and plane shape 0 start -0.005 m apart"),
@@ -816,6 +819,13 @@ def test_rejects_start_in_contact(test, device):
         (
             "two particles inside their radii",
             (particle(1.0, 0.1), particle(1.0, 0.1, x=0.15)),
+            {},
+            r"particle 0 and particle 1 start 0.15 m apart, at or inside their contact thickness \(0.2 m\)",
+        ),
+        # with a spring the scene gives the engine its contact surface, whose vertices are the particles too
+        (
+            "two particles inside their radii, joined by a spring",
+            (particle(1.0, 0.1), particle(1.0, 0.1, x=0.15), spring),
             {},
             r"particle 0 and particle 1 start 0.15 m apart, at or inside their contact thickness \(0.2 m\)",
         ),

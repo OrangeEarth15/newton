@@ -2392,9 +2392,13 @@ class SolverIPC(SolverBase):
         points = np.asarray(eng.contact_points, np.int64)
         if len(points) == 0:
             return
-        # the engine's contact bodies, with the particles on no surface (each a body of its own) taken as one
+        # the engine's contact bodies, with the particles on no surface (each a body of its own) taken as one. The
+        # surface vertices are those of the contact triangles and edges: the engine's own list holds the particles too
+        # where the scene gives it the contact surface (with springs or stitches)
         body = eng.body.numpy().astype(np.int64)
-        surface_vertices = np.asarray(eng.surface["vertices"], np.int64)
+        tris = np.asarray(eng.surface["triangles"], np.int64).reshape(-1, 3)
+        edges = np.asarray(eng.surface["edges"], np.int64).reshape(-1, 2)
+        surface_vertices = np.unique(np.concatenate([tris.reshape(-1), edges.reshape(-1)]))
         lone = np.setdiff1d(points, surface_vertices)
         group = body.copy()
         lone_group = int(group.max()) + 1
@@ -2438,8 +2442,6 @@ class SolverIPC(SolverBase):
         np.maximum.at(reach, point_group, thickness[points])
         all_still = np.ones(len(ids), bool)
         np.logical_and.at(all_still, point_group, still[points])
-        tris = np.asarray(eng.surface["triangles"], np.int64).reshape(-1, 3)
-        edges = np.asarray(eng.surface["edges"], np.int64).reshape(-1, 2)
         # the primitives of each part, sorted by part: rows, whether they move, and where each part's rows start (a
         # primitive's vertices are in one contact body and one element)
         prims = {}
