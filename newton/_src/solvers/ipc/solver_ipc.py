@@ -4729,6 +4729,7 @@ class SolverIPC(SolverBase):
         model, device = self.model, self.model.device
         self._world_body = -1
         self._joint_rows, self._joint_strength, self._joint_history, self._joint_rate = {}, {}, {}, {}
+        self._joint_bodies = {}
         if model.joint_count == 0:
             return
         # the libuipc joint of every joint: its own type, but for a D6 joint (enable_d6_joints) that of the joint
@@ -4760,7 +4761,6 @@ class SolverIPC(SolverBase):
                 fixed=True,
                 anchors=self._body_anchors.get(model.body_count),
             )
-        self._joint_bodies = {}
         for kind, t in (
             ("revolute", JointType.REVOLUTE),
             ("prismatic", JointType.PRISMATIC),

@@ -1857,6 +1857,27 @@ def _newton_heightfield_triangles(
     out[t, 2] = v0 + wp.quat_rotate(q, shape.auxiliary)
 
 
+def test_notify_new_masses_without_joints(test, device):
+    """A model of bodies without joints (links that no joint holds) takes new masses in place: a box built with
+    add_link, given twice its mass and inertia, falls as before (gravity does not depend on the mass) and the
+    engine holds the new dyadic mass."""
+    builder = newton.ModelBuilder()
+    b = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()))
+    builder.add_shape_box(b, hx=0.1, hy=0.1, hz=0.1)
+    model = builder.finalize(device=device)
+    test.assertEqual(model.joint_count, 0)
+    solver = newton.solvers.SolverIPC(model, newton_velocity_tol=1e-5, linear_tol_rate=1e-12)
+    mass = float(model.body_mass.numpy()[b])
+    model.body_mass.assign(2.0 * model.body_mass.numpy())
+    model.body_inertia.assign(2.0 * model.body_inertia.numpy())
+    model.body_inv_mass.assign(0.5 * model.body_inv_mass.numpy())
+    solver.notify_model_changed(newton.ModelFlags.BODY_INERTIAL_PROPERTIES)
+    test.assertAlmostEqual(float(solver._dyadic[0][b]), 2.0 * mass, places=5)
+    traj = _run(model, solver, 10, field="body_q")
+    k = np.arange(1, 11)
+    np.testing.assert_allclose(traj[:, b, 2], 1.0 - 9.81 * 0.01**2 * k * (k + 1) / 2.0, atol=1e-5)
+
+
 def test_heightfield_triangles_and_rest(test, device):
     """A height field is the triangle mesh Newton's narrow phase collides with: its triangles in the solver are those
     of get_triangle_shape_from_heightfield, in the field's scaled and moved frame. Spheres dropped on its two
@@ -5688,6 +5709,7 @@ for name, func in (
     ("test_reset_inside_captured_graph", test_reset_inside_captured_graph),
     ("test_reset_checks_world_mask_as_newton_does", test_reset_checks_world_mask_as_newton_does),
     ("test_notify_updates_gravity_and_inertia_in_place", test_notify_updates_gravity_and_inertia_in_place),
+    ("test_notify_new_masses_without_joints", test_notify_new_masses_without_joints),
     ("test_gravity_per_world", test_gravity_per_world),
     ("test_graph_outdated_after_long_solves", test_graph_outdated_after_long_solves),
     ("test_graph_outdated_takes_the_ladder_guesses", test_graph_outdated_takes_the_ladder_guesses),
