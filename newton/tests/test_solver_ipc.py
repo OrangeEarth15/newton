@@ -5290,6 +5290,356 @@ def test_rejects_d6_joints_libuipc_lacks(test, device):
                 newton.solvers.SolverIPC(m, enable_d6_joints=True)
 
 
+# ---------------------------------------------------------------------------------------------- coupled solvers
+
+# tight tolerances of the comparisons with SolverIPC alone
+_TIGHT = {"newton_velocity_tol": 1.0e-6, "linear_tol_rate": 1.0e-12, "semi_implicit": False}
+# converged steps for proxies: a proxy's feedback is the force of the step's contact terms at its end, which the stiff
+# barrier makes as accurate as the Newton loop's convergence
+_CONVERGED = {"newton_velocity_tol": 1.0e-4, "linear_tol_rate": 1.0e-10, "semi_implicit": False}
+
+
+def _joints_of(model, bodies):
+    """The joints whose child is one of ``bodies`` (the free joints add_body gives them)."""
+    return [int(j) for j in np.flatnonzero(np.isin(model.joint_child.numpy(), bodies))]
+
+
+def _coupled_content(device, others=True):
+    """SolverIPC's content of the coupled-solver tests, a box standing on the ground and a cloth falling onto it, with
+    ``others`` between and after XPBD's sphere 2 m away and VBD's cloth 2 m away on the other side. Returns the model,
+    the box, the sphere, the IPC cloth's particles and the VBD cloth's."""
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    sphere = None
+    if others:
+        sphere = builder.add_body(xform=wp.transform(wp.vec3(2.0, 0.0, 0.5), wp.quat_identity()), label="sphere")
+        builder.add_shape_sphere(sphere, radius=0.1)
+    box = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.1005), wp.quat_identity()), label="box")
+    builder.add_shape_box(box, hx=0.1, hy=0.1, hz=0.1)
+    _cloth(builder, 12, 0.025, 0.25, mass=1.0e-3, tri_k=1.0e3, edge_ke=1.0e-3)
+    ipc_cloth = list(range(builder.particle_count))
+    vbd_cloth = []
+    if others:
+        _cloth(builder, 8, 0.025, 0.3, center=(-2.0, 0.0), mass=1.0e-3, tri_k=1.0e3, edge_ke=1.0e-3)
+        vbd_cloth = list(range(len(ipc_cloth), builder.particle_count))
+        builder.color()
+    return builder.finalize(device=device), box, sphere, ipc_cloth, vbd_cloth
+
+
+def _full_layout_coupler():
+    """``SolverCoupled`` in the layout it falls back to when it cannot compact an entry's view: views that hold every
+    body, joint and particle of the model, the other entries' disabled."""
+    from newton.solvers.experimental.coupled import SolverCoupled  # noqa: PLC0415
+
+    class FullLayout(SolverCoupled):
+        def _compact_entry_view_if_needed(self, view, cfg, *args):
+            return None
+
+    return FullLayout
+
+
+def test_coupled_entry_steps_as_alone(test, device):
+    """SolverIPC as an entry of SolverCoupled, owning a cloth that falls onto a box on the ground, next to XPBD owning a
+    sphere and VBD a second cloth, steps as SolverIPC alone on the cloth, the box and the ground, in the compact views
+    SolverCoupled builds and in the full layout it falls back to: over 40 steps at tight tolerances the particles' and
+    the box's float64 states stay within 1e-7 m of the run alone. (Two runs of SolverIPC alone part by up to 2e-9 m over
+    these steps, from the order of float atomics in the contact assembly, so no bound of 1e-10 holds.) The other
+    entries' content is no part of SolverIPC's solve: VBD's cloth adds no triangle, its particles are fixed and in an
+    element that meets nothing, and in the full layout XPBD's sphere is a kinematic body without surface."""
+    from newton.solvers.experimental.coupled import SolverCoupled  # noqa: PLC0415
+
+    alone, box0, _, cloth0, _ = _coupled_content(device, others=False)
+    for layout, coupler in (("compact", SolverCoupled), ("full", _full_layout_coupler())):
+        with test.subTest(layout=layout):
+            model, box, sphere, ipc_cloth, vbd_cloth = _coupled_content(device)
+            entries = [
+                SolverCoupled.Entry(
+                    "ipc",
+                    lambda view: newton.solvers.SolverIPC(view, **_TIGHT),
+                    bodies=[box],
+                    joints=_joints_of(model, [box]),
+                    particles=ipc_cloth,
+                ),
+                SolverCoupled.Entry(
+                    "xpbd", newton.solvers.SolverXPBD, bodies=[sphere], joints=_joints_of(model, [sphere])
+                ),
+                SolverCoupled.Entry("vbd", newton.solvers.SolverVBD, particles=vbd_cloth),
+            ]
+            coupled = coupler(model, entries)
+            ipc = coupled.solver("ipc")
+            solo = newton.solvers.SolverIPC(alone, **_TIGHT)
+            view = coupled.view("ipc")
+            local = list(view.body_label).index("box")
+            test.assertEqual(local, 0 if layout == "compact" else box)
+            base, base0 = ipc._scene.layout().body_base[local], solo._scene.layout().body_base[box0]
+            n = len(cloth0)
+            s0, s1, t0, t1 = model.state(), model.state(), alone.state(), alone.state()
+            worst = 0.0
+            for _ in range(40):
+                coupled.step(s0, s1, None, None, 0.01)
+                s0, s1 = s1, s0
+                solo.step(t0, t1, None, None, 0.01)
+                t0, t1 = t1, t0
+                x, x0 = ipc._engine.vm.x.numpy(), solo._engine.vm.x.numpy()
+                worst = max(
+                    worst, np.abs(x[:n] - x0[:n]).max(), np.abs(x[base : base + 4] - x0[base0 : base0 + 4]).max()
+                )
+            test.assertLess(worst, 1.0e-7, f"{layout}: {worst:.3g} m")
+            np.testing.assert_allclose(s0.particle_q.numpy()[ipc_cloth], t0.particle_q.numpy()[cloth0], atol=1e-6)
+            test.assertGreater(s0.particle_q.numpy()[vbd_cloth, 2].max(), -1.0)  # VBD's cloth stepped on its own
+            # the other entries' content: no triangle or contact point of VBD's cloth, a sphere without surface
+            tris, tris0 = (np.asarray(e._engine.surface["triangles"]).reshape(-1, 3) for e in (ipc, solo))
+            test.assertEqual(len(tris), len(tris0))
+            test.assertFalse(np.isin(tris, vbd_cloth).any())
+            test.assertTrue(np.all(ipc._fixed_particle[vbd_cloth]))
+            # the elements of the contact points and half planes, which VBD's cloth meets none of
+            points = np.asarray(ipc._engine.contact_points, np.int64)
+            held = np.unique(np.concatenate([ipc._cids[points], ipc._plane_cids]))
+            test.assertFalse(ipc._enabled[np.ix_(np.unique(ipc._cids[vbd_cloth]), held)].any())
+            if layout == "full":
+                offsets = ipc._scene.layout().body_vertex_offsets
+                test.assertTrue(ipc._kinematic_body[sphere])
+                test.assertEqual(offsets[sphere + 1] - offsets[sphere], 0)
+            ipc.check_status()
+
+
+def _proxy_scene(device, gap=0.012):
+    """The proxy scene of the coupling tests: a static support (top at z = 0.1), a 30 cm cloth ``gap`` above it, and a
+    1 kg box ``gap`` above the cloth. Returns the model and the box."""
+    builder = newton.ModelBuilder()
+    builder.add_shape_box(-1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.05), wp.quat_identity()), hx=0.1, hy=0.1, hz=0.05)
+    _cloth(builder, 12, 0.025, 0.1 + gap, mass=1.0e-3, tri_k=1.0e3, edge_ke=1.0e-3)
+    box = _box_body(builder, (0.0, 0.0, 0.1 + 2.0 * gap + 0.05), (0.05, 0.05, 0.05))
+    return builder.finalize(device=device), box
+
+
+def _proxy_coupler(model, box, mode, **ipc_options):
+    """XPBD owning the box as the source of a body proxy, SolverIPC owning the cloth as its destination, one
+    iteration of ``mode`` ("lagged" or "staggered")."""
+    from newton.solvers.experimental.coupled import SolverCoupledProxy  # noqa: PLC0415
+
+    return SolverCoupledProxy(
+        model,
+        [
+            SolverCoupledProxy.Entry("xpbd", newton.solvers.SolverXPBD, bodies=[box], joints=_joints_of(model, [box])),
+            SolverCoupledProxy.Entry(
+                "ipc",
+                lambda view: newton.solvers.SolverIPC(view, **ipc_options),
+                particles=list(range(model.particle_count)),
+            ),
+        ],
+        SolverCoupledProxy.Config(
+            proxies=[SolverCoupledProxy.Proxy(source="xpbd", destination="ipc", bodies=[box], mode=mode)]
+        ),
+    )
+
+
+def test_proxy_box_rests_on_cloth(test, device):
+    """SolverCoupledProxy with XPBD owning a 1 kg box and SolverIPC a cloth on a static support, the box SolverIPC's
+    proxy, at 1/240 s with converged steps. With the staggered transfer, which syncs the source's pose at the end of
+    its step, the box comes to rest on the cloth and the harvested feedback carries its weight within 1%, with no
+    torque. With the lagged transfer, which syncs the pose at its start, the box keeps bouncing on the cloth: the
+    feedback, one step late, of a contact this stiff does not settle; it stays on the cloth, and the feedback averages
+    out to its weight. In every step of both, no edge of SolverIPC's engine crosses a triangle, no step fails, and the
+    proxy's synced state keeps the friction of its contacts (no friction discard requested); its contact with the
+    static support is disabled."""
+    from uipc_warp.validation import SurfaceChecker  # noqa: PLC0415
+
+    dt = 1.0 / 240.0
+    for mode, steps in (("staggered", 240), ("lagged", 400)):
+        with test.subTest(mode=mode):
+            model, box = _proxy_scene(device)
+            coupled = _proxy_coupler(model, box, mode, **_CONVERGED)
+            ipc = coupled.solver("ipc")
+            test.assertTrue(ipc._proxy_body.all())
+            test.assertFalse(ipc._kinematic_body.any())
+            # the proxy's shape does not meet the static support, and meets the cloth
+            support, shape = 0, int(model.body_shapes[box][0])
+            e = ipc._enabled
+            test.assertFalse(e[ipc._cids[ipc._vertex_shape == shape][0], ipc._cids[ipc._vertex_shape == support][0]])
+            test.assertTrue(e[ipc._cids[ipc._vertex_shape == shape][0], ipc._cids[0]])
+            checker = SurfaceChecker.from_engine(ipc._engine)
+            feedback = coupled.entry_state("xpbd", "input")
+            weight = float(model.body_mass.numpy()[box]) * 9.81
+            s0, s1 = model.state(), model.state()
+            fz, hits, z = [], 0, []
+            for _ in range(steps):
+                coupled.step(s0, s1, None, None, dt)
+                s0, s1 = s1, s0
+                hits += checker.intersections(ipc._engine.vm.x)
+                test.assertEqual(int(ipc._changed.numpy()[0]), 0)  # the proxy's synced state discards no friction
+                fz.append(coupled._proxy_mappings[0].coupling_forces.numpy()[box])
+                z.append(float(s0.body_q.numpy()[box, 2]))
+            ipc.check_status()
+            test.assertEqual(hits, 0)
+            fz, z = np.array(fz), np.array(z)
+            top = 0.1 + 0.05  # the box's centre resting on the support, without the cloth
+            test.assertGreater(z.min(), top)
+            test.assertLess(z[-100:].max(), top + 0.03)  # on the cloth, not thrown off
+            if mode == "staggered":
+                np.testing.assert_allclose(fz[-60:, 2], weight, rtol=0.01)  # at rest: the box's weight
+                test.assertLess(np.abs(fz[-60:, :2]).max(), 0.01 * weight)
+                test.assertLess(np.abs(fz[-60:, 3:]).max(), 0.01 * weight * 0.05)
+                test.assertLess(np.abs(s0.body_qd.numpy()[box]).max(), 1e-3)
+            else:  # over the last 300 steps the feedback's mean holds the box up
+                test.assertAlmostEqual(float(fz[-300:, 2].mean()) / weight, 1.0, delta=0.02)
+            test.assertTrue(np.isfinite(feedback.body_f.numpy()).all())
+
+
+def test_coupled_restarts_refused(test, device):
+    """A coupler that solves a step more than once is refused when it is built, with SolverIPC as either entry:
+    SolverCoupledProxy with two iterations and SolverCoupledADMM with its default five, naming the iterations. The
+    restart notification itself raises too, and a reset's (dt 0) does not."""
+    from newton.solvers.experimental.coupled import SolverCoupledADMM, SolverCoupledProxy  # noqa: PLC0415
+
+    model, box = _proxy_scene(device)
+    particles = list(range(model.particle_count))
+    for source in ("xpbd", "ipc"):
+        with test.subTest(source=source):
+            bodies = {"xpbd": [box], "ipc": []}
+            entries = [
+                SolverCoupledProxy.Entry(
+                    "xpbd", newton.solvers.SolverXPBD, bodies=bodies["xpbd"], joints=_joints_of(model, bodies["xpbd"])
+                ),
+                SolverCoupledProxy.Entry("ipc", newton.solvers.SolverIPC, particles=particles),
+            ]
+            proxy = SolverCoupledProxy.Proxy(source="xpbd", destination="ipc", bodies=[box])
+            if source == "ipc":  # the cloth's particles proxied into XPBD
+                proxy = SolverCoupledProxy.Proxy(source="ipc", destination="xpbd", particles=particles[:4])
+            with test.assertRaisesRegex(NotImplementedError, "iterations"):
+                SolverCoupledProxy(model, entries, SolverCoupledProxy.Config(proxies=[proxy], iterations=2))
+    with test.assertRaisesRegex(NotImplementedError, "iterations"):
+        SolverCoupledADMM(
+            model,
+            [
+                SolverCoupledADMM.Entry(
+                    "xpbd", newton.solvers.SolverXPBD, bodies=[box], joints=_joints_of(model, [box])
+                ),
+                SolverCoupledADMM.Entry("ipc", newton.solvers.SolverIPC, particles=particles),
+            ],
+            SolverCoupledADMM.Config(),
+        )
+    solver = newton.solvers.SolverIPC(model)
+    state = model.state()
+    solver.coupling_notify_input_state_update(state, newton.StateFlags.ALL, iteration_restart=True, dt=0.0)
+    with test.assertRaisesRegex(NotImplementedError, "again from its start"):
+        solver.coupling_notify_input_state_update(state, newton.StateFlags.ALL, iteration_restart=True, dt=0.01)
+    solver.coupling_notify_iteration_restarts(False)  # one iteration: an entry
+
+
+def _coupled_boxes(device):
+    """``_boxes_apart`` with XPBD's sphere 2 m away: SolverCoupled with SolverIPC owning the box above the static box,
+    and the pose that rests it exactly on the static box (touching contact)."""
+    from newton.solvers.experimental.coupled import SolverCoupled  # noqa: PLC0415
+
+    builder = newton.ModelBuilder()
+    builder.add_shape_box(
+        -1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.125), wp.quat_identity()), hx=0.125, hy=0.125, hz=0.125
+    )
+    box = _box_body(builder, (0.0, 0.0, 0.376), (0.125, 0.125, 0.125))
+    sphere = builder.add_body(xform=wp.transform(wp.vec3(2.0, 0.0, 0.5), wp.quat_identity()))
+    builder.add_shape_sphere(sphere, radius=0.1)
+    model = builder.finalize(device=device)
+    coupled = SolverCoupled(
+        model,
+        [
+            SolverCoupled.Entry("ipc", newton.solvers.SolverIPC, bodies=[box], joints=_joints_of(model, [box])),
+            SolverCoupled.Entry("xpbd", newton.solvers.SolverXPBD, bodies=[sphere], joints=_joints_of(model, [sphere])),
+        ],
+    )
+    touching = model.body_q.numpy()
+    touching[box, 2] = 0.375
+    return model, coupled, box, touching
+
+
+def test_coupled_status_of_captured_steps(test, device):
+    """SolverCoupled steps SolverIPC without observables, so SolverIPC keeps the status bits of its steps for
+    check_status() without a container. A captured coupled step replayed from a clean state reports nothing; replayed
+    from a state that rests the box in touching contact it reports THICKNESS_VIOLATED and raises, and the read clears
+    the bits. A solver that is no entry of a coupled solver refuses check_status() without a container."""
+    model, coupled, box, touching = _coupled_boxes(device)
+    ipc = coupled.solver("ipc")
+    s0, s1 = model.state(), model.state()
+    coupled.step(s0, s1, None, None, 0.01)  # loads the state and the modules
+    s0.assign(s1)
+    with wp.ScopedCapture(device=device) as capture:
+        coupled.step(s0, s1, None, None, 0.01)
+    wp.capture_launch(capture.graph)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        test.assertFalse(ipc.check_status())
+    q = s0.body_q.numpy()
+    q[box] = touching[box]
+    s0.body_q.assign(q)
+    wp.capture_launch(capture.graph)
+    with test.assertRaisesRegex(RuntimeError, "failed on THICKNESS_VIOLATED"):
+        ipc.check_status()
+    test.assertFalse(ipc.check_status())  # cleared by the read
+    alone = newton.solvers.SolverIPC(model)
+    with test.assertRaisesRegex(ValueError, "or none for an entry of a coupled solver"):
+        alone.check_status()
+
+
+def test_coupled_reset_is_the_solvers_reset(test, device):
+    """A reset through SolverCoupled is SolverIPC's reset with the coupler's world mask, the reset's own notification
+    doing nothing: from one state of a box sliding on a static box, the next step keeps its friction candidates after
+    a reset whose mask leaves out the global entities (SolverIPC's content is global), and records none after a reset
+    that selects them and after a reset without a mask."""
+    model, coupled, box, _ = _coupled_boxes(device)
+    ipc = coupled.solver("ipc")
+    s0, s1 = model.state(), model.state()
+    qd = s0.body_qd.numpy()
+    qd[box, 0] = 0.2  # sliding along x
+    s0.body_qd.assign(qd)
+    for _ in range(30):  # lands on the static box and slides
+        coupled.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+    snapshot = _solver_snapshot(ipc)
+    counts = {}
+    for case, mask in (("none", None), ("world 0", [True, False]), ("global", [False, True]), ("all", "all")):
+        _restore(ipc, snapshot)
+        state = model.state()
+        state.assign(s0)
+        if mask == "all":
+            coupled.reset(state)
+        elif mask is not None:
+            coupled.reset(state, world_mask=wp.array(mask, dtype=wp.bool, device=device))
+        coupled.step(state, s1, None, None, 0.01)
+        counts[case] = sum(len(p) for p in _frame_start(ipc)["lists"].values())
+    test.assertGreater(counts["none"], 0)
+    test.assertEqual(counts["world 0"], counts["none"])
+    test.assertEqual(counts["global"], 0)
+    test.assertEqual(counts["all"], 0)
+
+
+def test_proxies_refuse_bdf2_and_al_ipc(test, device):
+    """An entry with proxies refuses integrator="bdf2" (the coupler writes a proxy's state at every step) and
+    contact_constitution="al-ipc" (no contact forces to harvest the feedback from); without proxies an entry takes
+    both. SolverIPC reads no Contacts: it takes full-surface soft contacts and returns proxy contacts unchanged."""
+    from newton.solvers.experimental.coupled import SolverCoupled  # noqa: PLC0415
+
+    model, box = _proxy_scene(device)
+    for options, pattern in (({"integrator": "bdf2"}, "bdf2"), ({"contact_constitution": "al-ipc"}, "al-ipc")):
+        with test.subTest(**options):
+            with test.assertRaisesRegex(NotImplementedError, pattern):
+                _proxy_coupler(model, box, "lagged", **options)
+    coupled = SolverCoupled(
+        model,
+        [
+            SolverCoupled.Entry("xpbd", newton.solvers.SolverXPBD, bodies=[box], joints=_joints_of(model, [box])),
+            SolverCoupled.Entry(
+                "ipc",
+                lambda view: newton.solvers.SolverIPC(view, integrator="bdf2"),
+                particles=list(range(model.particle_count)),
+            ),
+        ],
+    )
+    ipc = coupled.solver("ipc")
+    test.assertTrue(ipc.coupling_supports_full_surface_soft_contacts())
+    contacts = newton.CollisionPipeline(model).contacts()
+    test.assertIs(ipc.coupling_prepare_proxy_contacts(model.state(), contacts), contacts)
+
+
 class TestSolverIPC(unittest.TestCase):
     pass
 
@@ -5583,6 +5933,72 @@ class TestSolverIPCInputs(unittest.TestCase):
             first = np.unique(elements.shape[shapes[world[shapes] == 0]])
             self.assertEqual(used.tolist(), first.tolist(), f"trial {trial}: the copies share the elements of world 0")
 
+    def test_contact_elements_of_proxies(self):
+        """In a view with proxies, as a coupled solver gives an entry, on random models of static shapes, dynamic and
+        kinematic bodies, free particles and a cloth: the pairs the contact elements enable on different bodies are
+        Model.shape_contact_pairs less those of a proxy shape with another proxy shape, a static shape or a shape on a
+        body of inverse mass 0 (another entry's); a proxy particle meets the shapes a particle of its kind meets but
+        those, the entry's own particles as a particle of its kind does, and no other proxy particle."""
+        from newton._src.solvers.ipc.solver_ipc import _colliding_shapes, _contact_elements  # noqa: PLC0415
+        from newton.solvers.experimental.coupled import ModelView  # noqa: PLC0415
+
+        rng = np.random.default_rng(13)
+        for trial in range(30):
+            builder = newton.ModelBuilder()
+            for _ in range(int(rng.integers(1, 3))):
+                xform = wp.transform(wp.vec3(*rng.uniform(-1.0, 1.0, 3)), wp.quat_identity())
+                builder.add_shape_box(-1, xform=xform, hx=0.1, hy=0.1, hz=0.1)
+            bodies = []
+            for _ in range(int(rng.integers(3, 7))):
+                xform = wp.transform(wp.vec3(*rng.uniform(-1.0, 1.0, 3)), wp.quat_identity())
+                body = builder.add_body(xform=xform, is_kinematic=bool(rng.random() < 0.2))
+                cfg = newton.ModelBuilder.ShapeConfig(collision_group=int(rng.choice([-1, 1, 2])))
+                builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+                bodies.append(body)
+            for _ in range(3):
+                builder.add_particle(wp.vec3(*rng.uniform(-1.0, 1.0, 3)), wp.vec3(0.0, 0.0, 0.0), 0.1, radius=0.02)
+            _cloth(builder, 2, 0.1, 2.0)
+            model = builder.finalize(device="cpu")
+            view = ModelView(model, "entry")
+            shuffled = rng.permutation(bodies)
+            proxies, others = shuffled[: int(rng.integers(1, 3))], shuffled[3:4]
+            view.mark_proxy_bodies(wp.array(proxies, dtype=int, device="cpu"))
+            if len(others):
+                view.disable_body_dynamics(wp.array(others, dtype=int, device="cpu"))
+            proxy_particles = rng.choice(model.particle_count, 3, replace=False)
+            view.mark_proxy_particles(wp.array(proxy_particles, dtype=int, device="cpu"))
+            elements = _contact_elements(view)
+            body = model.shape_body.numpy()
+            role = np.where(body < 0, 2, 0)
+            role[np.isin(body, others)] = 2
+            role[np.isin(body, proxies)] = 1
+            shapes = np.flatnonzero(_colliding_shapes(model))
+            enabled = set()
+            for i in shapes:
+                for j in shapes[shapes > i]:
+                    if body[i] != body[j] and elements.enabled[elements.shape[i], elements.shape[j]]:
+                        enabled.add((int(i), int(j)))
+            listed = {tuple(sorted(map(int, p))) for p in model.shape_contact_pairs.numpy()}
+            kept = {p for p in listed if not (1 in (role[p[0]], role[p[1]]) and min(role[p[0]], role[p[1]]) >= 1)}
+            self.assertEqual(enabled, kept, f"trial {trial}")
+            proxy = np.zeros(model.particle_count, bool)
+            proxy[proxy_particles] = True
+            own = elements.particle[~proxy]
+            for p in proxy_particles:
+                e = elements.particle[p]
+                kind = 2 if elements.on_mesh[p] else 1  # the element of a particle of its kind: Q_surf or Q_free
+                same = np.flatnonzero((elements.on_mesh == elements.on_mesh[p]) & ~proxy)
+                self.assertEqual(e, elements.enabled.shape[0] - 3 + kind, f"trial {trial}")
+                for i in shapes:
+                    meets = (
+                        bool(model.shape_flags.numpy()[i] & int(newton.ShapeFlags.COLLIDE_PARTICLES)) and role[i] == 0
+                    )
+                    self.assertEqual(bool(elements.enabled[e, elements.shape[i]]), meets, f"trial {trial}")
+                for q in own:  # the entry's own particles as a particle of its kind meets them
+                    if len(same):
+                        self.assertEqual(elements.enabled[e, q], elements.enabled[elements.particle[same[0]], q])
+                self.assertFalse(elements.enabled[e, elements.particle[proxy]].any(), f"trial {trial}")
+
 
 @requires("uipc_warp")
 class TestSolverIPCContact(unittest.TestCase):
@@ -5631,6 +6047,12 @@ class TestSolverIPCKinematicAims(unittest.TestCase):
 class TestSolverIPCContactOutput(unittest.TestCase):
     """CONTACT_F: the solver's own contact terms written into the step's Contacts, one row per term with a force, and
     their forces at the end of the step."""
+
+
+@requires("uipc_warp")
+class TestSolverIPCCoupling(unittest.TestCase):
+    """SolverIPC as an entry of Newton's coupled solvers: its view of the model, proxies and their feedback, the status
+    of its steps and the couplers it refuses."""
 
 
 devices = get_cuda_test_devices()
@@ -5839,6 +6261,15 @@ for name, func in (
     ("test_joint_options_change_nothing_unused", test_joint_options_change_nothing_unused),
 ):
     add_function_test(TestSolverIPCJointOptions, name, func, devices=devices)
+for name, func in (
+    ("test_coupled_entry_steps_as_alone", test_coupled_entry_steps_as_alone),
+    ("test_proxy_box_rests_on_cloth", test_proxy_box_rests_on_cloth),
+    ("test_coupled_restarts_refused", test_coupled_restarts_refused),
+    ("test_coupled_status_of_captured_steps", test_coupled_status_of_captured_steps),
+    ("test_coupled_reset_is_the_solvers_reset", test_coupled_reset_is_the_solvers_reset),
+    ("test_proxies_refuse_bdf2_and_al_ipc", test_proxies_refuse_bdf2_and_al_ipc),
+):
+    add_function_test(TestSolverIPCCoupling, name, func, devices=devices)
 
 
 if __name__ == "__main__":

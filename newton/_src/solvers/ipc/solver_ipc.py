@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import warp as wp
+from newton.solvers.experimental.coupled import CouplingInterface
 
 from newton import (
     MAXVAL,
@@ -150,7 +151,7 @@ def _nearest_rotation(A: wp.mat33d) -> wp.mat33d:
 def _load_particles(
     q: wp.array[wp.vec3],
     qd: wp.array[wp.vec3],
-    fixed: wp.array[wp.int32],
+    quiet: wp.array[wp.int32],
     subscene: wp.array[wp.int32],
     x: wp.array[wp.vec3d],
     v: wp.array[wp.vec3d],
@@ -158,8 +159,8 @@ def _load_particles(
 ):
     """Keep the float64 state where ``state_in`` holds its float32 rounding, take ``state_in`` elsewhere.
 
-    ``changed[s]`` is set where the state of a free particle of subscene ``s`` was taken (one entry, 0, without
-    ``coupled_worlds``).
+    ``changed[s]`` is set where the state of a particle of subscene ``s`` was taken that ``quiet`` does not mark (one
+    entry, 0, without ``coupled_worlds``): a free particle that is no coupled solver's proxy.
     """
     i = wp.tid()
     taken = int(0)
@@ -169,7 +170,7 @@ def _load_particles(
     if _differs(_to32(v[i]), qd[i]):
         v[i] = _to64(qd[i])
         taken = 1
-    if taken != 0 and fixed[i] == 0:
+    if taken != 0 and quiet[i] == 0:
         changed[subscene[i]] = 1
 
 
@@ -181,7 +182,7 @@ def _load_bodies(
     written_qd: wp.array[wp.spatial_vector],
     body_com: wp.array[wp.vec3],
     base: wp.array[wp.int32],
-    kinematic: wp.array[wp.int32],
+    quiet: wp.array[wp.int32],
     hold: wp.array[wp.int32],
     subscene: wp.array[wp.int32],
     x: wp.array[wp.vec3d],
@@ -192,7 +193,8 @@ def _load_bodies(
     ``hold`` holds (a kinematic body moving toward its aim, ``kinematic_motion="aim"``); give another the rigid state
     of ``state_in``: q = (p, rows of R) and its rate from Newton's COM twist.
 
-    ``changed[s]`` is set where a dynamic body of subscene ``s`` took ``state_in``.
+    ``changed[s]`` is set where a body of subscene ``s`` that ``quiet`` does not mark took ``state_in``: a dynamic
+    body that is no coupled solver's proxy.
     """
     b = wp.tid()
     if hold[b] != 0:
@@ -221,7 +223,7 @@ def _load_bodies(
     A_dot = wp.skew(w) * R
     for i in range(3):
         v[o + 1 + i] = wp.vec3d(A_dot[i, 0], A_dot[i, 1], A_dot[i, 2])
-    if kinematic[b] == 0:
+    if quiet[b] == 0:
         changed[subscene[b]] = 1
 
 
@@ -1156,6 +1158,13 @@ def _copy_status(
         residual[entries[k]] = residual_in[0]
 
 
+@wp.kernel
+def _keep_status(step: wp.array[wp.int32], kept: wp.array[wp.int32]):
+    """The status bits of a step joined into those kept since ``check_status()`` last read them (an entry of a coupled
+    solver, which steps the solver without observables)."""
+    kept[0] = kept[0] | step[0]
+
+
 @wp.func
 def _term_sides(kind: int):
     """(vertices of the first primitive, vertices of the term) of a contact term of libuipc-warp's ``ContactForces``
@@ -1578,7 +1587,8 @@ def _default_d_hat(model: Model) -> float:
     """libuipc's d_hat, or less when the model has smaller colliding features [m]: a quarter of the smallest half-size of
     a colliding shape other than a plane (a sphere's or capsule's radius, the smaller of a cylinder's or cone's radius
     and half height, a box's or ellipsoid's smallest half extent, half of a mesh's thinnest extent that is not zero),
-    and half the median rest length of the edges of the cloth triangles and tetrahedra."""
+    and half the median rest length of the edges of the cloth triangles and tetrahedra the solver simulates
+    (``_own_elements``)."""
     size = np.inf
     if model.shape_count:
         types, scale = model.shape_type.numpy(), model.shape_scale.numpy().astype(np.float64)
@@ -1600,11 +1610,12 @@ def _default_d_hat(model: Model) -> float:
                 size = min(size, float(half))
     d_hat = min(_D_HAT, _D_HAT_SHAPE_SHARE * size)
     edges = []
-    if model.tri_count:
-        t = model.tri_indices.numpy().reshape(-1, 3)
+    own_tris, own_tets, _ = _own_elements(model)
+    if own_tris.any():
+        t = model.tri_indices.numpy().reshape(-1, 3)[own_tris]
         edges.append(np.concatenate([t[:, [0, 1]], t[:, [1, 2]], t[:, [2, 0]]]))
-    if model.tet_count:
-        t = model.tet_indices.numpy().reshape(-1, 4)
+    if own_tets.any():
+        t = model.tet_indices.numpy().reshape(-1, 4)[own_tets]
         edges.append(np.concatenate([t[:, [a, b]] for a in range(3) for b in range(a + 1, 4)]))
     if edges:
         e = np.unique(np.sort(np.concatenate(edges), axis=1), axis=0)
@@ -1773,8 +1784,12 @@ def _check_supported(model: Model, coupled_worlds: bool = False, joints: _JointO
         raise NotImplementedError(
             f"SolverIPC does not enforce equality constraints; model.mujoco has {rows} enabled equality rows."
         )
-    for name, activations in (("triangle", model.tri_activations), ("tetrahedron", model.tet_activations)):
-        if activations is not None and len(activations) and np.any(activations.numpy() != 0.0):
+    own_tris, own_tets, _ = _own_elements(model)
+    for name, activations, own in (
+        ("triangle", model.tri_activations, own_tris),
+        ("tetrahedron", model.tet_activations, own_tets),
+    ):
+        if activations is not None and len(activations) and np.any(activations.numpy()[own] != 0.0):
             raise NotImplementedError(f"SolverIPC does not take {name} activations; the model has non-zero ones.")
     _check_joints(model, joints)
     _check_springs(model)
@@ -1786,23 +1801,25 @@ def _check_supported(model: Model, coupled_worlds: bool = False, joints: _JointO
 
 def _check_springs(model: Model) -> None:
     """Springs that libuipc represents: no damping (libuipc has no damping element), a rest length that is not
-    negative (above 0 libuipc's Hookean spring, 0 its soft vertex stitch) and a stiffness that is not negative."""
+    negative (above 0 libuipc's Hookean spring, 0 its soft vertex stitch) and a stiffness that is not negative. The
+    springs of a coupled solver's other entries are theirs (``_own_elements``)."""
     if model.spring_count == 0:
         return
+    own = _own_elements(model)[2]
     for name, array, bad, why in (
         ("damping", model.spring_damping, lambda v: v != 0.0, "libuipc's springs and stitches have no damping"),
         ("rest length", model.spring_rest_length, lambda v: ~(v >= 0.0), "it must not be negative"),
         ("stiffness", model.spring_stiffness, lambda v: ~(v >= 0.0), "it must not be negative"),
     ):
         values = array.numpy()
-        found = np.flatnonzero(bad(values))
+        found = np.flatnonzero(bad(values) & own)
         if len(found):
             k = int(found[0])
             raise NotImplementedError(
                 f"SolverIPC does not simulate spring {k}, whose {name} is {float(values[k])!r}: {why}."
             )
     ends = model.spring_indices.numpy().reshape(-1, 2)
-    same = np.flatnonzero(ends[:, 0] == ends[:, 1])
+    same = np.flatnonzero((ends[:, 0] == ends[:, 1]) & own)
     if len(same):
         k = int(same[0])
         raise NotImplementedError(
@@ -1941,10 +1958,48 @@ def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
 
 
 def _kinematic_bodies(model: Model) -> np.ndarray:
-    """The bodies the solver does not let forces move: :attr:`~newton.BodyFlags.KINEMATIC` ones and those of mass 0."""
+    """The bodies the solver does not let forces move: :attr:`~newton.BodyFlags.KINEMATIC` ones, those of mass 0, and
+    those of inverse mass 0. A body of positive mass has an inverse mass of 0 only in a coupled solver's view, which
+    zeroes the inverse mass of the bodies another entry owns and keeps their mass (class docstring, **Coupling**)."""
     if model.body_count == 0:
         return np.zeros(0, bool)
-    return ((model.body_flags.numpy() & int(BodyFlags.KINEMATIC)) != 0) | (model.body_mass.numpy() <= 0.0)
+    kinematic = ((model.body_flags.numpy() & int(BodyFlags.KINEMATIC)) != 0) | (model.body_mass.numpy() <= 0.0)
+    return kinematic | (model.body_inv_mass.numpy() <= 0.0)
+
+
+def _own_elements(model: Model) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Which triangles, tetrahedra and springs the solver simulates, as masks over ``tri_indices``, ``tet_indices`` and
+    ``spring_indices``: every one but those whose particles are all disabled, of mass 0 and not
+    :attr:`~newton.ParticleFlags.ACTIVE`. A coupled solver's view disables the particles another entry owns, which
+    simulates their cloth, soft bodies and springs (class docstring, **Coupling**); in a model of one solver such a
+    triangle or tetrahedron holds nothing that moves, and Newton's own contacts skip its faces."""
+    own = tuple(np.ones(n, bool) for n in (model.tri_count, model.tet_count, model.spring_count))
+    if model.particle_count == 0 or not (model.tri_count or model.tet_count or model.spring_count):
+        return own
+    flags = model.particle_flags.numpy()
+    disabled = (model.particle_mass.numpy() <= 0.0) & ((flags & int(ParticleFlags.ACTIVE)) == 0)
+    if not disabled.any():
+        return own
+    indices = ((model.tri_indices, 3), (model.tet_indices, 4), (model.spring_indices, 2))
+    return tuple(
+        ~disabled[rows.numpy().reshape(-1, k)].all(axis=1) if len(mask) else mask
+        for mask, (rows, k) in zip(own, indices, strict=True)
+    )
+
+
+def _proxy_bodies(model: Model) -> np.ndarray:
+    """The bodies a coupled solver's view marks as proxies (:attr:`~newton.BodyFlags.PROXY`): another entry's bodies
+    that this entry moves as its own, with the view's masses (class docstring, **Coupling**)."""
+    if model.body_count == 0:
+        return np.zeros(0, bool)
+    return (model.body_flags.numpy() & int(BodyFlags.PROXY)) != 0
+
+
+def _proxy_particles(model: Model) -> np.ndarray:
+    """The particles a coupled solver's view marks as proxies (:attr:`~newton.ParticleFlags.PROXY`)."""
+    if model.particle_count == 0:
+        return np.zeros(0, bool)
+    return (model.particle_flags.numpy() & int(ParticleFlags.PROXY)) != 0
 
 
 def _local_worlds(model: Model) -> np.ndarray:
@@ -2060,14 +2115,22 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
     world leaves the signature, and a shape in a filter pair shares its element with its copies in replicated worlds
     (``_filter_classes``). With ``aims`` (``kinematic_motion="aim"``) a shape's motion joins the signature: on a
     dynamic body, on a kinematic body (``_kinematic_bodies``), or static; the pairs of two shapes that are each
-    kinematic or static are disabled, and ``Model.shape_contact_pairs`` less those pairs is the set compared. Raises
-    ``NotImplementedError`` when the shape pairs the elements enable on different bodies are not exactly that set (a
-    pair array assigned to the model). The engine tests the elements' table and the subscenes' table apart, so their
-    sizes are not multiplied; it refuses what it cannot hold itself, naming the sizes.
+    kinematic or static are disabled, and ``Model.shape_contact_pairs`` less those pairs is the set compared. In a
+    coupled solver's view with proxies (class docstring, **Coupling**) a shape's part joins the signature
+    (``_proxy_roles``): the pairs of a shape on a proxy body with another such shape or with a static shape or one on a
+    body of inverse mass 0 are disabled, and so are those of proxy particles, which take elements of their own
+    (``Q_free``, ``Q_surf``), with those shapes and among themselves; the set compared leaves those shape pairs out
+    too. Raises ``NotImplementedError`` when the shape pairs the elements enable on different bodies are not exactly
+    that set (a pair array assigned to the model; a coupled solver's view assigns it this set). Only the triangles and
+    tetrahedra the solver simulates (``_own_elements``) make vertices of cloth and tetrahedra. The engine tests the
+    elements' table and the subscenes' table apart, so their sizes are not multiplied; it refuses what it cannot hold
+    itself, naming the sizes.
     """
     ns, n_particles = model.shape_count, model.particle_count
     shape_element = np.full(ns, -1, np.int64)
     classes = 0
+    proxy_particle = _proxy_particles(model)
+    proxies = bool(proxy_particle.any() or _proxy_bodies(model).any())
     if ns:
         flags = model.shape_flags.numpy()
         group = model.shape_collision_group.numpy().astype(np.int64)
@@ -2101,6 +2164,9 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
             motion = np.where(body < 0, 2, 0)
             motion[body >= 0] = _kinematic_bodies(model)[body[body >= 0]]
             columns.append(motion)
+        if proxies:  # the shape's part in a coupled solver's proxy contact
+            role = _proxy_roles(model, body)
+            columns.append(role)
         signature = np.stack(columns, axis=1)[colliding]
         _, first, inverse = np.unique(signature, axis=0, return_index=True, return_inverse=True)
         order = np.argsort(first)  # classes numbered in the order of their first shapes
@@ -2110,7 +2176,7 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
         shape_element[colliding] = 1 + shape_class
         classes = len(first)
         rep = colliding[first[order]]  # one shape of each class
-    count = 1 + classes + (3 if n_particles else 0)
+    count = 1 + classes + (3 if n_particles else 0) + (2 if proxy_particle.any() else 0)
     enabled = np.zeros((count, count), bool)
     mu = np.zeros((count, count))
     shapes = slice(1, 1 + classes)
@@ -2131,18 +2197,38 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
             moves = motion[rep] == 0
             pairs &= moves[:, None] | moves[None, :]
             immovable = motion != 0
+        if proxies:  # a proxy meets neither another proxy nor what is static or of inverse mass 0
+            proxy, still = role[rep] == 1, role[rep] == 2
+            pairs &= ~(proxy[:, None] & (proxy | still)[None, :]) & ~(still[:, None] & proxy[None, :])
         enabled[shapes, shapes] = pairs
         mu[shapes, shapes] = 0.5 * (m[:, None] + m[None, :])
-        _check_shape_pairs(model, colliding, shape_class, body[colliding], pairs, worlds is not None, immovable)
+        _check_shape_pairs(
+            model,
+            colliding,
+            shape_class,
+            body[colliding],
+            pairs,
+            worlds is not None,
+            immovable,
+            role if proxies else None,
+        )
     particle_element = np.zeros(n_particles, np.int64)
     on_mesh = np.zeros(n_particles, bool)
     if n_particles:
         p_free, p_surf, p_off = 1 + classes, 2 + classes, 3 + classes
-        for cells in (model.tri_indices, model.tet_indices):
-            if cells is not None and len(cells):
-                on_mesh[cells.numpy().reshape(-1)] = True
+        own_tris, own_tets, _ = _own_elements(model)
+        for cells, own, k in ((model.tri_indices, own_tris, 3), (model.tet_indices, own_tets, 4)):
+            if own.any():
+                on_mesh[cells.numpy().reshape(-1, k)[own].reshape(-1)] = True
         active = (model.particle_flags.numpy() & int(ParticleFlags.ACTIVE)) != 0
         particle_element = np.where(on_mesh, p_surf, np.where(active, p_free, p_off))
+        if proxy_particle.any():  # a coupled solver's proxy particles, by kind
+            q_free, q_surf = 4 + classes, 5 + classes
+            particle_element = np.where(
+                proxy_particle & (particle_element == p_surf),
+                q_surf,
+                np.where(proxy_particle & (particle_element == p_free), q_free, particle_element),
+            )
         # particles meet the shapes that collide with particles, of their own world or global (with subscenes, the
         # subscenes keep the worlds apart)
         for p in (p_free, p_surf):
@@ -2155,7 +2241,31 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
         enabled[p_free, p_free] = enabled[p_free, p_surf] = enabled[p_surf, p_free] = spheres
         enabled[p_surf, p_surf] = True
         mu[p_free : p_surf + 1, p_free : p_surf + 1] = model.particle_mu
+        if proxy_particle.any():
+            # a proxy particle meets the shapes a particle of its kind meets but those a proxy does not, and the
+            # entry's own particles as a particle of its kind does; no other proxy
+            for q, p in ((q_free, p_free), (q_surf, p_surf)):
+                if classes:
+                    enabled[q, shapes] = enabled[shapes, q] = hits_particles[rep] & (role[rep] == 0)
+                    mu[q, shapes] = mu[shapes, q] = 0.5 * (model.soft_contact_mu + m)
+                for other in (p_free, p_surf):
+                    enabled[q, other] = enabled[other, q] = enabled[p, other]
+                    mu[q, other] = mu[other, q] = model.particle_mu
     return _ContactElements(shape_element, particle_element, on_mesh, enabled, mu)
+
+
+def _proxy_roles(model: Model, body: np.ndarray) -> np.ndarray:
+    """The part of every shape in a coupled solver's proxy contact (class docstring, **Coupling**), from its body
+    ``body``: 1 on a proxy body, 2 static or on a body of inverse mass 0, 0 otherwise. A proxy meets none of the
+    shapes of parts 1 and 2, as the default ``CouplingInterface.coupling_prepare_proxy_contacts`` drops Newton's
+    contacts of a proxy with another proxy, a static shape or a body of inverse mass 0."""
+    role = np.where(body < 0, 2, 0)
+    on_body = body >= 0
+    if on_body.any():
+        b = body[on_body]
+        inverse_mass = model.body_inv_mass.numpy()[b]
+        role[on_body] = np.where(_proxy_bodies(model)[b], 1, np.where(inverse_mass <= 0.0, 2, 0))
+    return role
 
 
 def _enabled_pair_count(shape_class: np.ndarray, shape_body: np.ndarray, enabled: np.ndarray) -> int:
@@ -2182,20 +2292,31 @@ def _check_shape_pairs(
     enabled: np.ndarray,
     by_world: bool = False,
     immovable: np.ndarray | None = None,
+    proxy_role: np.ndarray | None = None,
 ) -> None:
     """Raise unless the shape classes and their ``enabled`` pairs give exactly ``Model.shape_contact_pairs``: every
     listed pair enabled, and as many enabled pairs of shapes on different bodies (static shapes on body -1) as listed.
     ``shapes`` are the shapes the solver triangulates, ``shape_class`` and ``shape_body`` theirs. ``by_world``: the
     worlds are subscenes, and only shapes of one world or a global one pair; the count is taken per world, the global
     shapes among themselves and every world's shapes among themselves and with the global ones. ``immovable``: per
-    shape, whether it is kinematic or static; the listed pairs of two such shapes are left out of the comparison."""
+    shape, whether it is kinematic or static; the listed pairs of two such shapes are left out of the comparison.
+    ``proxy_role``: per shape, its part in a coupled solver's proxy contact (``_proxy_roles``); the listed pairs of a
+    proxy shape with another or with a shape of part 2 are left out too."""
     cls = np.full(model.shape_count, -1, np.int64)
     cls[shapes] = shape_class
     listed = model.shape_contact_pairs
     listed = np.zeros((0, 2), np.int64) if listed is None else listed.numpy().reshape(-1, 2).astype(np.int64)
     expected = model.shape_contact_pair_count
+    dropped, of = np.zeros(len(listed), bool), []
     if immovable is not None:
-        listed = listed[~(immovable[listed[:, 0]] & immovable[listed[:, 1]])]
+        dropped |= immovable[listed[:, 0]] & immovable[listed[:, 1]]
+        of.append("of two kinematic or static shapes")
+    if proxy_role is not None:
+        r0, r1 = proxy_role[listed[:, 0]], proxy_role[listed[:, 1]]
+        dropped |= ((r0 == 1) & (r1 > 0)) | ((r1 == 1) & (r0 > 0))
+        of.append("of a proxy with another proxy or a static shape")
+    if of:
+        listed = listed[~dropped]
         expected = len(listed)
     a, b = cls[listed[:, 0]], cls[listed[:, 1]]
     missing = (a < 0) | (b < 0) | ~enabled[np.maximum(a, 0), np.maximum(b, 0)]
@@ -2216,12 +2337,12 @@ def _check_shape_pairs(
             f"shapes {int(listed[missing[0], 0])} and {int(listed[missing[0], 1])} are listed but not in it"
             if len(missing)
             else f"they give {count} pairs, Model.shape_contact_pairs lists {expected}"
-            + (" that are not of two kinematic or static shapes" if immovable is not None else "")
+            + (f" that are not {' or '.join(of)}" if of else "")
         )
         raise NotImplementedError(
             "SolverIPC collides the shapes that Newton's collision groups, worlds, collide flags and filter pairs "
             f"let collide, which must be Model.shape_contact_pairs: {detail}. A pair array assigned to the model is "
-            "not supported."
+            "supported only when it is that set, as a coupled solver's view assigns it."
         )
 
 
@@ -2443,7 +2564,7 @@ def _closed_volume(v: np.ndarray, f: np.ndarray) -> float:
     return abs(float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum()) / 6.0)
 
 
-class SolverIPC(SolverBase):
+class SolverIPC(SolverBase, CouplingInterface):
     """Incremental Potential Contact solver for soft bodies, cloth and rigid bodies.
 
     Wraps the `libuipc-warp <https://github.com/OrangeEarth15/libuipc-warp>`_ engine,
@@ -2493,7 +2614,8 @@ class SolverIPC(SolverBase):
       as the default ``d_hat`` does (see the note below). A rigid body does
       not collide with itself.
     - kinematic particles (zero mass or not :attr:`~newton.ParticleFlags.ACTIVE`)
-      and kinematic bodies (:attr:`~newton.BodyFlags.KINEMATIC` or zero mass).
+      and kinematic bodies (:attr:`~newton.BodyFlags.KINEMATIC`, zero mass
+      or zero inverse mass, see **Coupling**).
       By default they follow the poses written to ``state_in`` every step; the
       jump is not swept by collision detection. With
       ``kinematic_motion="aim"`` kinematic bodies move inside the step toward
@@ -3168,6 +3290,61 @@ class SolverIPC(SolverBase):
     The output costs, only when requested, one pass over the step's contact
     terms and one over its rows, and 64 bytes per slot of the contact lists.
 
+    **Coupling.** The solver is a
+    :class:`~newton.solvers.experimental.coupled.CouplingInterface`: an entry
+    of Newton's coupled solvers (``SolverCoupled``, ``SolverCoupledProxy``),
+    built on the entry's ``ModelView``. It reads a view as a model; three
+    things that only a view holds take their meaning from the coupler. A body
+    of positive mass whose inverse mass is 0, which the view makes of a body
+    another entry owns, is a kinematic body: a fixed affine body whose pose
+    follows ``state_in``, and whose shapes, which the view hides, collide with
+    nothing. A triangle, tetrahedron or spring whose particles are all disabled
+    (mass 0 and not :attr:`~newton.ParticleFlags.ACTIVE`), as the view disables
+    another entry's particles, is that entry's: neither simulated nor a contact
+    surface here, its particles fixed points that collide with nothing. And the
+    view's :attr:`~newton.Model.shape_contact_pairs`, which the coupler filters
+    by the view's collide flags, is the set the solver's rules give (see
+    **Contact**). An entry therefore steps its own content as the solver alone
+    does, to the rounding of its sums.
+
+    A proxy body or particle (:attr:`~newton.BodyFlags.PROXY`,
+    :attr:`~newton.ParticleFlags.PROXY`), another entry's that this entry moves
+    with the view's scaled mass, is an unknown of the step. It does not collide
+    with another proxy, with a static shape or with a body of inverse mass 0,
+    as the interface's default ``coupling_prepare_proxy_contacts`` drops
+    Newton's contacts of those pairs (the solver reads no
+    :class:`~newton.Contacts`, and returns them as they are). The coupler
+    writes a proxy's pose and twist at every step; unlike any other new state,
+    that write keeps the friction of the step's contacts, where libuipc
+    discards friction after any write of a state: a proxy would otherwise
+    never have friction. A proxy's new pose is not swept: a source solver that
+    moves a proxy into this entry's content by more than the room the barrier
+    leaves fails the step. A proxy's feedback is the interface's default,
+    its change of momentum in the step, which balances the step to the
+    Newton tolerance: give an entry with proxies converged steps
+    (``semi_implicit=False`` and a ``newton_velocity_tol`` of about 1e-4 m/s).
+    With
+    ``SolverCoupledProxy``'s lagged transfer, the default, a proxy resting on
+    this entry's content does not come to rest: the feedback of a contact this
+    stiff reaches the source one step late and keeps the proxy bouncing,
+    though its average holds the proxy up; the staggered transfer
+    (``mode="staggered"``) brings it to rest. Proxies are refused with
+    ``integrator="bdf2"``, whose history the coupler's writes would leave
+    behind, and with ``contact_constitution="al-ipc"``, which would not sweep a
+    proxy's synced pose into its active set.
+    The effective masses, gravity and the rewinds of the proxies take the
+    interface's defaults.
+
+    A coupler that solves a step more than once (a ``SolverCoupledProxy`` or
+    ``SolverCoupledADMM`` with more than one iteration) is refused when it is
+    built: the solver cannot yet start a step's solve again from the same
+    state. The coupler steps its entries without observables, so the solver as
+    an entry keeps the status bits of its steps, captured or not, and
+    :meth:`check_status` without a container reports them and clears them. A
+    reset through the coupler is :meth:`reset` with the coupler's world mask.
+    Of a view that the coupler cannot compact, the other entries' joints are
+    in the view, disabled, and are checked as the solver's own.
+
     This solver requires the optional ``libuipc-warp`` package (``import uipc_warp``).
 
     Args:
@@ -3476,6 +3653,9 @@ class SolverIPC(SolverBase):
         # (allocated with the request and with every engine built after it, outside any capture)
         self._contact_output = False
         self._contact_export = None
+        # an entry of a coupled solver (coupling_notify_iteration_restarts): the status bits of its steps since
+        # check_status() last read them, and the scratch word of one step's bits
+        self._sticky_status = self._step_status = None
         self._build_engine()
         self._check_start()
 
@@ -3610,8 +3790,13 @@ class SolverIPC(SolverBase):
         model = self.model
         device = model.device
         self._engine = self._frame_graph = self._forces = self._contact_export = None
+        # a coupled solver's proxies (class docstring, **Coupling**)
+        self._proxy_body, self._proxy_particle = _proxy_bodies(model), _proxy_particles(model)
+        self._proxies = bool(self._proxy_body.any() or self._proxy_particle.any())
         if model.particle_count == 0 and model.body_count == 0:
             return
+        if self._proxies:
+            self._check_proxies()
         # the global world's gravity, which every part overrides with the gravity of its own world
         self._config.gravity = tuple(model.gravity.numpy()[-1].astype(np.float64))
         if not self._d_hat_given:
@@ -3691,6 +3876,12 @@ class SolverIPC(SolverBase):
         )
         self._world_entries = np.where(worlds < 0, model.world_count, worlds).astype(np.int32)
         self._world_entries_device = wp.array(self._world_entries, dtype=wp.int32, device=device)
+        # the particles whose new state from state_in discards no friction: the fixed ones (the engine's flags), and
+        # a coupled solver's proxy particles, whose state the coupler writes at every step
+        self._particle_quiet = None
+        if self._proxy_particle.any():
+            quiet = (self._fixed_particle | self._proxy_particle).astype(np.int32)
+            self._particle_quiet = wp.array(quiet, dtype=wp.int32, device=device)
         self._status_scratch = wp.zeros(1, dtype=wp.int32, device=device)
         self._residual_scratch = wp.zeros(1, dtype=wp.float32, device=device)
         self._no_restart = wp.zeros(1, dtype=wp.int32, device=device)  # BDF1: no history to restart
@@ -3700,6 +3891,12 @@ class SolverIPC(SolverBase):
         if nb:
             self._body_base = wp.array(layout.body_base.astype(np.int32), dtype=wp.int32, device=device)
             self._body_kinematic = wp.array(self._kinematic_body.astype(np.int32), dtype=wp.int32, device=device)
+            # the bodies whose new state from state_in discards no friction: the kinematic ones, and a coupled
+            # solver's proxy bodies
+            self._body_quiet = self._body_kinematic
+            if self._proxy_body.any():
+                quiet = (self._kinematic_body | self._proxy_body).astype(np.int32)
+                self._body_quiet = wp.array(quiet, dtype=wp.int32, device=device)
             # kinematic_motion="aim": the bodies whose state the solver keeps (held), and those whose state_out copies
             # state_in (passed through: every kinematic body, but those moving toward their aims)
             self._body_hold = wp.zeros(nb, dtype=wp.int32, device=device)
@@ -3716,6 +3913,23 @@ class SolverIPC(SolverBase):
             self._body_qd_written = wp.empty(nb, dtype=wp.spatial_vector, device=device)
             self._forget_written()
         self._make_engine(None)
+
+    def _check_proxies(self) -> None:
+        """``NotImplementedError`` for the options a coupled solver's proxies cannot take (class docstring,
+        **Coupling**): BDF2, whose history a proxy's state, written by the coupler at every step, would leave behind,
+        and AL-IPC, which would not sweep the proxies' synced poses into its active set."""
+        if self._config.integrator == "bdf2":
+            raise NotImplementedError(
+                "SolverIPC: integrator='bdf2' is not offered to an entry of a coupled solver with proxies. The coupler "
+                "writes a proxy's state at every step, so that the step would start a proxy's BDF2 history anew every "
+                "time; use integrator='bdf1'."
+            )
+        if self._config.contact_constitution == "al-ipc":
+            raise NotImplementedError(
+                "SolverIPC: contact_constitution='al-ipc' is not offered to an entry of a coupled solver with proxies: "
+                "the coupler writes a proxy's pose at every step, and AL-IPC takes a pair into its active set only when "
+                "the step's motion sweeps into it."
+            )
 
     def _check_al_ipc(self, elements: _ContactElements) -> None:
         """``NotImplementedError`` for contact that libuipc's AL-IPC does not constrain. Its active set holds the
@@ -4242,12 +4456,13 @@ class SolverIPC(SolverBase):
             subscene_element=0 if self._worlds is None else self._worlds.subscene(model.particle_world.numpy()),
             gravity=self._world_gravity()[model.particle_world.numpy()],
         )
-        if model.tet_count == 0:
+        own = _own_elements(model)[1]  # in a coupled solver's view, without another entry's tetrahedra
+        if not own.any():
             return np.zeros((0, 4), np.int64)
-        tets = model.tet_indices.numpy().reshape(-1, 4).astype(np.int64)
-        Dm_inv = model.tet_poses.numpy().astype(np.float64).reshape(-1, 3, 3)
+        tets = model.tet_indices.numpy().reshape(-1, 4).astype(np.int64)[own]
+        Dm_inv = model.tet_poses.numpy().astype(np.float64).reshape(-1, 3, 3)[own]
         volume = 1.0 / (6.0 * np.abs(np.linalg.det(Dm_inv)))
-        materials = model.tet_materials.numpy().astype(np.float64).reshape(-1, 3)
+        materials = model.tet_materials.numpy().astype(np.float64).reshape(-1, 3)[own]
         # k_mu and k_lambda are Lame parameters; libuipc's StableNeoHookean.apply_to stores mu and lambda + mu, the
         # SNK1 parameters whose linearization is Hooke's law with those Lame parameters (stable_neo_hookean.cpp)
         k_mu, k_lambda = materials[:, 0], materials[:, 1]
@@ -4255,14 +4470,15 @@ class SolverIPC(SolverBase):
         return tets
 
     def _add_cloth(self, scene, tets: np.ndarray) -> None:
-        """Triangles not on a tetrahedral body: Baraff-Witkin membrane and discrete-shell hinges."""
+        """Triangles not on a tetrahedral body: Baraff-Witkin membrane and discrete-shell hinges; in a coupled solver's
+        view, not another entry's (``_own_elements``)."""
         model = self.model
         if model.tri_count == 0:
             return
         tris = model.tri_indices.numpy().reshape(-1, 3).astype(np.int64)
         on_tet = np.zeros(model.particle_count, bool)
         on_tet[tets.ravel()] = True
-        cloth = ~on_tet[tris].all(axis=1)
+        cloth = ~on_tet[tris].all(axis=1) & _own_elements(model)[0]
         if not cloth.any():
             return
         tris = tris[cloth]
@@ -4328,8 +4544,9 @@ class SolverIPC(SolverBase):
         edges = model.spring_indices.numpy().reshape(-1, 2).astype(np.int64)
         rest = model.spring_rest_length.numpy().astype(np.float64)
         ke = model.spring_stiffness.numpy().astype(np.float64)
-        self._zero_springs = np.flatnonzero(rest == 0.0)
-        hookean = rest > 0.0
+        own = _own_elements(model)[2]  # in a coupled solver's view, not another entry's
+        self._zero_springs = np.flatnonzero((rest == 0.0) & own)
+        hookean = (rest > 0.0) & own
         if not hookean.any():
             return
         kappa = self._uipc_warp.arrays.spring_kappa(ke[hookean], rest[hookean], 1.0)
@@ -4506,8 +4723,7 @@ class SolverIPC(SolverBase):
         body_mass = model.body_mass.numpy().astype(np.float64)
         body_com = model.body_com.numpy().astype(np.float64)
         body_inertia = model.body_inertia.numpy().astype(np.float64)
-        body_flags = model.body_flags.numpy()
-        self._kinematic_body = ((body_flags & int(BodyFlags.KINEMATIC)) != 0) | (body_mass <= 0.0)
+        self._kinematic_body = _kinematic_bodies(model)
         mass, first, second = np.zeros(nb), np.zeros((nb, 3)), np.zeros((nb, 3, 3))
         for b in range(nb):
             inertia = 0.5 * (body_inertia[b] + body_inertia[b].T)
@@ -4891,8 +5107,10 @@ class SolverIPC(SolverBase):
             self._engine.stop_on_overflow = False
             self._engine.advance(dt)
             self._uipc_warp.arrays.add_frame_iterations(self._engine, self._iterations)
+            self._keep_status()
         else:
             status = self._advance_eager(dt)
+            self._keep_status()
             if status.failed:
                 self._write_observables(observables, state_out)
                 self._forget_written()  # the engine holds the failed solve: the next step takes state_in
@@ -4948,10 +5166,11 @@ class SolverIPC(SolverBase):
         device, vm = model.device, eng.vm
         self._changed.zero_()
         if model.particle_count:
+            quiet = vm.fixed if self._particle_quiet is None else self._particle_quiet
             wp.launch(
                 _load_particles,
                 model.particle_count,
-                inputs=[state_in.particle_q, state_in.particle_qd, vm.fixed, self._particle_subscene],
+                inputs=[state_in.particle_q, state_in.particle_qd, quiet, self._particle_subscene],
                 outputs=[vm.x, vm.v, self._changed],
                 device=device,
             )
@@ -4966,7 +5185,7 @@ class SolverIPC(SolverBase):
                     self._body_qd_written,
                     model.body_com,
                     self._body_base,
-                    self._body_kinematic,
+                    self._body_quiet,
                     self._body_hold,
                     self._body_subscene,
                 ],
@@ -5573,17 +5792,21 @@ class SolverIPC(SolverBase):
         self._iterations.zero_()
         return self._engine_outdated(iterations=(newton, pcg))
 
-    def check_status(self, observables: SolverBase.Observables, *, grow: bool = False) -> bool:
+    def check_status(self, observables: SolverBase.Observables | None = None, *, grow: bool = False) -> bool:
         """Raise when a step that wrote ``observables`` failed, and warn when one reached an iteration limit.
 
         A step captured in a CUDA graph cannot raise: it only writes how it ended into the observables passed to it
         (see **Status** in the class docstring). Call this after replaying the graph, outside the capture, once for
         each container the replayed steps wrote. It reads the container back from the device (one synchronization).
 
+        A coupled solver steps its entries without observables. The solver as an entry (class docstring,
+        **Coupling**) keeps the status bits of every step it takes, captured or not, until a call without a container
+        reads them: that call reports every step since the last such call, and clears the bits.
+
         Args:
             observables: A container from :meth:`observables` with :attr:`SolverIPC.ObservableKind.STATUS`
                 requested, as passed to :meth:`step`. With ``SOLVER_RESIDUAL`` requested as well, the messages give
-                the residual.
+                the residual. ``None`` for the solver as an entry of a coupled solver: the bits it kept.
             grow: On :attr:`SolverIPC.StatusBits.OVERFLOW`, call :meth:`grow` and return ``True`` instead of
                 raising, whatever other bits are set: the steps ran without some contact pairs, which can cause the
                 other failures, and the repeated steps report again.
@@ -5596,7 +5819,8 @@ class SolverIPC(SolverBase):
         Raises:
             RuntimeError: When a bit of :attr:`SolverIPC.StatusBits.FAILED` is set and ``grow`` does not take an
                 ``OVERFLOW``: the step's result must not be used.
-            ValueError: When ``observables`` does not hold the ``STATUS`` observable.
+            ValueError: When ``observables`` does not hold the ``STATUS`` observable, or is ``None`` and the solver
+                is no entry of a coupled solver.
 
         Warns:
             NewtonWarning: When :attr:`SolverIPC.StatusBits.NEWTON_LIMIT` or
@@ -5604,12 +5828,21 @@ class SolverIPC(SolverBase):
         """
         if self.model.device.is_capturing:
             raise RuntimeError("SolverIPC.check_status() reads from the device; call it outside graph capture.")
-        if observables is None or not observables.is_requested(self.ObservableKind.STATUS):
-            raise ValueError("SolverIPC.check_status() needs observables with ObservableKind.STATUS requested.")
-        bits = self.StatusBits(int(np.bitwise_or.reduce(observables.status.numpy())))
         residual = ""
-        if observables.is_requested(SolverBase.ObservableKind.SOLVER_RESIDUAL):
-            residual = f" (residual {float(observables.solver_residual.numpy().max()):.3g}, at most 1 when converged)"
+        if observables is None and self._sticky_status is not None:  # an entry of a coupled solver: its kept bits
+            bits = self.StatusBits(int(self._sticky_status.numpy()[0]))
+            self._sticky_status.zero_()
+        elif observables is None or not observables.is_requested(self.ObservableKind.STATUS):
+            raise ValueError(
+                "SolverIPC.check_status() needs observables with ObservableKind.STATUS requested, or none for an "
+                "entry of a coupled solver."
+            )
+        else:
+            bits = self.StatusBits(int(np.bitwise_or.reduce(observables.status.numpy())))
+            if observables.is_requested(SolverBase.ObservableKind.SOLVER_RESIDUAL):
+                residual = (
+                    f" (residual {float(observables.solver_residual.numpy().max()):.3g}, at most 1 when converged)"
+                )
         if bits & self.StatusBits.OVERFLOW and grow:
             self.grow()
             return True
@@ -5812,6 +6045,78 @@ class SolverIPC(SolverBase):
             self._distance_hard.assign(self._distance_penalties(dyadic[0]))  # and the distance joints'
             if self._ortho is not None:  # and the default body stiffness the inertia
                 self._ortho_inertia.assign(self._ortho_ratios())
+
+    # ------------------------------------------------------------------ CouplingInterface
+    @override
+    def coupling_notify_iteration_restarts(self, enabled: bool) -> None:
+        """Become an entry of a coupled solver (class docstring, **Coupling**): keep the status bits of every step for
+        :meth:`check_status`. Raises :class:`NotImplementedError` when the coupler may solve a step again from its
+        start, which the solver cannot do yet.
+
+        Args:
+            enabled: Whether the coupler may restart a step's solve: a ``SolverCoupledProxy`` with more than one
+                iteration per step, or a ``SolverCoupledADMM`` with more than one.
+        """
+        if enabled:
+            raise NotImplementedError(
+                "SolverIPC cannot solve a coupled step again from its start: the coupler runs more than one iteration "
+                "per step (SolverCoupledProxy.Config(iterations=...) or SolverCoupledADMM.Config(iterations=..., 5 by "
+                "default) above 1), which restarts its entries' solves, and SolverIPC does not keep the start of a "
+                "step's solve on the device. Use iterations=1."
+            )
+        if self._sticky_status is None:  # outside graph capture: the coupler calls this once, after construction
+            device = self.model.device
+            self._sticky_status = wp.zeros(1, dtype=wp.int32, device=device)
+            self._step_status = wp.zeros(1, dtype=wp.int32, device=device)
+
+    @override
+    def coupling_notify_input_state_update(
+        self,
+        state: State,
+        flags: StateFlags | int,
+        *,
+        iteration_restart: bool = False,
+        dt: float = 0.0,
+    ) -> None:
+        """Take note of a coupled solver's write of the entry's input state (class docstring, **Coupling**).
+
+        Nothing is done for a write: every step compares ``state_in`` with what the solver wrote last and takes what
+        differs (class docstring, **State**), a proxy's pose and twist without discarding friction. A reset's
+        notification (``dt`` 0) needs nothing either: the coupled solver's ``reset`` calls :meth:`reset` next, with
+        its world mask, which discards the friction and releases the kinematic aims of the worlds it selects. A
+        restart of the step's solve (``iteration_restart`` with ``dt`` above 0) raises :class:`NotImplementedError`,
+        as :meth:`coupling_notify_iteration_restarts` does.
+        """
+        del state, flags
+        if iteration_restart and dt > 0.0:
+            raise NotImplementedError(
+                "SolverIPC cannot solve a coupled step again from its start; use a coupler with one iteration per step."
+            )
+
+    @override
+    def coupling_supports_full_surface_soft_contacts(self) -> bool:
+        """``True``: the solver reads no :class:`~newton.Contacts`, of whatever kind, and finds its own contacts."""
+        return True
+
+    @override
+    def coupling_prepare_proxy_contacts(
+        self,
+        state: State,
+        contacts: Contacts | None,
+        *,
+        contacts_freshly_detected: bool = False,
+    ) -> Contacts | None:
+        """Return ``contacts`` as they are: the solver reads no :class:`~newton.Contacts`, and the contacts of a proxy
+        with another proxy or with a static shape do not exist in its own (class docstring, **Coupling**)."""
+        del state, contacts_freshly_detected
+        return contacts
+
+    def _keep_status(self) -> None:
+        """An entry of a coupled solver: the step's status bits joined into those kept for :meth:`check_status`."""
+        if self._sticky_status is None:
+            return
+        self._uipc_warp.arrays.write_frame_status(self._engine, self._step_status)
+        wp.launch(_keep_status, 1, inputs=[self._step_status], outputs=[self._sticky_status], device=self.model.device)
 
     def contact_stiffness(self, dt: float) -> float:
         """The contact stiffness [Pa] of every contact pair in a step of length ``dt`` [s]: ``kappa``, or with
