@@ -2995,6 +2995,87 @@ def test_independent_worlds_step_as_alone(test, device):
                 )
 
 
+def _weighted_world(density, size):
+    """One world of ``_world_content``'s parts with their masses and sizes changed: a soft cube of cells ``size`` and
+    a rigid box of half size ``size``, both of ``density``, and a free particle. Worlds of different densities and
+    sizes have stiffness ranges of their own (libuipc's range follows the mean vertex mass and the extent)."""
+    world = newton.ModelBuilder()
+    world.add_soft_grid(
+        pos=wp.vec3(0.3, -0.05, 0.25), rot=wp.quat_identity(), vel=wp.vec3(0.0, 0.0, 0.0), dim_x=2, dim_y=2, dim_z=2,
+        cell_x=size, cell_y=size, cell_z=size, density=density, k_mu=3.4e4, k_lambda=1.6e5, k_damp=0.0,
+    )  # fmt: skip
+    b = world.add_body(xform=wp.transform(wp.vec3(-0.3, 0.0, 0.15), wp.quat_identity()))
+    world.add_shape_box(b, hx=size, hy=size, hz=size, cfg=newton.ModelBuilder.ShapeConfig(density=density))
+    world.add_particle(wp.vec3(0.0, 0.3, 0.1), wp.vec3(0.0, 0.0, 0.0), 0.01, radius=0.01)
+    return world
+
+
+def _worlds_of(device, contents):
+    """One world of every builder of ``contents``, at the origin, over the global ground plane and static box of
+    ``_worlds``; ``_worlds_of(device, [content])`` is that world alone."""
+    scene = newton.ModelBuilder()
+    scene.add_ground_plane()
+    scene.add_shape_box(-1, xform=wp.transform(wp.vec3(0.35, 0.0, 0.05), wp.quat_identity()), hx=0.15, hy=0.15, hz=0.05)
+    for content in contents:
+        scene.add_world(content)
+    return scene.finalize(device=device)
+
+
+def test_independent_worlds_take_their_own_stiffness_range(test, device):
+    """adaptive_kappa=True with independent worlds of different densities and sizes (``_weighted_world``): every world
+    takes libuipc's stiffness range of the same world alone. ``contact_stiffness(dt)`` gives one value per world, that
+    of the model of the world alone at two step sizes bit for bit: with kappa=None every world's own lower bound, which
+    differ between the worlds, and with a kappa that lies above some worlds' lower bounds and below the others', the
+    kappa in the first and their lower bounds in the others, the first step warning once and naming the worlds it
+    clamps. In every step, eager and captured, each world takes the Newton iterations of its model alone and its
+    positions stay within 1e-6 m of that run. d_hat is given: its default follows the smallest features of the whole
+    model, which differ from those of a world alone."""
+    specs = ((1000.0, 0.05), (5000.0, 0.04), (300.0, 0.07))
+    model = _worlds_of(device, [_weighted_world(*spec) for spec in specs])
+    singles = [_worlds_of(device, [_weighted_world(*spec)]) for spec in specs]
+    adaptive = {"kappa": None, "adaptive_kappa": True, "d_hat": D_HAT}
+    solver = newton.solvers.SolverIPC(model, **adaptive)
+    test.assertTrue(solver._independent)
+    for dt in (0.01, 0.005):
+        kappa = solver.contact_stiffness(dt)
+        test.assertEqual(kappa.shape, (len(specs),))
+        test.assertEqual(len(set(kappa.tolist())), len(specs))
+        for k, one in enumerate(singles):
+            test.assertEqual(kappa[k], newton.solvers.SolverIPC(one, **adaptive).contact_stiffness(dt), f"world {k}")
+    lows = solver.contact_stiffness(0.01)
+    given = float(np.sqrt(lows.min() * lows.max()))
+    clamped = newton.solvers.SolverIPC(model, kappa=given, adaptive_kappa=True, d_hat=D_HAT)
+    used = clamped.contact_stiffness(0.01)
+    np.testing.assert_array_equal(used, np.maximum(lows, given))
+    for k, one in enumerate(singles):
+        test.assertEqual(
+            used[k],
+            newton.solvers.SolverIPC(one, kappa=given, adaptive_kappa=True, d_hat=D_HAT).contact_stiffness(0.01),
+        )
+    s0, s1 = model.state(), model.state()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        clamped.step(s0, s1, None, None, 0.01)
+    messages = [str(w.message) for w in caught if issubclass(w.category, newton.NewtonWarning)]
+    test.assertEqual(len(messages), 1)
+    test.assertTrue(lows.min() < given < lows.max())
+    for k in range(len(specs)):
+        test.assertEqual(f"world {k} uses {lows[k]:.6g} Pa" in messages[0], bool(lows[k] > given), messages[0])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        clamped.step(s1, s0, None, None, 0.005)  # clamped again, at other values: not repeated
+    steps = 21
+    for capture in (False, True):
+        with test.subTest(captured=capture):
+            run = _record_worlds(model, newton.solvers.SolverIPC(model, **adaptive), steps, capture=capture)
+            test.assertTrue(np.any(run["iterations"].min(axis=1) != run["iterations"].max(axis=1)))
+            for k, one in enumerate(singles):
+                alone = _record_worlds(one, newton.solvers.SolverIPC(one, **adaptive), steps, capture=capture)
+                np.testing.assert_array_equal(run["iterations"][:, k], alone["iterations"][:, 0], f"world {k}")
+                worst = np.abs(run["q"][:, k] - alone["q"][:, 0]).max()
+                test.assertLess(worst, 1.0e-6, f"world {k}: {worst:.3g} m")
+
+
 def _write_particle(state, particle, z=None, qd=None):
     """``state`` with particle ``particle`` at height ``z`` or with velocity ``qd``."""
     if z is not None:
@@ -3171,11 +3252,12 @@ def _two_worlds(device, content, extra=None):
 def test_rejects_what_independent_worlds_do_not_take(test, device):
     """Content in several worlds is independent worlds by default: a model of two worlds builds without
     coupled_worlds, and one of a single world builds as before. Independent worlds refuse, naming coupled_worlds=True as
-    an alternative: AL-IPC contact, MAS and adaptive_kappa, which libuipc-warp's independent worlds do not take yet; a
-    free particle and a dynamic body of the global world, which every world would push; a global kinematic body with
+    an alternative: AL-IPC contact and MAS, which libuipc-warp's independent worlds do not take yet; a free particle and
+    a dynamic body of the global world, which every world would push; a global kinematic body with
     kinematic_motion="aim", an unknown too (with the jump it is fixed and builds); and a spring between two worlds. With
-    coupled_worlds=True every one of them builds. Of two worlds, one of which holds a static shape alone, one world
-    moves, and the options are taken as for one world."""
+    coupled_worlds=True every one of them builds. adaptive_kappa=True builds with independent worlds, every world in a
+    stiffness range of its own (test_independent_worlds_take_their_own_stiffness_range). Of two worlds, one of which
+    holds a static shape alone, one world moves, and the options are taken as for one world."""
 
     def box(builder):
         _box_body(builder, (0.0, 0.0, 0.3), (0.05, 0.05, 0.05))
@@ -3207,7 +3289,6 @@ def test_rejects_what_independent_worlds_do_not_take(test, device):
     cases = (
         ("AL-IPC", box, None, {"contact_constitution": "al-ipc"}, r"contact_constitution='al-ipc' is not offered"),
         ("MAS", soft, None, {"fem_preconditioner": "mas"}, r"fem_preconditioner='mas' is not offered"),
-        ("adaptive kappa", box, None, {"adaptive_kappa": True, "kappa": None}, r"adaptive_kappa=True is not offered"),
         ("global particle", box, particle, {}, r"particle 0 of the global world -1 is free"),
         ("global body", box, global_box, {}, r"body 2 .*of the global world -1 is a dynamic body"),
         ("global aim", box, global_pusher, {"kinematic_motion": "aim"}, r"global world -1 is a kinematic body.*'jump'"),
@@ -3221,6 +3302,9 @@ def test_rejects_what_independent_worlds_do_not_take(test, device):
             test.assertTrue(newton.solvers.SolverIPC(model, coupled_worlds=True, **options)._coupled_worlds)
     jump = newton.solvers.SolverIPC(_two_worlds(device, box, global_pusher), kinematic_motion="jump")
     test.assertTrue(jump._independent)
+    adaptive = newton.solvers.SolverIPC(_two_worlds(device, box), adaptive_kappa=True, kappa=None)
+    test.assertTrue(adaptive._independent)
+    test.assertEqual(adaptive.contact_stiffness(0.01).shape, (2,))
     # one world that moves, the other a static shape alone: solved as one world, which takes the options
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
@@ -6970,6 +7054,7 @@ for name, func in (
     ("test_reset_of_one_world_keeps_the_others", test_reset_of_one_world_keeps_the_others),
     ("test_reset_of_one_world_keeps_the_other_worlds_aims", test_reset_of_one_world_keeps_the_other_worlds_aims),
     ("test_independent_worlds_step_as_alone", test_independent_worlds_step_as_alone),
+    ("test_independent_worlds_take_their_own_stiffness_range", test_independent_worlds_take_their_own_stiffness_range),
     ("test_independent_world_fails_alone", test_independent_world_fails_alone),
     ("test_rejects_what_independent_worlds_do_not_take", test_rejects_what_independent_worlds_do_not_take),
     ("test_independent_worlds_with_attachments", test_independent_worlds_with_attachments),

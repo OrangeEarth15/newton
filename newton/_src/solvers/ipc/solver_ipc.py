@@ -2892,7 +2892,9 @@ class SolverIPC(SolverBase, CouplingInterface):
     masses when the solve is built: a change of mass in place
     (:meth:`notify_model_changed`) keeps it, as libuipc computes it once at
     init. Every contact pair takes one value, which :meth:`contact_stiffness`
-    gives for a step of any ``dt``.
+    gives for a step of any ``dt``; with independent worlds every world takes
+    the range of the same world alone, from its own vertices and the global
+    ones, and every pair of a world its value (see **Worlds**).
 
     **BDF2.** ``integrator="bdf2"`` is libuipc's BDF2 (its ``integrator/type``,
     taken as libuipc and its pyuipc front end take it): the step predicts
@@ -3004,7 +3006,12 @@ class SolverIPC(SolverBase, CouplingInterface):
     starts its BDF2 history anew and leaves the other worlds as they were; the
     mask's global entry selects nothing, since the global entities are no
     unknowns. :meth:`frame_stats` gives the counts of the step's loops: the
-    Newton iterations of its slowest world.
+    Newton iterations of its slowest world. With ``adaptive_kappa=True`` every
+    world takes libuipc's stiffness range of the same world alone, from the
+    mean mass and the extent of its own vertices and the global ones
+    (libuipc-warp's stiffness per world): its own lower bound with
+    ``kappa=None``, a given ``kappa`` clamped into its own range, at every
+    step's ``dt``; :meth:`contact_stiffness` gives every world's.
 
     The global entities do not move: a free particle (mass and
     :attr:`~newton.ParticleFlags.ACTIVE`), a dynamic body or a coupled solver's
@@ -3016,12 +3023,10 @@ class SolverIPC(SolverBase, CouplingInterface):
     worlds. Global static shapes and planes, kinematic particles and kinematic
     bodies (``kinematic_motion="jump"``) act in every world. Not offered with
     independent worlds yet, where two worlds or more move, and refused naming
-    what to use instead: ``contact_constitution="al-ipc"``,
-    ``fem_preconditioner="mas"`` (its
-    clusters may join two worlds) and ``adaptive_kappa=True`` (libuipc's
-    stiffness range of the whole scene would couple the worlds; a range per
-    world is a later step of libuipc-warp). The engine's Newton exit check,
-    which independent worlds do not take either, is not used by the solver.
+    what to use instead: ``contact_constitution="al-ipc"`` and
+    ``fem_preconditioner="mas"`` (its clusters may join two worlds). The
+    engine's Newton exit check, which independent worlds do not take either,
+    is not used by the solver.
 
     With ``coupled_worlds=True`` the worlds are one solve instead, with the
     same subscenes: one step length (the smallest time of impact over all
@@ -3536,7 +3541,9 @@ class SolverIPC(SolverBase, CouplingInterface):
             libuipc's default. Not used with ``contact_constitution="al-ipc"``.
         adaptive_kappa: Take the contact stiffness as libuipc and its pyuipc
             front end do: inside libuipc's scene-adaptive range, which
-            follows each step's ``dt`` (see **Contact**).
+            follows each step's ``dt`` (see **Contact**); with independent
+            worlds every world's own range, that of the world alone (see
+            **Worlds**).
         d_hat: Barrier activation distance [m]. ``None`` takes libuipc's
             0.01 m, or less for a model with small colliding features (see
             the note below).
@@ -4172,8 +4179,7 @@ class SolverIPC(SolverBase, CouplingInterface):
     def _check_independent_options(self) -> None:
         """``NotImplementedError`` for the options that independent worlds do not take yet (class docstring,
         **Worlds**), each naming what to use instead, when two worlds or more hold unknowns: libuipc-warp solves the
-        worlds apart from each other with libuipc's barrier contact, the block-diagonal preconditioner and one contact
-        stiffness given for all."""
+        worlds apart from each other with libuipc's barrier contact and the block-diagonal preconditioner."""
         worlds = self._worlds.worlds
         which = f"the worlds {worlds.tolist()}" if len(worlds) <= 8 else f"{len(worlds)} worlds"
         instead = (
@@ -4191,14 +4197,6 @@ class SolverIPC(SolverBase, CouplingInterface):
                 "SolverIPC: fem_preconditioner='mas' is not offered with independent worlds yet: MAS's clusters may "
                 f"join vertices of different worlds, whose linear solves are apart. Use fem_preconditioner='diag', "
                 f"{instead}."
-            )
-        if self._adaptive_kappa:
-            raise NotImplementedError(
-                "SolverIPC: adaptive_kappa=True is not offered with independent worlds yet: libuipc's stiffness range "
-                "follows the size and the mean vertex mass of the whole scene, which would give every world a "
-                "stiffness that the other worlds change, where each world alone has a range of its own. Give kappa "
-                f"as a stiffness (adaptive_kappa=False), or pass coupled_worlds=True to solve {which} as one in the "
-                "range of the whole scene (see Worlds in the class docstring), or give the solver a model of one world."
             )
 
     def _check_independent_content(self) -> None:
@@ -5446,21 +5444,43 @@ class SolverIPC(SolverBase, CouplingInterface):
             wp.copy(q_prev, q_start)
 
     def _report_clamp(self, dt: float) -> None:
-        """Warn once when a step's ``dt`` clamps the given ``kappa`` into libuipc's stiffness range."""
+        """Warn once when a step's ``dt`` clamps the given ``kappa`` into libuipc's stiffness range, with independent
+        worlds into the range of a world (each world has its own)."""
         kappa = self._config.kappa
         if not self._adaptive_kappa or self._clamp_reported or kappa is None or self._engine is None:
             return
         if dt == self._clamp_checked_dt:
             return
         self._clamp_checked_dt = dt
-        _, used, lo, hi, _ = self._engine.contact_stiffness.resolve(dt)
-        if used != kappa:
+        policies = self._engine.world_contact_stiffness
+        if policies is None:
+            _, used, lo, hi, _ = self._engine.contact_stiffness.resolve(dt)
+            if used != kappa:
+                self._clamp_reported = True
+                warnings.warn(
+                    f"SolverIPC: kappa={kappa:g} is outside libuipc's contact stiffness range [{lo:.6g}, {hi:.6g}] Pa "
+                    f"of this model at dt={dt:g} s; the steps use {used:.6g} Pa, as libuipc clamps a stiffness it is "
+                    "given. The range scales with the mean vertex mass and with 1/dt^2 (contact_stiffness(dt) gives "
+                    "the stiffness of any dt); kappa=None takes its lower bound, libuipc's default. Not repeated.",
+                    NewtonWarning,
+                    stacklevel=3,
+                )
+            return
+        clamped = []
+        for world, policy in zip(self._status_entries.tolist(), policies, strict=True):
+            _, used, lo, hi, _ = policy.resolve(dt)
+            if used != kappa:
+                clamped.append(f"world {world} uses {used:.6g} Pa (range [{lo:.6g}, {hi:.6g}] Pa)")
+        if clamped:
             self._clamp_reported = True
+            shown = "; ".join(clamped[:4]) + (f"; and {len(clamped) - 4} more worlds" if len(clamped) > 4 else "")
             warnings.warn(
-                f"SolverIPC: kappa={kappa:g} is outside libuipc's contact stiffness range [{lo:.6g}, {hi:.6g}] Pa of "
-                f"this model at dt={dt:g} s; the steps use {used:.6g} Pa, as libuipc clamps a stiffness it is given. "
-                "The range scales with the mean vertex mass and with 1/dt^2 (contact_stiffness(dt) gives the stiffness "
-                "of any dt); kappa=None takes its lower bound, libuipc's default. Not repeated.",
+                f"SolverIPC: kappa={kappa:g} is outside libuipc's contact stiffness range of {len(clamped)} of the "
+                f"{len(policies)} independent worlds at dt={dt:g} s, each world's range that of the world alone, and "
+                f"those worlds' steps use their range's bound, as libuipc clamps a stiffness it is given: {shown}. "
+                "A range scales with the world's mean vertex mass and with 1/dt^2 (contact_stiffness(dt) gives every "
+                "world's stiffness of any dt); kappa=None takes every world's lower bound, libuipc's default. Not "
+                "repeated.",
                 NewtonWarning,
                 stacklevel=3,
             )
@@ -6595,13 +6615,22 @@ class SolverIPC(SolverBase, CouplingInterface):
             device=self.model.device,
         )
 
-    def contact_stiffness(self, dt: float) -> float:
+    def contact_stiffness(self, dt: float) -> float | np.ndarray:
         """The contact stiffness [Pa] of every contact pair in a step of length ``dt`` [s]: ``kappa``, or with
         ``adaptive_kappa`` ``kappa`` clamped into libuipc's stiffness range for this model and ``dt``, the range's lower
         bound when ``kappa`` is None (see **Contact** in the class docstring). 0 for a model without particles and
-        bodies, which has no contact."""
+        bodies, which has no contact.
+
+        With ``adaptive_kappa`` and independent worlds every world has a range of its own, that of the world alone
+        (see **Worlds**), and the stiffness is one value per world, a float64 array of ``model.world_count``: world
+        ``k``'s pairs take entry ``k``, and a world in which nothing moves, which has no contact, 0."""
         if self._engine is None:
             return 0.0
+        policies = self._engine.world_contact_stiffness
+        if policies is not None:  # every world's own range (libuipc-warp's independent worlds)
+            out = np.zeros(self.model.world_count, np.float64)
+            out[self._status_entries] = [policy.resolve(dt)[1] for policy in policies]
+            return out
         policy = self._engine.contact_stiffness
         return float(self._config.kappa if policy is None else policy.resolve(dt)[1])
 
