@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
+import contextlib
 import importlib
 import importlib.util
+import inspect
 import pathlib
 import re
 import types
@@ -20,6 +22,30 @@ from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 # SolverIPC's default barrier activation distance; a resting contact settles just inside it
 D_HAT = 0.01
+
+
+@contextlib.contextmanager
+def _scene_calls(method):
+    """The calls of ``method``, a method of libuipc-warp's ``ArrayScene``, while the block runs: what SolverIPC gives
+    the engine through the public array path, each call's arguments by name."""
+    import uipc_warp.arrays  # noqa: PLC0415
+
+    signature, calls = inspect.signature(method), []
+
+    def record(*args, **kwargs):
+        calls.append(signature.bind(*args, **kwargs).arguments)
+        return method(*args, **kwargs)
+
+    with mock.patch.object(uipc_warp.arrays.ArrayScene, method.__name__, autospec=True, side_effect=record):
+        yield calls
+
+
+def _active_slots(solver):
+    """The slots of the engine's active contact lists PT, EE, PE and PP, which libuipc-warp's ``ContactForces`` counts
+    (``segment_capacities``, its first four segments)."""
+    import uipc_warp.arrays  # noqa: PLC0415
+
+    return uipc_warp.arrays.ContactForces.segment_capacities(solver._engine)[:4]
 
 
 def _soft_cube(device, height=0.05, ground=True, fix_left=False):
@@ -1465,7 +1491,7 @@ def test_overflow_grows(test, device):
         s0, s1 = s1, s0
         hits += checker.intersections(solver._engine.vm.x)
     test.assertEqual(hits, 0)
-    test.assertGreater(solver._engine.simplex.capacities()["active"]["PT"], 1)
+    test.assertGreater(_active_slots(solver)[0], 1)  # the point-triangle list grew from _TINY_LISTS's one pair
     eager = s0.particle_q.numpy()
 
     model = _stacking_cubes(device)
@@ -1671,11 +1697,14 @@ def _hanging_cloth(device):
 
 
 def test_graph_outdated_after_long_solves(test, device):
-    """graph_outdated() takes the iterations of the captured steps replayed since it was last called. A cloth hanging
+    """graph_outdated() gives the engine the Newton and PCG iterations of the captured steps replayed since it was last
+    called (libuipc-warp's SimEngine.graph_outdated, whose choice of the PCG loop its own tests hold). A cloth hanging
     from its top edge, solved to 1e-12, takes about 270 PCG iterations per Newton iteration: the first call after
-    replays returns True, the steps captured from then on re-read the loop's test every 32 iterations instead of 8,
-    and they end where the steps of the old graph end, to 1e-6. A soft cube falling freely, solved to 1e-3, takes
-    fewer than 128, and the loop stays."""
+    replays returns True, a second call False, and the steps captured from then on, with the other loop, end where
+    the steps of the old graph end, to 1e-6. A soft cube falling freely, solved to 1e-3, takes fewer than 128, and the
+    loop stays."""
+    import uipc_warp  # noqa: PLC0415
+
     for long in (True, False):
         with test.subTest(long_solves=long):
             if long:
@@ -1688,7 +1717,6 @@ def test_graph_outdated_after_long_solves(test, device):
             newton.solvers.SolverIPC(model, **args).step(s0, s1, None, None, 0.01)  # loads the kernels
             solver = newton.solvers.SolverIPC(model, **args)
             test.assertFalse(solver.graph_outdated())  # nothing captured yet
-            pcg = solver._engine.solver.pcg
             s0, s1 = model.state(), model.state()
             with wp.ScopedCapture(device=device) as capture:
                 solver.step(s0, s1, None, None, 0.01)
@@ -1696,9 +1724,16 @@ def test_graph_outdated_after_long_solves(test, device):
             wp.capture_launch(capture.graph)
             after = (s0.particle_q.numpy(), s0.particle_qd.numpy())
             wp.capture_launch(capture.graph)
-            test.assertEqual(solver.graph_outdated(), outdated)
-            test.assertEqual(pcg.iterations_per_check, 32 if outdated else 8)
-            test.assertFalse(solver.graph_outdated())  # the counts were taken
+            outdated_of = uipc_warp.SimEngine.graph_outdated
+            with mock.patch.object(
+                uipc_warp.SimEngine, "graph_outdated", autospec=True, side_effect=outdated_of
+            ) as asked:
+                test.assertEqual(solver.graph_outdated(), outdated)
+                test.assertFalse(solver.graph_outdated())  # the counts were taken
+            newton_iterations, pcg_iterations = asked.call_args_list[0].kwargs["iterations"]
+            test.assertGreater(newton_iterations, 0)  # the four replayed steps' sums
+            test.assertEqual(pcg_iterations / newton_iterations > 128, long)
+            test.assertEqual(tuple(asked.call_args_list[1].kwargs["iterations"]), (0, 0))
             if outdated:
                 old = s0.particle_q.numpy()
                 s0.particle_q.assign(after[0])
@@ -1710,49 +1745,46 @@ def test_graph_outdated_after_long_solves(test, device):
                 np.testing.assert_allclose(s0.particle_q.numpy(), old, rtol=0.0, atol=1e-6)
 
 
-def test_graph_outdated_takes_the_ladder_guesses(test, device):
-    """graph_outdated() also answers for the size ladders, whose guess a captured step holds (libuipc-warp's
-    SimEngine.graph_outdated and prepare_capture). With libuipc-warp's RECAPTURE_NODES at 8, replays of the hanging
-    cloth, whose matrix conversions take no contact block, ask for the guess of that size: the first call returns
-    True and the engine takes the guess, a second call without new steps returns False, and so does a call after
-    replays of the steps captured on the guess. The PCG loop's own choice is off (``check_bodies = None``), so that
-    only the ladders ask. Without prepare_capture the second call would ask again."""
-    from uipc_warp.backend.engine import sim_engine  # noqa: PLC0415
+def test_graph_outdated_takes_the_engines_guesses(test, device):
+    """When the engine says that a step captured from now on would hold better guesses of its size ladders or another
+    PCG loop (libuipc-warp's SimEngine.graph_outdated, whose ladders and loop its own tests hold), graph_outdated()
+    gives it the iterations of the replayed steps and returns True, the engine takes the guesses for the next capture
+    (prepare_capture, as libuipc-warp's FrameRunner does before it captures) and the solver drops its own graph of a
+    step, which the next eager step captures anew; when the engine says no, it returns False and asks for nothing. The
+    engine's answers are given here."""
+    import uipc_warp  # noqa: PLC0415
 
     model = _hanging_cloth(device)
-    s0, s1 = model.state(), model.state()
-    newton.solvers.SolverIPC(model).step(s0, s1, None, None, 0.01)  # loads the kernels
-
-    def replays(solver):
+    solver = newton.solvers.SolverIPC(model)
+    answers = []
+    with (
+        mock.patch.object(
+            uipc_warp.SimEngine,
+            "graph_outdated",
+            autospec=True,
+            side_effect=lambda engine, iterations=None: answers.pop(0) if answers else False,
+        ) as asked,
+        mock.patch.object(uipc_warp.SimEngine, "prepare_capture", autospec=True) as prepared,
+    ):
         s0, s1 = model.state(), model.state()
+        solver.step(s0, s1, None, None, 0.01)  # an eager step: captured as the solver's own graph, which stays
+        graph = solver._frame_graph
+        test.assertIsNotNone(graph)
         with wp.ScopedCapture(device=device) as capture:
-            solver.step(s0, s1, None, None, 0.01)
             solver.step(s1, s0, None, None, 0.01)
-        for _ in range(3):
-            wp.capture_launch(capture.graph)
-
-    def built():
-        solver = newton.solvers.SolverIPC(model)
-        solver._engine.solver.pcg.check_bodies = None  # the loop body stays: only the ladders ask for captures
-        return solver
-
-    with mock.patch.object(sim_engine, "RECAPTURE_NODES", 8):
-        solver = built()
-        ladder = solver._engine.solver.converter.ladder
-        test.assertGreaterEqual(ladder.depth, 2)
-        replays(solver)
-        test.assertIsNone(ladder.guess)
+        wp.capture_launch(capture.graph)
+        answers[:] = [True, False]
         test.assertTrue(solver.graph_outdated())
-        test.assertEqual(ladder.sizes[ladder.guess], 0)
-        test.assertFalse(solver.graph_outdated())  # a second check without new steps
-        replays(solver)
-        test.assertFalse(solver.graph_outdated())  # the steps captured on the guess
-        # the negative control: an engine that does not take the guesses keeps asking
-        solver = built()
-        with mock.patch.object(type(solver._engine), "prepare_capture", lambda engine: None):
-            replays(solver)
-            test.assertTrue(solver.graph_outdated())
-            test.assertTrue(solver.graph_outdated())
+        newton_iterations, pcg_iterations = asked.call_args.kwargs["iterations"]  # the replayed step's
+        test.assertGreater(newton_iterations, 0)
+        test.assertGreater(pcg_iterations, 0)
+        test.assertEqual(prepared.call_count, 1)
+        test.assertIsNone(solver._frame_graph)
+        test.assertFalse(solver.graph_outdated())
+        test.assertEqual(prepared.call_count, 1)
+        solver.step(s0, s1, None, None, 0.01)
+        test.assertIsNotNone(solver._frame_graph)
+        test.assertIsNot(solver._frame_graph, graph)
 
 
 def test_default_control_is_built_once(test, device):
@@ -1989,9 +2021,7 @@ def test_tet_lame_parameters_reach_the_engine_as_libuipc_stores_them(test, devic
     """k_mu and k_lambda are Lame parameters. libuipc's StableNeoHookean.apply_to stores mu and lambda + mu, the SNK1
     parameters that linearize to Hooke's law with those Lame parameters; the engine gets the same pair, so a block
     with k_mu = k_lambda has Poisson's ratio 0.25, not 0."""
-    from uipc_warp.backend.finite_element.constitutions.stable_neo_hookean_3d import (  # noqa: PLC0415
-        StableNeoHookean3D,
-    )
+    import uipc_warp.arrays  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
     builder.add_soft_grid(
@@ -2009,21 +2039,22 @@ def test_tet_lame_parameters_reach_the_engine_as_libuipc_stores_them(test, devic
         k_lambda=5.0e5,
         k_damp=0.0,
     )
-    solver = newton.solvers.SolverIPC(builder.finalize(device=device))
-    elements = solver._scene.engine_inputs(solver._config, solver.model.device)["elements"]
-    snk = next(g for g in elements if isinstance(g, StableNeoHookean3D))
-    np.testing.assert_allclose(snk.mu.numpy(), 2.0e5)
-    np.testing.assert_allclose(snk.lam.numpy(), 7.0e5)
+    with _scene_calls(uipc_warp.arrays.ArrayScene.add_tetrahedra) as calls:
+        newton.solvers.SolverIPC(builder.finalize(device=device))
+    [tetrahedra] = calls
+    np.testing.assert_allclose(tetrahedra["mu"], 2.0e5)
+    np.testing.assert_allclose(tetrahedra["lam"], 7.0e5)
 
 
-def _rest_angles(solver):
-    """The rest angles of the solver's hinges, in its own (winding) convention."""
-    from uipc_warp.backend.finite_element.constitutions.discrete_shell_bending import (  # noqa: PLC0415
-        DiscreteShellBending,
-    )
+def _shell_inputs(model, **options):
+    """The cloth SolverIPC gives the engine for ``model``: the arguments of its one call of libuipc-warp's
+    ``ArrayScene.add_shell``."""
+    import uipc_warp.arrays  # noqa: PLC0415
 
-    elements = solver._scene.engine_inputs(solver._config, solver.model.device)["elements"]
-    return next(g for g in elements if isinstance(g, DiscreteShellBending)).params[3].numpy()
+    with _scene_calls(uipc_warp.arrays.ArrayScene.add_shell) as calls:
+        newton.solvers.SolverIPC(model, **options)
+    [shell] = calls
+    return shell
 
 
 def test_rest_shapes_from_tri_poses_and_edge_rest_angle(test, device):
@@ -2090,9 +2121,31 @@ def test_rest_shapes_from_tri_poses_and_edge_rest_angle(test, device):
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     _sheet(builder, curved, sheet, rows, edge_ke=1.0)
     by_hand = builder.finalize(device=device)
-    angles = _rest_angles(newton.solvers.SolverIPC(given))
+    from newton._src.solvers.ipc.solver_ipc import _winding_signs  # noqa: PLC0415
+
+    hinges = []
+    for model in (given, by_hand):
+        # the rest angles the solver gives the engine, hinge by hinge (by the edge's two particles); where it gives
+        # none (a cloth whose edge_rest_angle is the start's measure, by_hand's), the engine takes the rest positions'
+        # angles, which libuipc-warp's tests hold to libuipc's: here Newton's rest angles of those rows by the
+        # triangles' winding, as the solver gives them otherwise
+        shell = _shell_inputs(model)
+        edges = np.asarray(shell["bending_edges"])
+        angles = shell["rest_angles"]
+        if angles is None:
+            e = model.edge_indices.numpy().reshape(-1, 4)
+            hinge = (e[:, 0] >= 0) & (e[:, 1] >= 0)
+            e, tris = e[hinge], model.tri_indices.numpy().reshape(-1, 3)
+            np.testing.assert_array_equal(edges, e[:, 2:4])
+            angles = _winding_signs(tris, e, np.arange(len(e))) * model.edge_rest_angle.numpy()[hinge]
+        edges = np.sort(edges, axis=1)
+        order = np.lexsort(edges.T[::-1])
+        hinges.append((edges[order], np.asarray(angles)[order]))
+    (edges, angles), (edges_by_hand, angles_by_hand) = hinges
+    np.testing.assert_array_equal(edges_by_hand, edges)
+    test.assertEqual(len(edges), len(rows))
     test.assertGreater(np.abs(angles).max(), 0.1)  # the edges along the cylinder's axis are folded (0.2 rad)
-    np.testing.assert_allclose(_rest_angles(newton.solvers.SolverIPC(by_hand)), angles, rtol=0.0, atol=1e-6)
+    np.testing.assert_allclose(angles_by_hand, angles, rtol=0.0, atol=1e-6)
 
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     _sheet(builder, flat, [[0, 1, 2], [3, 1, 2]], [(0, 3, 1, 2)], [0.0])
@@ -2125,65 +2178,41 @@ def test_cloth_at_rest_starts_without_bending_force(test, device):
     """A cloth built at rest starts at its rest angles as the engine measures them, so that no hinge pushes it out of
     its plane. Newton measures the angle of every hinge of this flat sheet as 0; libuipc's dihedral angle, the
     arccosine of the normals' cosine, reads 1.5e-8 rad on some of them, and it is the angle the engine's bending
-    energy takes. The engine's rest angles are its own of the start positions (as libuipc takes them from its rest
-    geometry), and its bending gradient at the start is 0. A rest angle other than the start's is Newton's
+    energy takes. The solver gives the engine no rest angles, so that the engine takes its own of the start positions
+    (as libuipc takes them from its rest geometry; libuipc-warp's tests/test_arrays_rest_shapes.py holds them to
+    libuipc's bit for bit, with no bending force at the start). A rest angle other than the start's is Newton's
     (test_rest_shapes_from_tri_poses_and_edge_rest_angle)."""
-    from uipc_warp.backend.finite_element.constitutions.discrete_shell_bending import (  # noqa: PLC0415
-        DiscreteShellBending,
-        hinge_rest_shape,
-    )
-    from uipc_warp.backend.types import mat33d, vec3d  # noqa: PLC0415
-
     model = _flat_sheet(device)
     test.assertFalse(np.any(model.edge_rest_angle.numpy()))
-    engine = newton.solvers.SolverIPC(model)._engine
-    bending = next(g for g in engine.elements if isinstance(g, DiscreteShellBending))
-    stencils = bending.stencils.numpy()
-    measured = hinge_rest_shape(model.particle_q.numpy().astype(np.float64), stencils)[2]
-    test.assertGreater(np.count_nonzero(measured), 0)  # libuipc's angle of some flat hinges is not 0
-    np.testing.assert_array_equal(bending.params[3].numpy(), measured)
-    n = len(stencils)
-    grad = wp.zeros(4 * n, dtype=vec3d, device=device)
-    hess = wp.zeros(10 * n, dtype=mat33d, device=device)
-    bending.gradient_hessian(engine.vm.x, engine.state.fs, grad, hess)
-    test.assertFalse(np.any(grad.numpy()))
+    shell = _shell_inputs(model)
+    test.assertIsNone(shell["rest_angles"])
+    test.assertGreater(len(shell["bending_edges"]), 0)
 
 
 def test_cloth_at_rest_takes_its_rest_triangles_from_particle_q(test, device):
     """Newton's builders compute a cloth triangle's rest shape in float64 from particle_q and keep its inverse in float32
-    (tri_poses). For a cloth built at rest the engine's membrane takes the rest shapes of particle_q, as libuipc
-    computes them from its rest geometry: its inverse rest matrices and rest areas are libuipc's of the start, bit for
-    bit, while those of the float32 tri_poses are off by their rounding, a strain the sheet would start with. A
-    triangle whose tri_poses were changed keeps them; the others then take the rest shapes of particle_q to
-    round-off."""
-    from uipc_warp.backend.finite_element.constitutions.strain_limiting_baraff_witkin_shell_2d import (  # noqa: PLC0415
-        StrainLimitingBaraffWitkinShell2D,
-        slbws_rest_matrices,
-        slbws_rest_shape,
-    )
-
-    def membrane(model):
-        engine = newton.solvers.SolverIPC(model)._engine
-        return next(g for g in engine.elements if isinstance(g, StrainLimitingBaraffWitkinShell2D))
+    (tri_poses). For a cloth built at rest the solver gives the engine no rest edges, so that the engine takes the rest
+    shapes of particle_q, as libuipc computes them from its rest geometry (libuipc-warp's
+    tests/test_arrays_rest_shapes.py holds them to libuipc's, bit for bit), not those of the float32 tri_poses, which
+    are off by their rounding, a strain the sheet would start with. A triangle whose tri_poses were changed keeps them;
+    the others then take the rest edges of particle_q in float64."""
+    from newton._src.solvers.ipc.solver_ipc import _triangle_rest_geometry  # noqa: PLC0415
 
     model = _flat_sheet(device, rot=wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.3))
     x = model.particle_q.numpy().astype(np.float64)
     tris = model.tri_indices.numpy().reshape(-1, 3)
-    IB, area = slbws_rest_shape(x, tris)
-    shell = membrane(model)
-    np.testing.assert_array_equal(shell.IB.numpy(), IB)
-    np.testing.assert_array_equal(shell.area.numpy(), area)
+    test.assertIsNone(_shell_inputs(model)["rest_edges"])
+    edges, _ = _triangle_rest_geometry(x[tris[:, 1]] - x[tris[:, 0]], x[tris[:, 2]] - x[tris[:, 0]])
     poses = model.tri_poses.numpy()
-    rounded = slbws_rest_matrices(x, tris, np.linalg.inv(poses.astype(np.float64)))
-    entries = IB != 0.0
-    test.assertGreater(np.abs(rounded[entries] / IB[entries] - 1.0).max(), 1e-8)  # the float32 tri_poses are not it
+    rounded = np.linalg.inv(poses.astype(np.float64))
+    entries = edges != 0.0
+    test.assertGreater(np.abs(rounded[entries] / edges[entries] - 1.0).max(), 1e-8)  # the float32 tri_poses are not it
 
     poses[0] /= 1.2
     model.tri_poses.assign(poses)
-    shell = membrane(model)
-    stretched = slbws_rest_matrices(x[tris[0]], np.array([[0, 1, 2]]), np.linalg.inv(poses[:1].astype(np.float64)))
-    np.testing.assert_allclose(shell.IB.numpy()[0], stretched[0], rtol=0.0, atol=1e-12 * np.abs(IB).max())
-    np.testing.assert_allclose(shell.IB.numpy()[1:], IB[1:], rtol=0.0, atol=1e-12 * np.abs(IB).max())
+    rest = _shell_inputs(model)["rest_edges"]
+    np.testing.assert_array_equal(rest[0], np.linalg.inv(poses[0].astype(np.float64)))
+    np.testing.assert_array_equal(rest[1:], edges[1:])
 
 
 def test_gravity_per_world(test, device):
@@ -2277,26 +2306,23 @@ def _world_rows(model, copies):
     return [(np.flatnonzero(pw == k), np.flatnonzero(bw == k)) for k in range(copies)]
 
 
-def _pair_subscenes(solver):
-    """The subscenes of the vertices of every stored, candidate and active simplex pair of the solver's last step, one
-    array per list, padded with -1 to four vertices."""
-    f = solver._engine.simplex
+def _term_subscenes(solver, export):
+    """The subscenes of the vertices of every contact term of the solver's last step: the barrier terms of its final
+    active set and its friction terms, from libuipc-warp's ``ContactForces`` ``export`` of the solver's engine, updated
+    here; a vertex / half-plane term gives its vertex's and its plane's. One array per segment. The broad phase's
+    stored and candidate pairs, which no public name holds, libuipc-warp's own tests hold to the subscenes
+    (tests/test_arrays_subscenes.py)."""
+    export.update()
     sub = solver._scids  # the subscene of every vertex
-    sv, cv = f.info.surf_verts.numpy(), f.info.codim_verts.numpy()
-    ed, tr = f.info.edges.numpy().reshape(-1, 2), f.info.tris.numpy().reshape(-1, 3)
     out = []
-    for lists in (f.stored_lists(), f.candidate_lists()):
-        p = {k: v.reshape(-1, 2) for k, v in lists.items()}
-        out += [
-            np.stack([sv[p["PP"][:, 0]], cv[p["PP"][:, 1]]], axis=1),
-            np.concatenate([cv[p["PE"][:, :1]], ed[p["PE"][:, 1]]], axis=1),
-            np.concatenate([ed[p["EE"][:, 0]], ed[p["EE"][:, 1]]], axis=1),
-            np.concatenate([sv[p["PT"][:, :1]], tr[p["PT"][:, 1]]], axis=1),
-        ]
-    for pairs in f.active_lists().values():
-        a = np.asarray(pairs)
-        out.append(a.reshape(len(a), -1) if a.size else np.zeros((0, 2), np.int64))
-    return [sub[v] for v in out]
+    for name, (vertices, _) in export.numpy().items():
+        kind = name.split("+")[0]
+        v = vertices[:, : _PAIR_WIDTH[kind]].astype(np.int64)
+        if kind == "PH":
+            out.append(np.stack([sub[v[:, 0]], solver._plane_scids[v[:, 1]]], axis=1))
+        else:
+            out.append(sub[v])
+    return out
 
 
 def _pairs_across_worlds(sub):
@@ -2309,16 +2335,20 @@ def _pairs_across_worlds(sub):
 
 
 def test_coupled_worlds_follow_the_single_world(test, device):
-    """Four copies of a world at the origin, each a world of its own, with coupled_worlds: no stored, candidate or
-    active pair joins two worlds at any step, every world meets the global static box, and every world follows the run
-    of the one world alone, with the same Newton iterations at every step (the copies' shares of every sum of the solve
-    are equal) and positions within the rounding of those sums."""
+    """Four copies of a world at the origin, each a world of its own, with coupled_worlds: no contact term joins two
+    worlds at any step, every world meets the global static box, and every world follows the run of the one world
+    alone, with the same Newton iterations at every step (the copies' shares of every sum of the solve are equal) and
+    positions within the rounding of those sums."""
+    import uipc_warp.arrays  # noqa: PLC0415
+
     copies, steps, dt = 4, 60, 0.01
     runs = []
     for n in (1, copies):
         model = _worlds(device, n)
         solver = newton.solvers.SolverIPC(model, coupled_worlds=True)
         test.assertEqual(solver._worlds is None, n == 1)
+        engine = solver._engine
+        export = uipc_warp.arrays.ContactForces(engine)  # the step's contact terms (_term_subscenes)
         s0, s1 = model.state(), model.state()
         rows = _world_rows(model, n)
         q, body_q, newton_iterations, global_pairs = [], [], [], 0
@@ -2329,8 +2359,9 @@ def test_coupled_worlds_follow_the_single_world(test, device):
             pq, bq = s0.particle_q.numpy(), s0.body_q.numpy()
             q.append([pq[p] for p, _ in rows])
             body_q.append([bq[b] for _, b in rows])
+            test.assertIs(solver._engine, engine)  # the export's engine: no list grew
             if n > 1:
-                for sub in _pair_subscenes(solver):
+                for sub in _term_subscenes(solver, export):
                     across, with_global = _pairs_across_worlds(sub)
                     test.assertEqual(across, 0)
                     global_pairs += with_global
@@ -2382,7 +2413,7 @@ def test_coupled_worlds_share_filter_classes(test, device):
     for copies in (1, 6):
         model = _worlds(device, copies, content)
         solver = newton.solvers.SolverIPC(model, coupled_worlds=True)
-        elements.append(solver._scene._elements)
+        elements.append(len(solver._enabled))  # the contact elements the solver makes
         if copies > 1:
             s0, s1 = model.state(), model.state()
             for _ in range(60):
@@ -2445,7 +2476,9 @@ def test_coupled_worlds_beyond_the_old_element_limit(test, device):
     """1100 worlds at one place, each a box and a particle dropped onto the global ground: five contact elements times
     1101 subscenes, beyond the 2048 that the engine took before it tested the two tables apart. The solver builds, its
     start check keeps the two tables (no table of their product), and in 20 steps every box and particle lands on the
-    ground in its own world: no stored, candidate or active pair joins two worlds."""
+    ground in its own world: no contact term joins two worlds."""
+    import uipc_warp.arrays  # noqa: PLC0415
+
     worlds = 1100
     world = newton.ModelBuilder()
     _box_body(world, (0.0, 0.0, 0.07), (0.05, 0.05, 0.05))
@@ -2459,11 +2492,14 @@ def test_coupled_worlds_beyond_the_old_element_limit(test, device):
     test.assertEqual(n_sub, worlds + 1)
     test.assertGreater(n_el * n_sub, 2048)
     test.assertEqual(solver._enabled.shape, (n_el, n_el))
+    engine = solver._engine
+    export = uipc_warp.arrays.ContactForces(engine)
     s0, s1 = model.state(), model.state()
     for _ in range(20):
         solver.step(s0, s1, None, None, 0.01)
         s0, s1 = s1, s0
-        for sub in _pair_subscenes(solver):
+        test.assertIs(solver._engine, engine)
+        for sub in _term_subscenes(solver, export):
             test.assertEqual(_pairs_across_worlds(sub)[0], 0)
     z_box, z_particle = s0.body_q.numpy()[:, 2], s0.particle_q.numpy()[:, 2]
     test.assertGreater(z_box.min(), 0.05)
@@ -2689,39 +2725,32 @@ def _restore(solver, snapshot):
         a.assign(value)
 
 
-_FRICTION_LISTS = ("PP", "PE", "PT", "EE")  # the engine's simplex friction lists, in its friction_counts order
-_PAIR_WIDTH = {"PP": 2, "PE": 3, "PT": 4, "EE": 4, "PH": 2}  # the entries of a friction pair (PH: vertex, plane)
+# the entries of a contact term of each kind, as libuipc-warp's ContactForces records them (PH: vertex, plane)
+_PAIR_WIDTH = {"PT": 4, "EE": 4, "PE": 3, "PP": 2, "PH": 2}
 
 
-def _frame_start(solver):
-    """What the engine's last frame started with, which its solve leaves: the friction candidates (per list, vertex
-    tuples; PH: vertex and plane) and the lagged records of the simplex ones (their bits), the prediction and the
-    kinetic masses of every row and body, the rows the frame restarted (BDF2), and the revolute drives' terms."""
-    eng = solver._engine
-    s, h, c = eng.simplex, eng.half_plane, eng.contact
-    counts = s.friction_counts.numpy()
-    lists = {name: getattr(s, f"friction_{name}s").numpy()[: counts[k]] for k, name in enumerate(_FRICTION_LISTS)}
-    lists["PH"] = h.friction_PHs.numpy()[: int(h.friction_count.numpy()[0])]
-    cPT, cEE, cPE, _, _ = c.fric.capacities  # the lagged records: PT, EE, PE, PP at fixed offsets
-    lagged = c.lagged.numpy().view(np.int64)
-    base = {"PT": 0, "EE": cPT, "PE": cPT + cEE, "PP": cPT + cEE + cPE}
-    rows = eng.subscene_restarts
+def _frame_start(solver, export):
+    """What the engine's last frame started with, through public names: its friction candidates (the vertex tuples of
+    the friction terms of libuipc-warp's ``ContactForces`` ``export``, updated here; PH: vertex and plane), the friction
+    it discarded and the rows whose BDF2 history it restarted (the engine's ``frame_start_state``), and the revolute
+    drives' terms. What the engine keeps of a candidate (its lagged record) and the prediction and masses of a
+    restarted row are libuipc-warp's own tests' (tests/test_subscene_friction.py, tests/test_subscene_restart.py)."""
+    export.update()
+    terms, start = export.numpy(), solver._engine.frame_start_state()
     group = solver._joint_groups.revolute
     return {
-        "lists": lists,
-        "records": {name: lagged[base[name] : base[name] + len(lists[name])] for name in _FRICTION_LISTS},
-        "x_tilde": eng.vm.x_tilde.numpy().copy(),
-        "mass": eng.vm.mass.numpy().copy(),
-        "body_mass": np.concatenate([eng.abd.mass.numpy()[:, None], eng.abd.mx.numpy()], axis=1),
-        "restarted": None if rows is None else rows.rows.frame_requests(),
+        "lists": {name: terms[f"{name}+F"][0][:, :width] for name, width in _PAIR_WIDTH.items()},
+        "discard": start["discard_friction"],
+        "discarded": start.get("discard_subscenes"),
+        "restarted": start.get("restart_rows"),
         "drive": None if group is None else np.stack([group.drv_aim.numpy(), group.drv_ratio.numpy()], axis=1),
     }
 
 
 def _check_friction_kept(test, got, full, world, flagged):
-    """``got``'s friction candidates are ``full``'s without those with a vertex in the worlds ``flagged``, each with
-    the same lagged record, bit for bit. The order is not compared: every case recovers one engine, whose stored pairs
-    carry over from the case before, and the engine's own tests compare the order on fresh engines."""
+    """``got``'s friction candidates are ``full``'s without those with a vertex in the worlds ``flagged``. The order is
+    not compared: every case recovers one engine, whose stored pairs carry over from the case before, and the engine's
+    own tests compare the order on fresh engines."""
     for name, listed in full["lists"].items():
         pairs = np.asarray(listed).reshape(-1, _PAIR_WIDTH[name])
         vertices = pairs[:, :1] if name == "PH" else pairs  # a PH pair: its vertex, then its plane
@@ -2730,8 +2759,6 @@ def _check_friction_kept(test, got, full, world, flagged):
         got_pairs = np.asarray(got["lists"][name]).reshape(-1, _PAIR_WIDTH[name])
         order, got_order = np.lexsort(kept.T[::-1]), np.lexsort(got_pairs.T[::-1])
         np.testing.assert_array_equal(got_pairs[got_order], kept[order], name)
-        if name != "PH":
-            np.testing.assert_array_equal(got["records"][name][got_order], full["records"][name][~out][order], name)
 
 
 def _branch_steps(solver, model, snapshot, state, cases, dt=0.01, control=None, pusher=None, after_reset=None):
@@ -2739,6 +2766,9 @@ def _branch_steps(solver, model, snapshot, state, cases, dt=0.01, control=None, 
     (``reset`` of that world) or ``("state", k)`` (a new velocity for world ``k``'s particles); ``pusher`` moves the
     state's kinematic bodies before the step, and ``after_reset(case)`` looks at the solver between the reset and the
     step. Returns the frame start of every case."""
+    import uipc_warp.arrays  # noqa: PLC0415
+
+    export = uipc_warp.arrays.ContactForces(solver._engine)  # every case recovers this engine
     out = {}
     for case in cases:
         _restore(solver, snapshot)
@@ -2759,7 +2789,7 @@ def _branch_steps(solver, model, snapshot, state, cases, dt=0.01, control=None, 
         if after_reset is not None:
             after_reset(case)
         solver.step(state_in, model.state(), control, None, dt)
-        out[case] = _frame_start(solver)
+        out[case] = _frame_start(solver, export)
     return out
 
 
@@ -2767,12 +2797,15 @@ def test_reset_of_one_world_keeps_the_others(test, device):
     """Three worlds at one place with coupled_worlds, each a box sliding on the global static box, a particle sliding on
     the ground and a sphere driven about a hinge, under implicit Euler and BDF2. From one state of the solver, a step
     after no reset, after a reset of world 1, after a reset of every world, and after a new velocity written for world
-    1's particle. The reset of world 1 and the new state record the friction candidates of the step without a reset but
-    those with a vertex in world 1, each with its lagged record, bit for bit; the reset of every world records none.
-    Under BDF2 the frame restarts world 1's rows and no other, and world 1's rows, bodies and drive take the prediction,
-    the masses and the terms of the reset of every world, the other worlds' those of no reset, bit for bit; under
-    implicit Euler there is no history, and the resets leave them as they are. The branches begin at the first step with
-    friction candidates in every world."""
+    1's particle. The reset of world 1 and the new state discard the friction of world 1's subscene alone, and the step
+    has the friction candidates of the step without a reset but those with a vertex in world 1; the reset of every
+    world discards all of them, and a step without a reset none. Under BDF2 the frame restarts world 1's rows and no
+    other, and world 1's drive takes the terms of the reset of every world, the other worlds' those of no reset, bit
+    for bit; under implicit Euler there is no history, and the resets leave the terms as they are. What the engine
+    keeps of the others (their lagged friction, prediction and masses) libuipc-warp's own tests hold. The branches
+    begin at the first step with contact in every world."""
+    import uipc_warp.arrays  # noqa: PLC0415
+
     for integrator in ("bdf1", "bdf2"):
         with test.subTest(integrator=integrator):
             model = _worlds(device, 3, _reset_world)
@@ -2780,17 +2813,18 @@ def test_reset_of_one_world_keeps_the_others(test, device):
             control = model.control()
             s0, s1 = model.state(), model.state()
             world = _row_worlds(solver, model)
+            export = uipc_warp.arrays.ContactForces(solver._engine)
             for _ in range(100):  # until the boxes and particles rest on the static box and the ground in every world
                 solver.step(s0, s1, control, None, 0.01)
                 s0, s1 = s1, s0
-                pt = np.asarray(solver._engine.simplex.active_lists()["PT"]).reshape(-1, 4)
-                ph = np.asarray(solver._engine.half_plane.active_list()).reshape(-1, 2)
+                export.update()
+                terms = export.numpy()
+                pt, ph = terms["PT+N"][0], terms["PH+N"][0]
                 if all(np.isin(k, world[pt]) and np.isin(k, world[ph[:, 0]]) for k in range(3)):
                     break
             else:
-                test.fail("no step with friction candidates in every world")
+                test.fail("no step with contact in every world")
             one = world == 1
-            body_one = np.append(model.body_world.numpy() == 1, False)  # the fixed body of the hinges is global
             joints = solver._joint_rows["revolute"].numpy()
             drive_one = model.body_world.numpy()[model.joint_child.numpy()[joints]] == 1
             frames = _branch_steps(
@@ -2802,26 +2836,25 @@ def test_reset_of_one_world_keeps_the_others(test, device):
                     pairs = np.asarray(none["lists"][name]).reshape(-1, _PAIR_WIDTH[name])
                     vertices = pairs[:, :1] if name == "PH" else pairs
                     test.assertTrue(np.any(np.isin(world[vertices], [k]).any(axis=1)), (k, name))
+            subscene_one = np.zeros(len(none["discarded"]), np.int32)
+            subscene_one[solver._scids[np.flatnonzero(one)[0]]] = 1
+            for case in (w1, new_state):
+                test.assertFalse(case["discard"])
+                np.testing.assert_array_equal(case["discarded"], subscene_one)
+            test.assertFalse(none["discard"] or np.any(none["discarded"]))
+            test.assertTrue(every["discard"])
             _check_friction_kept(test, w1, none, world, [1])
             _check_friction_kept(test, new_state, none, world, [1])
             test.assertEqual(sum(len(p) for p in every["lists"].values()), 0)
-            for key in ("x_tilde", "mass"):
-                np.testing.assert_array_equal(w1[key][~one], none[key][~one], key)
-                np.testing.assert_array_equal(w1[key][one], every[key][one], key)
-                np.testing.assert_array_equal(new_state[key][~one], none[key][~one], key)
-            np.testing.assert_array_equal(w1["body_mass"][~body_one], none["body_mass"][~body_one])
-            np.testing.assert_array_equal(w1["body_mass"][body_one], every["body_mass"][body_one])
             np.testing.assert_array_equal(w1["drive"][~drive_one], none["drive"][~drive_one])
             np.testing.assert_array_equal(w1["drive"][drive_one], every["drive"][drive_one])
             if integrator == "bdf1":
                 test.assertIsNone(w1["restarted"])
-                for key in ("x_tilde", "mass", "drive"):  # no history: the resets change no prediction or term
-                    np.testing.assert_array_equal(w1[key], none[key], key)
+                np.testing.assert_array_equal(w1["drive"], none["drive"])  # no history: the resets change no term
                 continue
             np.testing.assert_array_equal(w1["restarted"], one.astype(np.int32))
             np.testing.assert_array_equal(new_state["restarted"], one.astype(np.int32))
             test.assertFalse(np.any(none["restarted"]))
-            test.assertFalse(np.all(w1["x_tilde"][one] == none["x_tilde"][one]))  # world 1 took an implicit Euler step
             test.assertFalse(np.all(w1["drive"][drive_one] == none["drive"][drive_one]))
 
 
@@ -2829,9 +2862,8 @@ def test_reset_of_one_world_keeps_the_other_worlds_aims(test, device):
     """Three copies of the pushed box's world with kinematic_motion="aim" under BDF2, whose aim kernel writes the
     history of every pusher at every step; each pusher moved by state_in. From one state, a step after no reset, after
     a reset of world 1 and after a reset of every world: the reset of world 1 releases world 1's pusher alone (it takes
-    state_in), and the frame restarts world 1's rows alone: world 1's pusher and box take the prediction and the masses
-    of the reset of every world, the other worlds' pushers and boxes those of no reset, bit for bit; the aims are the
-    same in every case."""
+    state_in), and the frame restarts world 1's rows alone (the prediction and masses of a restarted row are those
+    libuipc-warp's own tests hold)."""
     scene = newton.ModelBuilder()
     scene.add_ground_plane()
     scene.replicate(_pushed_world(), 3)
@@ -2854,7 +2886,6 @@ def test_reset_of_one_world_keeps_the_other_worlds_aims(test, device):
         s0, s1 = s1, s0
     world = _row_worlds(solver, model)
     one = world == 1
-    body_one = model.body_world.numpy() == 1
     holds = {}
 
     def hold(case):
@@ -2866,14 +2897,9 @@ def test_reset_of_one_world_keeps_the_other_worlds_aims(test, device):
     np.testing.assert_array_equal(holds["none"], [1, 1, 1])
     np.testing.assert_array_equal(holds[1], [1, 0, 1])
     np.testing.assert_array_equal(holds["all"], [0, 0, 0])
-    none, w1, every = frames["none"], frames[1], frames["all"]
+    none, w1 = frames["none"], frames[1]
     np.testing.assert_array_equal(w1["restarted"], one.astype(np.int32))
-    for key in ("x_tilde", "mass"):
-        np.testing.assert_array_equal(w1[key][~one], none[key][~one], key)
-        np.testing.assert_array_equal(w1[key][one], every[key][one], key)
-    np.testing.assert_array_equal(w1["body_mass"][~body_one], none["body_mass"][~body_one])
-    np.testing.assert_array_equal(w1["body_mass"][body_one], every["body_mass"][body_one])
-    test.assertFalse(np.all(w1["body_mass"][body_one] == none["body_mass"][body_one]))  # unscaled where restarted
+    test.assertFalse(np.any(none["restarted"]))
 
 
 def _hinged(device, kind="revolute", gravity=0.0, axis=newton.Axis.Z, offset=(0.0, 0.0, 0.0), radius=0.1, **dof):
@@ -3331,13 +3357,18 @@ def test_drive_targets_change_inside_a_captured_graph(test, device):
 
 def _libuipc_corridor(model, dt, d_hat):
     """libuipc's contact stiffness range of a model of particles over a plane through the origin, from the particles'
-    positions and masses: every particle and the plane's point are libuipc's vertices, and the plane has no mass."""
-    from uipc_warp.backend.contact_system.contact_stiffness import scene_diagonal  # noqa: PLC0415
-    from uipc_warp.backend.contact_system.global_contact_manager import kappa_corridor  # noqa: PLC0415
+    positions and masses: libuipc-warp's stiffness policy (libuipc's, which its own tests hold to libuipc) of a scene
+    laid out here, apart from the solver's, of the particles alone over that plane, in which every particle and the
+    plane's point are libuipc's vertices and the plane has no mass."""
+    import uipc_warp  # noqa: PLC0415
+    import uipc_warp.arrays  # noqa: PLC0415
 
-    points = np.vstack([model.particle_q.numpy().astype(np.float64), np.zeros((1, 3))])
-    mean_mass = model.particle_mass.numpy().astype(np.float64).sum() / len(points)
-    return kappa_corridor(scene_diagonal(points), mean_mass, d_hat, dt, 1.0e-16)
+    scene = uipc_warp.arrays.ArrayScene(kappa_corridor=True)
+    scene.add_vertices(model.particle_q.numpy(), mass=model.particle_mass.numpy())
+    scene.add_half_plane((0.0, 0.0, 0.0), (0.0, 0.0, 1.0))
+    engine = scene.build(uipc_warp.SimConfig(dt=dt, d_hat=d_hat, kappa=None), device=model.device)
+    _, _, lo, hi, _ = engine.contact_stiffness.resolve(dt)
+    return lo, hi
 
 
 def test_body_stiffness_takes_a_turn_in_one_iteration(test, device):
@@ -3428,7 +3459,8 @@ def test_kappa_is_taken_as_given(test, device):
             _run(model, solver, 3)
         for dt in (0.01, 1.0 / 600.0):
             test.assertEqual(solver.contact_stiffness(dt), kappa)
-        np.testing.assert_array_equal(solver._engine.contact.table.kappa.numpy(), kappa)
+        tabular = solver._scene.engine_inputs(solver._config, "cpu")["contact_tabular"]  # what the engine is given
+        np.testing.assert_array_equal(solver._config.kappa if tabular is None else tabular["kappa"], kappa)
     with test.assertRaisesRegex(ValueError, "kappa=None, libuipc's default stiffness, needs adaptive_kappa=True"):
         newton.solvers.SolverIPC(model, kappa=None)
 
@@ -3467,17 +3499,14 @@ def test_adaptive_kappa_is_libuipcs(test, device):
 def test_adaptive_kappa_follows_dt_in_captured_steps(test, device):
     """adaptive_kappa=True: every pair takes the stiffness of its step's dt: steps captured at two step sizes, replayed
     in turn and between eager steps of a third, each run with their own, as eager steps of those sizes do (to rounding:
-    the solver adds with float atomics)."""
+    the solver adds with float atomics). That a graph captured at a dt writes the engine's table of that dt is
+    libuipc-warp's (its tests/test_arrays_contact_stiffness.py, test_graphs_of_different_dt)."""
     tight = {"newton_velocity_tol": 1e-7, "linear_tol_rate": 1e-12, "semi_implicit": False}
     model = _soft_cube(device, height=0.012)
     captured, eager = (
         newton.solvers.SolverIPC(model, d_hat=D_HAT, kappa=None, adaptive_kappa=True, **tight) for _ in range(2)
     )
     states = {solver: (model.state(), model.state()) for solver in (captured, eager)}
-
-    def table(solver):
-        return solver._engine.contact.table.kappa.numpy()
-
     graphs = {}
     for dt in (0.01, 0.005):
         s0, s1 = model.state(), model.state()
@@ -3495,11 +3524,12 @@ def test_adaptive_kappa_follows_dt_in_captured_steps(test, device):
             else:
                 solver.step(a, b, None, None, dt)
             states[solver] = (b, a)
-        np.testing.assert_array_equal(table(captured), table(eager), err_msg=f"step {k}, dt {dt}")
-        test.assertEqual(float(table(eager).max()), eager.contact_stiffness(dt))
-        test.assertEqual(float(table(eager).min()), eager.contact_stiffness(dt))
         np.testing.assert_allclose(
-            states[captured][0].particle_q.numpy(), states[eager][0].particle_q.numpy(), rtol=0.0, atol=1e-6
+            states[captured][0].particle_q.numpy(),
+            states[eager][0].particle_q.numpy(),
+            rtol=0.0,
+            atol=1e-6,
+            err_msg=f"step {k}, dt {dt}",
         )
     test.assertLess(states[eager][0].particle_q.numpy()[:, 2].min(), D_HAT)  # the cube reached the ground
 
@@ -3786,9 +3816,10 @@ def test_al_ipc_status_and_new_masses(test, device):
     model.body_inv_mass.assign(0.5 * model.body_inv_mass.numpy())
     model.body_inertia.assign(2.0 * model.body_inertia.numpy())
     model.body_inv_inertia.assign(0.5 * model.body_inv_inertia.numpy())
-    solver.notify_model_changed(newton.ModelFlags.BODY_INERTIAL_PROPERTIES)
+    with _scene_calls(solver._uipc_warp.arrays.ArrayScene.add_affine_body) as bodies:
+        solver.notify_model_changed(newton.ModelFlags.BODY_INERTIAL_PROPERTIES)
     test.assertIsNot(solver._engine, engine)
-    test.assertAlmostEqual(float(solver._engine.abd.mass.numpy()[0]), float(model.body_mass.numpy()[0]), places=4)
+    test.assertAlmostEqual(float(bodies[0]["mass"]), float(model.body_mass.numpy()[0]), places=4)
     with wp.ScopedCapture(device=device) as capture:
         solver.step(s1, s0, None, None, 0.01, observables=observables)
     wp.capture_launch(capture.graph)
@@ -3981,8 +4012,14 @@ def test_zero_length_springs_oscillate_as_implicit_euler(test, device):
         builder.add_spring(i, i + 1, k, 0.0, 0.0)
         builder.spring_rest_length[-1] = 0.0
     model = builder.finalize(device=device)
-    solver = newton.solvers.SolverIPC(model, **_TIGHT)
-    test.assertEqual([g.group.K for g in solver._uipc_warp.arrays.stitch_groups(solver._engine)], [2])
+    import uipc_warp.arrays  # noqa: PLC0415
+
+    with _scene_calls(uipc_warp.arrays.ArrayScene.add_stitches) as stitches:
+        solver = newton.solvers.SolverIPC(model, **_TIGHT)
+    [given] = stitches  # one stitch between particles 0 and 1 and one between 2 and 3: one group, of two particles
+    pairs = np.sort(np.asarray(given["vertices"]).reshape(-1, 2), axis=1)
+    np.testing.assert_array_equal(pairs[np.lexsort(pairs.T[::-1])], [[0, 1], [2, 3]])
+    test.assertEqual(len(solver._uipc_warp.arrays.stitch_groups(solver._engine)), 1)
     x0 = solver._engine.positions()[:4, 0]
     expected = {
         0: _implicit_euler_oscillator(x0[1] - x0[0], np.sqrt(2.0 * k / m), dt, steps),
@@ -4142,7 +4179,7 @@ def test_grown_lists_keep_kinematic_aims(test, device):
     roomy, _, _, _, _ = _pusher(device, "aim", steps=8)
     grown, crossings, bits, raised, solver = _pusher(device, "aim", steps=8, capacity=_TINY_LISTS)
     test.assertIsNone(raised)
-    test.assertGreater(max(solver._engine.simplex.capacities()["active"].values()), 1)
+    test.assertGreater(_active_slots(solver).max(), 1)
     test.assertEqual(sum(crossings), 0)
     test.assertEqual(bits, [0] * len(bits))
     np.testing.assert_allclose(grown, roomy, rtol=0.0, atol=1e-5)
@@ -4800,17 +4837,31 @@ def test_contact_output_coupled_worlds(test, device):
 # ---------------------------------------------------------------------------- joints on request (enable_*)
 
 
-def _group_arrays(solver):
-    """Every device array of every joint group of ``solver``'s engine, by kind and name, on the host."""
-    groups = solver._uipc_warp.arrays.joint_groups(solver._engine)
-    out = {}
-    for kind in ("revolute", "prismatic", "fixed", "spherical"):
-        group = getattr(groups, kind)
-        if group is not None:
-            for name, value in vars(group).items():
-                if isinstance(value, wp.array):
-                    out[kind, name] = value.numpy().copy()
-    return out
+def _joint_inputs(model, **options):
+    """SolverIPC built for ``model``, and what it gives the engine of its joints: the arguments of its calls of
+    libuipc-warp's ``ArrayScene`` joint methods, by kind."""
+    import uipc_warp.arrays  # noqa: PLC0415
+
+    scene = uipc_warp.arrays.ArrayScene
+    with (
+        _scene_calls(scene.add_revolute_joints) as revolute,
+        _scene_calls(scene.add_prismatic_joints) as prismatic,
+        _scene_calls(scene.add_fixed_joints) as fixed,
+        _scene_calls(scene.add_spherical_joints) as spherical,
+    ):
+        solver = newton.solvers.SolverIPC(model, **options)
+    return solver, {"revolute": revolute, "prismatic": prismatic, "fixed": fixed, "spherical": spherical}
+
+
+def _assert_same_calls(test, got, want):
+    """The same calls, kind by kind, each with the same arguments, bit for bit."""
+    test.assertEqual({k: len(v) for k, v in got.items()}, {k: len(v) for k, v in want.items()})
+    for kind, calls in want.items():
+        for call, other in zip(calls, got[kind], strict=True):
+            test.assertEqual(sorted(other), sorted(call), kind)
+            for name, value in call.items():
+                if name != "self":
+                    np.testing.assert_array_equal(np.asarray(other[name]), np.asarray(value), err_msg=f"{kind}.{name}")
 
 
 def _d6_twins(device, d6):
@@ -4863,16 +4914,16 @@ def _d6_twins(device, d6):
 def test_d6_joints_take_libuipcs_joints(test, device):
     """With enable_d6_joints=True a D6 joint of one angular axis is libuipc's revolute joint about it, of one linear
     axis its prismatic joint along it, of no axis its fixed joint and of three orthonormal angular axes its ball joint,
-    with their drives, limits and joint_f: a chain of the four built with D6 joints gives the engine the joint groups of
-    the same chain built with Newton's revolute, fixed, ball and prismatic joints, array by array, bit for bit, and
-    steps as it does, the revolute and prismatic coordinates included. Without the option the D6 joints are refused."""
+    with their drives, limits and joint_f: a chain of the four built with D6 joints gives the engine the joints of the
+    same chain built with Newton's revolute, fixed, ball and prismatic joints (libuipc-warp's ArrayScene calls, argument
+    by argument, bit for bit), and steps as it does, the revolute and prismatic coordinates included. Without the
+    option the D6 joints are refused."""
     with test.assertRaisesRegex(NotImplementedError, "D6 joints \\(joint 0\\).*enable_d6_joints=True"):
         newton.solvers.SolverIPC(_d6_twins(device, True)[0])
     runs = []
     for d6 in (False, True):
         model, state = _d6_twins(device, d6)
-        solver = newton.solvers.SolverIPC(model, enable_d6_joints=d6)
-        groups = _group_arrays(solver)
+        solver, groups = _joint_inputs(model, enable_d6_joints=d6)
         control = model.control()
         f = np.zeros(model.joint_dof_count, np.float32)
         f[0], f[-1] = 0.3, -2.0  # the arm's torque and the slider's force, the first and the last DOF either way
@@ -4884,9 +4935,7 @@ def test_d6_joints_take_libuipcs_joints(test, device):
         )  # fmt: skip
         runs.append((groups, frames))
     (native_groups, native), (d6_groups, d6) = runs
-    test.assertEqual(sorted(native_groups), sorted(d6_groups))
-    for key, value in native_groups.items():
-        np.testing.assert_array_equal(d6_groups[key], value, err_msg=str(key))
+    _assert_same_calls(test, d6_groups, native_groups)
     test.assertGreater(native[:, -2].max() - native[:, -2].min(), 0.3)  # the arm swings
     np.testing.assert_allclose(d6, native, rtol=0.0, atol=1e-6)
 
@@ -5594,6 +5643,7 @@ def test_coupled_reset_is_the_solvers_reset(test, device):
         coupled.step(s0, s1, None, None, 0.01)
         s0, s1 = s1, s0
     snapshot = _solver_snapshot(ipc)
+    export = ipc._uipc_warp.arrays.ContactForces(ipc._engine)  # every case recovers this engine
     counts = {}
     for case, mask in (("none", None), ("world 0", [True, False]), ("global", [False, True]), ("all", "all")):
         _restore(ipc, snapshot)
@@ -5604,7 +5654,7 @@ def test_coupled_reset_is_the_solvers_reset(test, device):
         elif mask is not None:
             coupled.reset(state, world_mask=wp.array(mask, dtype=wp.bool, device=device))
         coupled.step(state, s1, None, None, 0.01)
-        counts[case] = sum(len(p) for p in _frame_start(ipc)["lists"].values())
+        counts[case] = sum(len(p) for p in _frame_start(ipc, export)["lists"].values())
     test.assertGreater(counts["none"], 0)
     test.assertEqual(counts["world 0"], counts["none"])
     test.assertEqual(counts["global"], 0)
@@ -6294,7 +6344,7 @@ for name, func in (
     ("test_notify_new_particle_masses", test_notify_new_particle_masses),
     ("test_gravity_per_world", test_gravity_per_world),
     ("test_graph_outdated_after_long_solves", test_graph_outdated_after_long_solves),
-    ("test_graph_outdated_takes_the_ladder_guesses", test_graph_outdated_takes_the_ladder_guesses),
+    ("test_graph_outdated_takes_the_engines_guesses", test_graph_outdated_takes_the_engines_guesses),
     ("test_default_control_is_built_once", test_default_control_is_built_once),
 ):
     add_function_test(TestSolverIPCStep, name, func, devices=devices)
