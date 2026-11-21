@@ -3624,11 +3624,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         {SolverBase.ObservableKind.SOLVER_RESIDUAL, SolverBase.ObservableKind.CONTACT_F, ObservableKind.STATUS}
     )
 
-    # libuipc-warp, its external-acceleration element group and the element group of the bodies' orthogonality
-    # potential, imported by the first solver
+    # libuipc-warp, imported by the first solver
     _uipc_warp: ClassVar = None
-    _external_acceleration: ClassVar = None
-    _ortho_potential: ClassVar = None
 
     def __init__(
         self,
@@ -3815,32 +3812,35 @@ class SolverIPC(SolverBase, CouplingInterface):
             import uipc_warp  # noqa: PLC0415
             import uipc_warp.arrays  # noqa: PLC0415
             import uipc_warp.validation  # noqa: PLC0415
-            from uipc_warp.backend.affine_body.constitutions import ortho_potential  # noqa: PLC0415
-            from uipc_warp.backend.external_force import external_acceleration  # noqa: PLC0415
         except ImportError as e:
             raise ImportError(
                 "SolverIPC requires the libuipc-warp package: pip install git+https://github.com/OrangeEarth15/libuipc-warp"
             ) from e
         version = getattr(uipc_warp, "__version__", "0")
-        # the newest calls of each kind the solver makes: the frame status, the contact and subscene tabulars and the
-        # stiffness policy, the start check, the joints, the iterations of captured steps, the restart of a BDF2
-        # history, the friction discard and the restart per subscene (the module of the restarts, with the friction's
-        # of the same release), the stitches (with the anchors and stitch_groups of the same release), the soft
-        # transform constraint (with constraint_groups)
+        # the newest calls of each kind the solver makes, all of them public names of libuipc-warp: the frame status,
+        # the contact and subscene tabulars and the stiffness policy, the start check, the joints, the iterations of
+        # captured steps, the restart of a BDF2 history and the friction discard per subscene (with the rows a restart
+        # per subscene takes), the stitches (with the anchors and stitch_groups of the same release), the soft
+        # transform constraint (with constraint_groups), the contact forces, the external accelerations, the bodies'
+        # orthogonality stiffness and the redo of an overflowing step (with the documented engine members of the
+        # same release)
         needed = (
             (uipc_warp.arrays, "write_frame_status"),
             (uipc_warp.arrays.ArrayScene, "contact_model"),
             (uipc_warp.arrays.ArrayScene, "subscene_model"),
-            (uipc_warp.backend.contact_system, "contact_stiffness"),
+            (uipc_warp.arrays, "ContactStiffness"),
             (uipc_warp.validation.SurfaceChecker, "min_gap"),
             (uipc_warp.arrays, "joint_groups"),
             (uipc_warp.arrays, "add_frame_iterations"),
             (uipc_warp.SimEngine, "prepare_capture"),
             (uipc_warp.SimEngine, "restart_history"),
-            (uipc_warp.backend.engine, "subscene_restarts"),
+            (uipc_warp.SimEngine, "restart_rows"),
             (uipc_warp.arrays.ArrayScene, "add_stitches"),
             (uipc_warp.arrays.ArrayScene, "add_soft_transform_constraints"),
             (uipc_warp.arrays, "ContactForces"),
+            (uipc_warp.arrays, "ExternalAcceleration"),
+            (uipc_warp.arrays, "orthogonality"),
+            (uipc_warp.SimEngine, "redo_state"),
         )
         missing = [f"{owner.__name__}.{name}" for owner, name in needed if not hasattr(owner, name)]
         if missing:
@@ -3865,8 +3865,6 @@ class SolverIPC(SolverBase, CouplingInterface):
                 stacklevel=3,
             )
         cls._uipc_warp = uipc_warp
-        cls._external_acceleration = external_acceleration.ExternalAcceleration
-        cls._ortho_potential = ortho_potential.OrthoPotential
         return uipc_warp
 
     # ------------------------------------------------------------------ setup
@@ -4400,7 +4398,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         inputs = self._scene.engine_inputs(self._config, device)
         self._forces = None
         if len(self._force_blocks):
-            self._forces = self._external_acceleration("newton_forces", self._force_blocks, device)
+            self._forces = self._uipc_warp.arrays.ExternalAcceleration("newton_forces", self._force_blocks, device)
             inputs["elements"].append(self._forces)
         self._engine = self._uipc_warp.make_engine(
             self._config, self._options, **inputs, device=device, capacity=capacity
@@ -4483,24 +4481,15 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._no_vec3 = wp.zeros(1, dtype=wp.vec3, device=device)
 
     def _find_body_stiffness(self) -> None:
-        """With the default ``body_kappa``: the engine's group of orthogonality potentials, whose stiffness array a
-        kernel writes before every step, and the largest principal moment of inertia over the volume of the body
-        of each of its rows (0 for a kinematic body and the world's). None without bodies or with a given
-        ``body_kappa``, which the engine is built with."""
+        """With the default ``body_kappa``: the engine's orthogonality potential (libuipc-warp's ``orthogonality``),
+        whose stiffness array a kernel writes before every step, the body of each of its rows, and the largest
+        principal moment of inertia over the volume of that body (0 for a kinematic body and the world's). None
+        without bodies or with a given ``body_kappa``, which the engine is built with."""
         self._ortho = self._ortho_inertia = None
         if self._body_kappa is not None or self.model.body_count == 0:
             return
-        groups = [e for e in self._engine.elements if isinstance(e, self._ortho_potential)]
-        if len(groups) != 1:
-            raise RuntimeError(f"SolverIPC: the engine has {len(groups)} groups of orthogonality potentials, not 1.")
-        self._ortho = groups[0]
-        base = self._scene.layout().body_base
-        rows = self._ortho.rows.numpy().astype(np.int64) - 1  # the rows of A follow the body's translation
-        order = np.argsort(base)
-        body = order[np.searchsorted(base[order], rows)]
-        if not np.array_equal(base[body], rows):
-            raise RuntimeError("SolverIPC: the orthogonality potentials do not match the engine's bodies.")
-        self._ortho_body = body
+        self._ortho = self._uipc_warp.arrays.orthogonality(self._engine)
+        self._ortho_body = self._ortho.bodies
         self._ortho_inertia = wp.array(self._ortho_ratios(), dtype=wp.float64, device=self.model.device)
 
     def _ortho_ratios(self) -> np.ndarray:
@@ -5462,8 +5451,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         bdf2 = self._config.integrator == "bdf2"
         restart = self._engine.bdf1_frame[0:1] if bdf2 else self._no_restart
         # with coupled_worlds a reset or a new state restarts the rows of its worlds only (reset, _load)
-        rows = self._engine.subscene_restarts if bdf2 else None
-        restart_rows = self._no_restart if rows is None else rows.rows.pending
+        rows = self._engine.restart_rows if bdf2 else None
+        restart_rows = self._no_restart if rows is None else rows
         for kind, group, scale in (("revolute", groups.revolute, 1.0), ("prismatic", groups.prismatic, 0.5)):
             if group is None:
                 continue
@@ -5691,28 +5680,25 @@ class SolverIPC(SolverBase, CouplingInterface):
         return self._uipc_warp.arrays.frame_status(eng)
 
     def _regrow(self) -> None:
-        """A new engine whose contact lists hold what the last frame asked for, at the start of that frame and
-        with its external accelerations and its element groups' state (the joints' angles)."""
+        """A new engine whose contact lists hold what the last frame asked for, at the start of that frame, with its
+        element groups' state (the joints' angles) and the PCG loop the steps so far chose (libuipc-warp's
+        ``redo_state``, as its ``FrameRunner`` hands them over), and with the frame's external accelerations and
+        aims."""
         old = self._engine
         capacity = old.grown_capacity()
-        start = old.frame_start_state()
-        kept = [e.frame_start_state() for e in old.elements]
-        loop = old.solver.pcg.loop
+        redo = old.redo_state()
         forces = None if self._forces is None else self._forces.a
         aims = None if self._aim_group is None else self._aim_group
         # release the old engine before the new one allocates (the contact export holds it too)
         self._engine = self._frame_graph = self._forces = self._contact_export = old = None
         self._make_engine(capacity)
-        self._engine.load_state(**start)
-        for e, group_state in zip(self._engine.elements, kept, strict=True):
-            if group_state:
-                e.load_state(group_state)
+        self._engine.load_redo_state(redo)
         if forces is not None:
             wp.copy(self._forces.a, forces)
         if aims is not None:  # the aims of the step, which the new engine solves again
-            for name in ("q_aim", "active", "strength"):
-                wp.copy(getattr(self._aim_group, name), getattr(aims, name))
-        self._engine.solver.pcg.loop = loop  # the PCG loop the steps so far chose, as FrameRunner carries it
+            wp.copy(self._aim_group.q_aim, aims.q_aim)
+            wp.copy(self._aim_group.active, aims.active)
+            wp.copy(self._aim_group.strength, aims.strength)
         self._write_joint_controls(self._control or self._control_of_model(), self._dt)
         self._write_stitch_stiffness(self._dt)
         self._write_body_stiffness(self._dt)
@@ -5863,11 +5849,7 @@ class SolverIPC(SolverBase, CouplingInterface):
                 break
         else:
             raise RuntimeError(f"SolverIPC: the contact lists still overflow after {_MAX_REGROWS} enlargements.")
-        self._engine.load_state(**self._engine.frame_start_state())
-        for e in self._engine.elements:
-            group_state = e.frame_start_state()
-            if group_state:
-                e.load_state(group_state)
+        self._engine.load_redo_state(self._engine.redo_state())
         if self.model.body_count:
             # what the solver wrote for the restored state, so that the step's own state_in is kept as it was
             self._store(self._body_q_written, self._body_qd_written, None)

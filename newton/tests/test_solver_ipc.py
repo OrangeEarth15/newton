@@ -3409,8 +3409,7 @@ def test_body_stiffness_takes_a_turn_in_one_iteration(test, device):
     test.assertEqual(expected(1.0 / 600.0), 1.0e8)
     test.assertLess(expected(0.1), 1.0e6)
     _, _, solver = spin_after(0.5, 0.1, 1, body_kappa=1.0e7)
-    (ortho,) = (e for e in solver._engine.elements if isinstance(e, solver._ortho_potential))
-    np.testing.assert_array_equal(ortho.kappa.numpy(), 1.0e7)
+    np.testing.assert_array_equal(solver._uipc_warp.arrays.orthogonality(solver._engine).kappa.numpy(), 1.0e7)
     test.assertIsNone(solver._ortho)
     for kappa in (0.0, -1.0e8, float("nan"), float("inf")):
         with test.assertRaisesRegex(ValueError, "body_kappa must be a finite positive stiffness"):
