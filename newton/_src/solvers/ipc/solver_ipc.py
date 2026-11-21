@@ -4540,11 +4540,11 @@ class SolverIPC(SolverBase):
 
     def _scene_inputs_now(self) -> tuple:
         """What the scene was laid out from besides gravity and the bodies' mass properties, which change in place:
-        the triangulated shapes, the friction coefficients of the contact models, the contact thicknesses and the
-        springs."""
+        the triangulated shapes, the friction coefficients of the contact models, the contact thicknesses, the
+        particles' masses and the springs."""
         model = self.model
         materials = (float(model.soft_contact_mu), float(model.particle_mu))
-        arrays = [model.particle_radius] if model.particle_count else []
+        arrays = [model.particle_radius, model.particle_mass] if model.particle_count else []
         if model.spring_count:
             arrays += [model.spring_rest_length, model.spring_stiffness, model.spring_damping]
         if model.shape_count:
@@ -5730,10 +5730,12 @@ class SolverIPC(SolverBase):
         graphs captured before take them. A change of the triangulated shapes (``SHAPE_PROPERTIES`` with new
         transforms or scales, ``SHAPE_TYPE_AND_SOURCE``), of the friction coefficients and the contact thicknesses
         (``SHAPE_PROPERTIES`` with a new ``shape_material_mu`` or ``shape_margin``, ``MODEL_PROPERTIES`` with a new
-        ``soft_contact_mu``, ``particle_mu`` or ``particle_radius``), of the springs (``MODEL_PROPERTIES`` with a new
-        ``spring_rest_length``, ``spring_stiffness`` or ``spring_damping``), of the joints' types, bodies, frames or
-        axes (``JOINT_PROPERTIES``) or of which bodies are kinematic (``BODY_PROPERTIES``,
-        ``BODY_INERTIAL_PROPERTIES``) builds the solve again: the next step reads ``state_in`` in full, and graphs that
+        ``soft_contact_mu``, ``particle_mu`` or ``particle_radius``), of the particles' masses (``MODEL_PROPERTIES``
+        with a new ``particle_mass``, as a coupled solver gives its proxy particles their masses), of the springs
+        (``MODEL_PROPERTIES`` with a new ``spring_rest_length``, ``spring_stiffness`` or ``spring_damping``), of the
+        joints' types, bodies, frames or axes (``JOINT_PROPERTIES``) or of which bodies are kinematic
+        (``BODY_PROPERTIES``, ``BODY_INERTIAL_PROPERTIES``) builds the solve again: the next step reads ``state_in`` in
+        full, and graphs that
         hold :meth:`step` must be captured again. The joints' other data are read at every step; the joint flags only
         check them again against what **Joints** in the class docstring rejects. So are the stiffness and the enabled
         flags of the particle-body attachments (``CONSTRAINT_PROPERTIES``), which that flag checks again against what

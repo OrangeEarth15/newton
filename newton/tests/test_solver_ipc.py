@@ -1878,6 +1878,33 @@ def test_notify_new_masses_without_joints(test, device):
     np.testing.assert_allclose(traj[:, b, 2], 1.0 - 9.81 * 0.01**2 * k * (k + 1) / 2.0, atol=1e-5)
 
 
+def test_notify_new_particle_masses(test, device):
+    """New particle masses reported with MODEL_PROPERTIES, as a coupled solver gives its proxy particles theirs, build
+    the solve again with them: a particle pushed up by particle_f = 10 N, its mass doubled from 1 kg to 2 kg, accelerates
+    at 10 / 2 - 9.81 m/s^2 in implicit Euler's steps (with 1 kg it would rise), and the same notification without a
+    new mass keeps the solve."""
+    builder = newton.ModelBuilder()
+    builder.add_particle(wp.vec3(0.0, 0.0, 1.0), wp.vec3(0.0, 0.0, 0.0), mass=1.0, radius=0.01)
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model, newton_velocity_tol=1e-5, linear_tol_rate=1e-12)
+    engine = solver._engine
+    solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES)
+    test.assertIs(solver._engine, engine)  # nothing new: the same solve
+    model.particle_mass.assign(np.array([2.0], np.float32))
+    model.particle_inv_mass.assign(np.array([0.5], np.float32))
+    solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES)
+    test.assertIsNot(solver._engine, engine)
+    s0, s1 = model.state(), model.state()
+    z = []
+    for _ in range(10):
+        s0.particle_f.assign(np.array([[0.0, 0.0, 10.0]], np.float32))
+        solver.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+        z.append(float(s0.particle_q.numpy()[0, 2]))
+    k = np.arange(1, 11)
+    np.testing.assert_allclose(z, 1.0 + (10.0 / 2.0 - 9.81) * 0.01**2 * k * (k + 1) / 2.0, atol=1e-5)
+
+
 def test_heightfield_triangles_and_rest(test, device):
     """A height field is the triangle mesh Newton's narrow phase collides with: its triangles in the solver are those
     of get_triangle_shape_from_heightfield, in the field's scaled and moved frame. Spheres dropped on its two
@@ -5710,6 +5737,7 @@ for name, func in (
     ("test_reset_checks_world_mask_as_newton_does", test_reset_checks_world_mask_as_newton_does),
     ("test_notify_updates_gravity_and_inertia_in_place", test_notify_updates_gravity_and_inertia_in_place),
     ("test_notify_new_masses_without_joints", test_notify_new_masses_without_joints),
+    ("test_notify_new_particle_masses", test_notify_new_particle_masses),
     ("test_gravity_per_world", test_gravity_per_world),
     ("test_graph_outdated_after_long_solves", test_graph_outdated_after_long_solves),
     ("test_graph_outdated_takes_the_ladder_guesses", test_graph_outdated_takes_the_ladder_guesses),
