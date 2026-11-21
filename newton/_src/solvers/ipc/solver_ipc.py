@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gc
 import importlib.metadata
+import inspect
 import operator
 import re
 import warnings
@@ -160,7 +161,7 @@ def _load_particles(
     """Keep the float64 state where ``state_in`` holds its float32 rounding, take ``state_in`` elsewhere.
 
     ``changed[s]`` is set where the state of a particle of subscene ``s`` was taken that ``quiet`` does not mark (one
-    entry, 0, without ``coupled_worlds``): a free particle that is no coupled solver's proxy.
+    entry, 0, with one world): a free particle that is no coupled solver's proxy.
     """
     i = wp.tid()
     taken = int(0)
@@ -1161,8 +1162,9 @@ def _copy_status(
 @wp.kernel
 def _keep_status(step: wp.array[wp.int32], kept: wp.array[wp.int32]):
     """The status bits of a step joined into those kept since ``check_status()`` last read them (an entry of a coupled
-    solver, which steps the solver without observables)."""
-    kept[0] = kept[0] | step[0]
+    solver, which steps the solver without observables): one word, or one per world entry with independent worlds."""
+    k = wp.tid()
+    kept[k] = kept[k] | step[k]
 
 
 @wp.func
@@ -1554,12 +1556,15 @@ def _any_selected(world_mask: wp.array[wp.bool], entries: wp.array[wp.int32], se
 
 
 @wp.kernel
-def _subscenes_selected(world_mask: wp.array[wp.bool], entry: wp.array[wp.int32], selected: wp.array[wp.int32]):
-    """``selected[s]`` = 1 where ``world_mask`` selects the world of subscene ``s`` (``coupled_worlds``): its entry
+def _subscenes_selected(
+    world_mask: wp.array[wp.bool], entry: wp.array[wp.int32], first: int, selected: wp.array[wp.int32]
+):
+    """``selected[s]`` = 1 where ``world_mask`` selects the world of subscene ``s`` (several worlds): its entry
     ``entry[s]``, the global entities' (the mask's last) for subscene 0, the k-th local world with content for
-    subscene k + 1."""
+    subscene k + 1. Subscenes below ``first`` are never selected: with independent worlds the global entry selects
+    nothing (``first`` 1), since the global entities are no unknowns."""
     s = wp.tid()
-    selected[s] = wp.where(world_mask[entry[s]], 1, 0)
+    selected[s] = wp.where(s >= first and world_mask[entry[s]], 1, 0)
 
 
 # A copy of Newton's normalize_reset_world_mask (newton/_src/core/reset.py), which SolverBase.reset calls and which has
@@ -1839,9 +1844,10 @@ def _map_joints(model: Model, options: _JointOptions) -> _JointMap:
     return _JointMap(kind, store, three, bool(np.any(store != joint_type)), distance.astype(np.int32))
 
 
-def _check_supported(model: Model, coupled_worlds: bool = False, joints: _JointOptions | None = None) -> None:
-    """Reject model content the solver would otherwise accept and ignore; content in more than one world unless
-    ``coupled_worlds``; joints as ``joints`` maps them (``_JointOptions``)."""
+def _check_supported(model: Model, joints: _JointOptions | None = None) -> None:
+    """Reject model content the solver would otherwise accept and ignore; joints as ``joints`` maps them
+    (``_JointOptions``). What independent worlds refuse is checked when the solve is laid out
+    (``SolverIPC._check_independent_options``, ``_check_independent_content``)."""
     if model.requires_grad:
         raise NotImplementedError("SolverIPC does not support gradients (model.requires_grad=True).")
     for name, count in (
@@ -1874,8 +1880,6 @@ def _check_supported(model: Model, coupled_worlds: bool = False, joints: _JointO
     _check_joints(model, joints)
     _check_springs(model)
     _check_attachments(model)
-    if not coupled_worlds:
-        _check_one_world(model)
     _check_surface_velocity(model)
 
 
@@ -2095,16 +2099,35 @@ def _local_worlds(model: Model) -> np.ndarray:
     return local[local >= 0].astype(np.int64)
 
 
-def _check_one_world(model: Model) -> None:
-    """One world, besides global entities, unless ``coupled_worlds``: one solve couples everything it holds through
-    one step length, one line search and one convergence test."""
-    local = _local_worlds(model)
-    if len(local) > 1:
-        raise NotImplementedError(
-            f"SolverIPC simulates one world: the model has particles, bodies or colliding shapes in worlds "
-            f"{local.tolist()}, which would share one Newton solve. With coupled_worlds=True the worlds are solved "
-            "together without colliding with each other, and each world's result depends on the others' iterations."
-        )
+def _element_across_worlds(model: Model, free: np.ndarray) -> str | None:
+    """The first triangle, tetrahedron or spring the solver simulates whose free particles (``free``) lie in two local
+    worlds, named with the two worlds, or None. With independent worlds no element joins two worlds, which
+    libuipc-warp refuses in its own terms; Newton's builder lets a spring, a triangle or a tetrahedron join any
+    particles. A bending edge joins two worlds only where one of its triangles does. A global particle is in no world
+    (a free global particle is refused before)."""
+    if model.particle_count == 0:
+        return None
+    world = model.particle_world.numpy().astype(np.int64)
+    own_tris, own_tets, own_springs = _own_elements(model)
+    for name, indices, k, own in (
+        ("triangle", model.tri_indices, 3, own_tris),
+        ("tetrahedron", model.tet_indices, 4, own_tets),
+        ("spring", model.spring_indices, 2, own_springs),
+    ):
+        if indices is None or len(indices) == 0:
+            continue
+        ids = np.flatnonzero(own)
+        rows = indices.numpy().reshape(-1, k).astype(np.int64)[ids]
+        index = np.maximum(rows, 0)
+        mine = (rows >= 0) & free[index] & (world[index] >= 0)
+        lo = np.where(mine, world[index], np.iinfo(np.int64).max).min(axis=1)
+        hi = np.where(mine, world[index], -1).max(axis=1)
+        joined = np.flatnonzero(mine.any(axis=1) & (lo != hi))
+        if len(joined):
+            i = int(joined[0])
+            more = f" ({len(joined) - 1} more {name}s do too)" if len(joined) > 1 else ""
+            return f"{name} {int(ids[i])} joins free particles of the worlds {int(lo[i])} and {int(hi[i])}{more}"
+    return None
 
 
 def _compatible_groups(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -2121,7 +2144,7 @@ def _compatible_worlds(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 @dataclass
 class _Worlds:
-    """The subscenes of a model with content in more than one local world (``coupled_worlds``): subscene 0 holds the
+    """The subscenes of a model with content in more than one local world (several worlds): subscene 0 holds the
     global entities (world -1), subscene k + 1 the k-th local world that holds content."""
 
     worlds: np.ndarray  # (L,): the world of subscene k + 1
@@ -2191,7 +2214,7 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
     the two collide flags and the friction coefficient. A shape in a filter pair that would otherwise collide gets an
     element of its own, since the pair excludes two shapes and not two classes of them. The particles take three
     elements: those in no triangle and no tetrahedron, active (``P_free``) or not (``P_off``), and the vertices of
-    cloth and tetrahedra (``P_surf``). With ``worlds`` (``coupled_worlds``) the subscenes keep the worlds apart, so the
+    cloth and tetrahedra (``P_surf``). With ``worlds`` (several worlds) the subscenes keep the worlds apart, so the
     world leaves the signature, and a shape in a filter pair shares its element with its copies in replicated worlds
     (``_filter_classes``). With ``aims`` (``kinematic_motion="aim"``) a shape's motion joins the signature: on a
     dynamic body, on a kinematic body (``_kinematic_bodies``), or static; the pairs of two shapes that are each
@@ -2726,9 +2749,9 @@ class SolverIPC(SolverBase, CouplingInterface):
     and equality constraints, tendons, muscles, non-zero triangle or
     tetrahedron activations, the joint types and properties that **Joints**
     below rejects,
-    gradients (``model.requires_grad``), content in more than one world unless
-    ``coupled_worlds`` (the worlds would share one Newton solve; see
-    **Worlds**), a
+    gradients (``model.requires_grad``), with independent worlds what
+    **Worlds** below refuses (an unknown of the global world, an element that
+    joins two worlds, and the options they do not take yet), a
     :attr:`~newton.Model.shape_contact_pairs` array assigned to the model, more
     contact elements than the engine takes (see **Contact** below),
     collision meshes with a surface velocity (``Mesh.enable_surface_velocity``,
@@ -2813,11 +2836,11 @@ class SolverIPC(SolverBase, CouplingInterface):
     contact tabular: every vertex and half plane is in a contact element, and
     every pair of elements has a friction coefficient and a switch. Shapes that
     Newton's rules cannot tell apart share an element (the same collision
-    group, world, collide flags and friction coefficient; with
-    ``coupled_worlds`` the subscenes keep the worlds apart, see **Worlds**,
-    and the world leaves the signature); a shape in a filter pair gets one of
-    its own, which with ``coupled_worlds`` its copies in replicated worlds
-    share. Free particles (in no triangle and no
+    group, world, collide flags and friction coefficient; with several
+    worlds the subscenes keep the worlds apart, see **Worlds**, and the world
+    leaves the signature); a shape in a filter pair gets one of its own, which
+    with several worlds its copies in replicated worlds share. Free particles
+    (in no triangle and no
     tetrahedron) are in one element, or in another one that collides with
     nothing when they are not :attr:`~newton.ParticleFlags.ACTIVE`, and the
     vertices of cloth and tetrahedra in a third. Two shapes collide as
@@ -2897,9 +2920,9 @@ class SolverIPC(SolverBase, CouplingInterface):
     good.) Within a history the velocity lags the same way behind a force that
     jumps: gravity changed by :math:`\\Delta g` through
     :meth:`notify_model_changed` leaves it :math:`\\Delta t \\, \\Delta g / 2`
-    behind. With ``coupled_worlds`` a new state in one world, or its reset,
-    makes the step an implicit Euler step of that world's particles and bodies,
-    and the other worlds go on with BDF2. As in libuipc the coefficients assume
+    behind. With several worlds a new state in one world, or its reset, makes
+    the step an implicit Euler step of that world's particles and bodies, and
+    the other worlds go on with BDF2. As in libuipc the coefficients assume
     one ``dt`` for consecutive steps: a step of another ``dt`` is taken as it
     is. The drives, passive springs and damping of joints take BDF2's velocity
     at the end of the step (see **Joints**); the default body stiffness follows
@@ -2941,28 +2964,85 @@ class SolverIPC(SolverBase, CouplingInterface):
     linear solve. Particles on no element keep their 3 x 3 blocks.
 
     **Worlds.** Particles, bodies and colliding shapes in more than one local
-    world are refused unless ``coupled_worlds=True``. With it every local world
-    is a libuipc subscene of its own and the global entities (world -1) one
-    more, which meets every world, as Newton's collision rules say: no contact
-    pair joins two worlds, also where the worlds overlap in space, and a global
-    ground or static shape acts in every world. The worlds remain one solve:
-    one step length (the smallest time of impact over all worlds, and a line
-    search on the sum of their energies), one Newton convergence test (the
-    largest displacement over all worlds), one PCG solve and one set of contact
-    lists. A world's result therefore depends on the others through the
-    iteration counts and the step lengths, and a failure or an overflow in one
-    world fails the step in every world. Copies of one world take the
-    iterations of one copy, and each follows the run of that world alone to
-    the rounding of the shared sums. A reset of one world (:meth:`reset` with
-    a ``world_mask``), or a new state written for one world, discards the
-    friction of that world's contacts and starts its BDF2 history anew, and
-    leaves every other world's friction and history as they were, bit for bit
+    world are simulated as independent worlds, Newton's meaning of worlds:
+    every world takes the step it would take alone, with its own Newton
+    iterations, line searches and step lengths, convergence test, linear
+    solves and status, as libuipc-warp's independent worlds solve them
+    (libuipc-warp's own; libuipc solves the subscenes of a scene together).
+    Every local world is a libuipc subscene of its own and the global entities
+    (world -1) one more, which meets every world, as Newton's collision rules
+    say: no contact pair joins two worlds, also where the worlds overlap in
+    space, and a global ground or static shape acts in every world. The worlds
+    share one frame graph, one collision detection and one set of contact
+    lists: a step runs as many Newton iterations as its slowest world, and a
+    world that has converged is held where it is while the others iterate. A
+    world takes the Newton iterations of the same world alone and agrees with
+    it to the rounding of the engine's sums, which add in another order than in
+    an engine of that world alone, as two runs of one engine already differ by
+    the rounding of its atomics; where a step carries rounding far, as a stiff
+    landing does at the default tolerances, the two part as far as a run alone
+    parts from one started a rounding error away.
+
+    A world that fails (a non-finite value, a contact pair at or inside its
+    thickness, a CCD fraction that is not positive) fails alone: it is put
+    back at its state at the step's start, its friction discarded and its BDF2
+    history started anew, and the other worlds take their step. ``STATUS`` and
+    ``SOLVER_RESIDUAL`` hold every world's own bits and residual at its entry;
+    the entries of the global world and of worlds that hold no unknowns (only
+    static or kinematic content) stay 0. A step that is not captured and fails
+    in some worlds writes ``state_out``, those worlds at the step's start and
+    the others at their step, and raises :class:`RuntimeError` naming the
+    worlds and their bits; :meth:`check_status` names them too. An overflow of
+    the contact lists, which the worlds share, is still every world's: an
+    eager step grows them and solves the step again for every world, and a
+    captured step sets ``OVERFLOW`` in every world (a quota of the lists per
+    world is a later step of libuipc-warp). A reset with a ``world_mask``, or
+    a new state written for one world, discards that world's friction and
+    starts its BDF2 history anew and leaves the other worlds as they were; the
+    mask's global entry selects nothing, since the global entities are no
+    unknowns. :meth:`frame_stats` gives the counts of the step's loops: the
+    Newton iterations of its slowest world.
+
+    The global entities do not move: a free particle (mass and
+    :attr:`~newton.ParticleFlags.ACTIVE`), a dynamic body or a coupled solver's
+    proxy of world -1, and with ``kinematic_motion="aim"`` a global kinematic
+    body with colliding shapes, would be an unknown that every world pushes,
+    and are refused with :class:`NotImplementedError`, as Newton's implicit MPM
+    refuses global colliders backed by dynamic bodies with
+    ``separate_worlds``; so is a triangle, tetrahedron or spring that joins two
+    worlds. Global static shapes and planes, kinematic particles and kinematic
+    bodies (``kinematic_motion="jump"``) act in every world. Not offered with
+    independent worlds yet, where two worlds or more move, and refused naming
+    what to use instead: ``contact_constitution="al-ipc"``,
+    ``fem_preconditioner="mas"`` (its
+    clusters may join two worlds) and ``adaptive_kappa=True`` (libuipc's
+    stiffness range of the whole scene would couple the worlds; a range per
+    world is a later step of libuipc-warp). The engine's Newton exit check,
+    which independent worlds do not take either, is not used by the solver.
+
+    With ``coupled_worlds=True`` the worlds are one solve instead, with the
+    same subscenes: one step length (the smallest time of impact over all
+    worlds, and a line search on the sum of their energies), one Newton
+    convergence test (the largest displacement over all worlds), one PCG solve
+    and one set of contact lists. A world's result therefore depends on the
+    others through the iteration counts and the step lengths, and a failure or
+    an overflow in one world fails the step in every world, whose entries all
+    get the bits of the one solve. Copies of one world take the iterations of
+    one copy, and each follows the run of that world alone to the rounding of
+    the shared sums. Global particles and bodies may move, as unknowns of the
+    one solve that meet every world, and the options above are taken. A reset
+    of one world, or a new state written for one world, discards the friction
+    of that world's contacts and starts its BDF2 history anew, and leaves every
+    other world's friction and history as they were, bit for bit
     (libuipc-warp's requests per subscene; libuipc discards friction for a
-    whole scene); with ``adaptive_kappa`` the stiffness range is that of the
-    whole scene. A model with content in one local world is solved as without
-    the option. The engine takes up to 32,768 subscenes, and contact elements
-    times the subscene count rounded up to a power of two below :math:`2^{31}`;
-    the start check forms no pair of parts of two worlds.
+    whole scene); a reset of the global entities discards the friction of
+    every pair with a global entity; with ``adaptive_kappa`` the stiffness
+    range is that of the whole scene.
+
+    A model with content in one local world is solved as one world either
+    way. The engine takes up to 32,768 subscenes, and contact elements times
+    the subscene count rounded up to a power of two below :math:`2^{31}`; the
+    start check forms no pair of parts of two worlds.
 
     **Kinematic bodies.** By default (``kinematic_motion="jump"``) a
     kinematic body is a fixed affine body whose pose the solver writes from
@@ -3257,8 +3337,8 @@ class SolverIPC(SolverBase, CouplingInterface):
     pose and twist are what the solver last wrote, keep the float64 state;
     anything else is taken from ``state_in``, a body as the rigid motion of its
     pose and twist. Taking a new state for a particle or body that is not
-    kinematic discards the friction of that step's contacts (with
-    ``coupled_worlds``, the contacts of its world), as libuipc does after a
+    kinematic discards the friction of that step's contacts (with several
+    worlds, the contacts of its world), as libuipc does after a
     state is written and as a solver started from that state does.
     :meth:`reset` does the same without a new state. Output is written to
     ``state_out`` in float32.
@@ -3279,8 +3359,10 @@ class SolverIPC(SolverBase, CouplingInterface):
     ``ObservableKind.SOLVER_RESIDUAL`` (not with ``contact_constitution="al-ipc"``)
     with :meth:`observables` and pass the
     container to :meth:`step`: the step writes a :class:`SolverIPC.StatusBits` mask and
-    the residual on the device, also during graph replay. Every world that
-    owns particles or bodies receives the values of the one solve. The
+    the residual on the device, also during graph replay. With independent
+    worlds every world that holds unknowns receives its own (see **Worlds**);
+    with one world, or ``coupled_worlds``, every world that owns particles or
+    bodies receives the values of the one solve. The
     residual is the convergence measure of libuipc's Newton loop: the largest
     displacement of the last Newton direction (the rows of an affine body's
     :math:`A` scaled by ``newton_velocity_tol / newton_transrate_tol``) over
@@ -3294,11 +3376,14 @@ class SolverIPC(SolverBase, CouplingInterface):
     and solves the step again; when the step failed otherwise (a non-finite
     value, a contact starting at or inside its thickness, an exhausted BVH
     traversal), it raises :class:`RuntimeError` and leaves ``state_out``
-    unwritten. A captured step cannot do either: it sets the bit, and nothing
-    else reports the failure. A caller that captures :meth:`step` must
-    therefore request ``STATUS``, pass one container to each captured step
-    (a container holds the bits of the last step that wrote it), and after
-    every replay call :meth:`check_status` with each container. It raises
+    unwritten, but where independent worlds failed alone: there it writes
+    ``state_out`` first, the failed worlds at the step's start and the others
+    at their step (see **Worlds**). A captured step cannot do either: it sets
+    the bit, and nothing else reports the failure. A caller that captures
+    :meth:`step` must therefore request ``STATUS``, pass one container to each
+    captured step (a container holds the bits of the last step that wrote
+    it), and after every replay call :meth:`check_status` with each
+    container. It raises
     :class:`RuntimeError` on a failed step and warns on an iteration limit;
     with ``grow=True`` it answers :attr:`SolverIPC.StatusBits.OVERFLOW` with
     :meth:`grow` and returns ``True``, and the caller then restores the
@@ -3365,8 +3450,13 @@ class SolverIPC(SolverBase, CouplingInterface):
     give capacities that drop none, a worst case several times the usual
     count. A step that failed writes no rows. The order of the rows changes
     from run to run (atomic counters), their set and values do not. With
-    ``coupled_worlds`` the rows of every world share the buffer, and the
-    shapes tell the worlds apart. Not with ``contact_constitution="al-ipc"``.
+    several worlds the rows of every world share the buffer, and the shapes
+    tell the worlds apart. With independent worlds a step in which any world
+    failed writes no row of any world: libuipc-warp exports the contact forces
+    of a frame only when no world of it failed (its export per world is still
+    to come), and so the feedback forces of a coupled solver's proxies (see
+    **Coupling**) are zero in such a step too. Not with
+    ``contact_constitution="al-ipc"``.
     The output costs, only when requested, one pass over the step's contact
     terms and one over its rows, and 64 bytes per slot of the contact lists.
 
@@ -3424,8 +3514,9 @@ class SolverIPC(SolverBase, CouplingInterface):
     ``SolverCoupledADMM`` with more than one iteration) is refused when it is
     built: the solver cannot yet start a step's solve again from the same
     state. The coupler steps its entries without observables, so the solver as
-    an entry keeps the status bits of its steps, captured or not, and
-    :meth:`check_status` without a container reports them and clears them. A
+    an entry keeps the status bits of its steps, captured or not, with
+    independent worlds a word for every world entry, and :meth:`check_status`
+    without a container reports them, naming the worlds, and clears them. A
     reset through the coupler is :meth:`reset` with the coupler's world mask.
     Of a view that the coupler cannot compact, the other entries' joints are
     in the view, disabled, and are checked as the solver's own.
@@ -3471,8 +3562,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         shape_segments: Segments around a sphere, capsule, cylinder, cone or
             ellipsoid when it is triangulated.
         coupled_worlds: Simulate content in more than one world as one solve
-            in which no world collides with another (see **Worlds**); without
-            it such a model is refused.
+            in which no world collides with another, where by default every
+            world is solved apart from the others (see **Worlds**).
         integrator: ``"bdf1"`` (implicit Euler) or ``"bdf2"`` (see **BDF2**).
         contact_constitution: ``"ipc"`` (barrier contact) or ``"al-ipc"`` (see
             **AL-IPC contact**).
@@ -3568,8 +3659,10 @@ class SolverIPC(SolverBase, CouplingInterface):
         )
         """Per-world :class:`SolverIPC.StatusBits` of the latest step, shape ``(world_count + 1,)``.
 
-        Every world that owns particles or bodies gets the mask of the one solve; the final entry is global
-        world ``-1``. Other entries stay zero.
+        With independent worlds (several worlds, the default) every world that holds unknowns gets its own mask, and
+        the final entry, global world ``-1``, stays zero. With one world, or ``coupled_worlds``, every world that owns
+        particles or bodies gets the mask of the one solve, the final entry too when global particles or bodies are
+        in it. Other entries stay zero.
         """
 
     class StatusBits(IntFlag):
@@ -3670,7 +3763,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             armature=bool(enable_joint_armature),
             effort_limit=bool(enable_joint_effort_limit),
         )
-        _check_supported(model, self._coupled_worlds, self._joint_options)
+        _check_supported(model, self._joint_options)
         _check_choice("integrator", integrator, ("bdf1", "bdf2"))
         _check_choice("contact_constitution", contact_constitution, ("ipc", "al-ipc"))
         _check_choice("fem_preconditioner", fem_preconditioner, ("diag", "mas"))
@@ -3728,7 +3821,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._clamp_checked_dt = None  # the step size whose stiffness the clamp warning was last checked for
         self._clamp_reported = False
         self._engine = None
+        # several local worlds (_Worlds), solved apart from each other unless coupled_worlds (_build_engine)
         self._worlds = None
+        self._independent = False
         self._ortho = None  # the engine's orthogonality potentials, whose stiffness follows dt (default body_kappa)
         self._default_control = None  # the Control of a step given none, built once (_control_of_model)
         # CONTACT_F: whether a container requested it, and libuipc-warp's ContactForces of the engine then
@@ -3842,11 +3937,18 @@ class SolverIPC(SolverBase, CouplingInterface):
             (uipc_warp.arrays, "orthogonality"),
             (uipc_warp.SimEngine, "redo_state"),
         )
+        # and the keywords of the newest calls: independent worlds, the scene's flag and the status of every world
+        keywords = (
+            ("ArrayScene(independent_subscenes=)", "independent_subscenes", uipc_warp.arrays.ArrayScene),
+            ("write_frame_status(worlds=)", "worlds", uipc_warp.arrays.write_frame_status),
+        )
         missing = [f"{owner.__name__}.{name}" for owner, name in needed if not hasattr(owner, name)]
+        missing += [call for call, keyword, owner in keywords if keyword not in inspect.signature(owner).parameters]
         if missing:
+            calls = [f"{o.__name__}.{n}" for o, n in needed] + [call for call, _, _ in keywords]
             raise ImportError(
-                f"SolverIPC requires libuipc-warp 0.4 or newer with {', '.join(f'{o.__name__}.{n}' for o, n in needed)};"
-                f" the installed one ({version}) lacks {', '.join(missing)}."
+                f"SolverIPC requires libuipc-warp 0.4 or newer with {', '.join(calls)}; the installed one ({version}) "
+                f"lacks {', '.join(missing)}."
             )
         # write_frame_status writes libuipc-warp's FrameStatusFlags into the status arrays: the same bits under the
         # same names, but for the CCD bit, which libuipc-warp names after the time of impact
@@ -3886,9 +3988,14 @@ class SolverIPC(SolverBase, CouplingInterface):
         if not self._d_hat_given:
             self._config.d_hat = _default_d_hat(model)
 
-        scene = self._uipc_warp.arrays.ArrayScene(kappa_corridor=self._adaptive_kappa)
-        # several local worlds (coupled_worlds): one subscene each, all of them meeting the global entities' subscene 0
-        self._worlds = _Worlds.of(model) if self._coupled_worlds else None
+        # several local worlds: one subscene each, all of them meeting the global entities' subscene 0; libuipc-warp
+        # solves them apart from each other (independent worlds) unless coupled_worlds asks for one solve
+        self._worlds = _Worlds.of(model)
+        self._independent = self._worlds is not None and not self._coupled_worlds
+        self._status_entries = None
+        scene = self._uipc_warp.arrays.ArrayScene(
+            kappa_corridor=self._adaptive_kappa, independent_subscenes=self._independent
+        )
         elements = _contact_elements(model, self._worlds, self._aims)
         for _ in range(1, elements.count):
             scene.contact_element()
@@ -3902,6 +4009,10 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._plan_attachments()
         self._plan_distance_joints()
         self._dyadic = self._add_shapes_and_bodies(scene, elements)
+        if self._independent:
+            self._check_independent_content()
+            if len(self._status_entries) > 1:  # one world that moves is solved as one world: no option to refuse
+                self._check_independent_options()
         if self._config.contact_constitution == "al-ipc":
             self._check_al_ipc(elements)
         self._add_joints(scene)
@@ -3943,7 +4054,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._free_particles = wp.array(free, dtype=wp.int32, device=device)
         self._dynamic_bodies = wp.array(dynamic, dtype=wp.int32, device=device)
         self._body_mass_inv = wp.array(self._mass_inverse(*self._dyadic), dtype=wp.mat44d, device=device)
-        # the requests of a new state or a reset, one flag per subscene (one without coupled_worlds): which subscenes
+        # the requests of a new state or a reset, one flag per subscene (one with one world): which subscenes
         # discard their friction and start their BDF2 history anew, libuipc-warp's requests per subscene
         n_sub = 1 if self._worlds is None else self._worlds.count
         self._changed = wp.zeros(n_sub, dtype=wp.int32, device=device)
@@ -3960,6 +4071,11 @@ class SolverIPC(SolverBase, CouplingInterface):
         )
         self._world_entries = np.where(worlds < 0, model.world_count, worlds).astype(np.int32)
         self._world_entries_device = wp.array(self._world_entries, dtype=wp.int32, device=device)
+        if self._independent:  # the entry of every independent world, and a scratch word for each world entry
+            self._status_entries_device = wp.array(self._status_entries, dtype=wp.int32, device=device)
+            self._world_words = wp.zeros(model.world_count + 1, dtype=wp.int32, device=device)
+        if self._sticky_status is not None and self._sticky_status.shape[0] != self._kept_words():
+            self._allocate_kept_status()  # an entry of a coupled solver whose rebuilt solve has other worlds
         # the particles whose new state from state_in discards no friction: the fixed ones (the engine's flags), and
         # a coupled solver's proxy particles, whose state the coupler writes at every step
         self._particle_quiet = None
@@ -4047,12 +4163,96 @@ class SolverIPC(SolverBase, CouplingInterface):
                 "collides " + "; ".join(massless) + ". Static planes are taken."
             )
 
+    def _check_independent_options(self) -> None:
+        """``NotImplementedError`` for the options that independent worlds do not take yet (class docstring,
+        **Worlds**), each naming what to use instead, when two worlds or more hold unknowns: libuipc-warp solves the
+        worlds apart from each other with libuipc's barrier contact, the block-diagonal preconditioner and one contact
+        stiffness given for all."""
+        worlds = self._worlds.worlds
+        which = f"the worlds {worlds.tolist()}" if len(worlds) <= 8 else f"{len(worlds)} worlds"
+        instead = (
+            f"or pass coupled_worlds=True to solve {which} as one (see Worlds in the class docstring), or give the "
+            "solver a model of one world"
+        )
+        if self._config.contact_constitution == "al-ipc":
+            raise NotImplementedError(
+                "SolverIPC: contact_constitution='al-ipc' is not offered with independent worlds yet: libuipc-warp "
+                f"solves {which} apart from each other with libuipc's barrier contact only, AL-IPC's frame being one "
+                f"solve of the whole scene. Use contact_constitution='ipc', {instead}."
+            )
+        if self._config.fem_preconditioner == "mas":
+            raise NotImplementedError(
+                "SolverIPC: fem_preconditioner='mas' is not offered with independent worlds yet: MAS's clusters may "
+                f"join vertices of different worlds, whose linear solves are apart. Use fem_preconditioner='diag', "
+                f"{instead}."
+            )
+        if self._adaptive_kappa:
+            raise NotImplementedError(
+                "SolverIPC: adaptive_kappa=True is not offered with independent worlds yet: libuipc's stiffness range "
+                "follows the size and the mean vertex mass of the whole scene, which would give every world a "
+                "stiffness that the other worlds change, where each world alone has a range of its own. Give kappa "
+                f"as a stiffness (adaptive_kappa=False), or pass coupled_worlds=True to solve {which} as one in the "
+                "range of the whole scene (see Worlds in the class docstring), or give the solver a model of one world."
+            )
+
+    def _check_independent_content(self) -> None:
+        """With independent worlds: ``NotImplementedError`` for an unknown of the global world -1, which every world
+        would push and so join (a particle with mass that is ACTIVE, a dynamic body, a coupled solver's proxy, or with
+        ``kinematic_motion="aim"`` a kinematic body with colliding shapes), as Newton's implicit MPM refuses global
+        colliders backed by dynamic bodies with ``separate_worlds``, and for a triangle, tetrahedron or spring that
+        joins two worlds. Then ``_status_entries``: the worlds that hold unknowns, in increasing order, which are
+        libuipc-warp's independent worlds in their order (its worlds are the subscenes from 1 on that hold unknowns,
+        in subscene order, and subscene k + 1 is the k-th local world with content, ``_Worlds``)."""
+        model = self.model
+        world = model.particle_world.numpy() if model.particle_count else np.zeros(0, np.int64)
+        free = ~self._fixed_particle
+        particle_sub = self._worlds.subscene(world)
+        moving = ~self._kinematic_body
+        moving[self._aim_bodies] = True
+        body_sub = self._body_row_subscene
+        instead = "or pass coupled_worlds=True to solve the worlds as one, in which global entities may move"
+        lost = np.flatnonzero(free & (particle_sub == 0))
+        if len(lost):
+            more = f" ({len(lost) - 1} more global particles are too)" if len(lost) > 1 else ""
+            raise NotImplementedError(
+                f"SolverIPC: particle {int(lost[0])} of the global world -1 is free (it has mass and is ACTIVE){more}: "
+                "with independent worlds it would be an unknown that every world pushes, which would join the worlds. "
+                f"Give it a world or make it kinematic (mass 0), {instead}."
+            )
+        lost = np.flatnonzero(moving & (body_sub == 0))
+        if len(lost):
+            b = int(lost[0])
+            label = model.body_label[b] if b < len(model.body_label) else ""
+            name = f"body {b}" + (f" ({label!r})" if label and label != f"body_{b}" else "")
+            more = f" ({len(lost) - 1} more global bodies are too)" if len(lost) > 1 else ""
+            if self._kinematic_body[b]:
+                what, fix = (
+                    "a kinematic body with colliding shapes, which kinematic_motion='aim' moves toward its aim as an "
+                    "unknown of the step",
+                    "Use kinematic_motion='jump', under which it is a fixed body that acts in every world, give it a "
+                    "world",
+                )
+            else:
+                what, fix = "a dynamic body", "Give it a world or make it kinematic"
+            raise NotImplementedError(
+                f"SolverIPC: {name} of the global world -1 is {what}{more}: with independent worlds it would be an "
+                f"unknown that every world pushes, which would join the worlds. {fix}, {instead}."
+            )
+        across = _element_across_worlds(model, free)
+        if across is not None:
+            raise NotImplementedError(
+                f"SolverIPC: {across}: with independent worlds no element joins two worlds. Keep it inside one world, "
+                f"{instead}."
+            )
+        subscenes = np.unique(np.concatenate([particle_sub[free], body_sub[moving]]).astype(np.int64))
+        self._status_entries = self._worlds.worlds[subscenes - 1].astype(np.int32)
+
     def _subscene_of_shape(self, s: int) -> int:
-        """The subscene of shape ``s``'s vertices: its world's (``coupled_worlds``), else the one subscene, 0."""
+        """The subscene of shape ``s``'s vertices: its world's (several worlds), else the one subscene, 0."""
         return 0 if self._worlds is None else int(self._worlds.subscene(self.model.shape_world.numpy()[s]))
 
     def _subscene_of_body(self, b: int) -> int:
-        """The subscene of body ``b``, for the anchors of a body without shapes: its world's (``coupled_worlds``),
+        """The subscene of body ``b``, for the anchors of a body without shapes: its world's (several worlds),
         else the one subscene, 0."""
         return 0 if self._worlds is None else int(self._worlds.subscene(self.model.body_world.numpy()[b]))
 
@@ -4090,7 +4290,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         every half plane. Triangle meshes and particles are tested part pair by part pair, a part being a contact body's
         primitives in one contact element and one subscene, with the particles on no cloth or tetrahedron taken together
         per element and subscene and also tested among themselves: for the pairs of parts whose subscenes interact (with
-        ``coupled_worlds`` no pair of two worlds is formed) and whose bounding boxes come within their thickness of each
+        several worlds no pair of two worlds is formed) and whose bounding boxes come within their thickness of each
         other, libuipc-warp's brute-force ``SurfaceChecker`` counts the edge-triangle crossings and finds the smallest
         gap over the point-triangle, point-edge, edge-edge and point-point pairs. A gap above 0, also inside ``d_hat``,
         is a valid start, unless it is within a few float32 steps of 0: Newton's positions are float32, and surfaces
@@ -4249,7 +4449,7 @@ class SolverIPC(SolverBase, CouplingInterface):
 
     def _near_parts(self, lo: np.ndarray, hi: np.ndarray, reach: np.ndarray, slack: float, sub: np.ndarray):
         """The pairs ``(a, b)``, ``a < b``, of the parts ``_near_boxes`` finds, but where the subscene table has the
-        form of separate worlds (``coupled_worlds``): there no pair of two worlds is formed, which with worlds at one
+        form of separate worlds (several worlds): there no pair of two worlds is formed, which with worlds at one
         place would be every pair of their parts. The parts of the subscenes that meet every subscene (the global
         entities) are tested against every part, those of the others in one band per subscene (``_near_boxes``'s
         ``band``). Other tables keep every near pair, which the caller tests against the table."""
@@ -4870,6 +5070,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         model = self.model
         meshes: dict[int, list] = {b: [] for b in range(model.body_count)}
         self._obstacle_shapes = []  # the shape of every obstacle, in the order they are added
+        # the subscene of every body's rows: that of its surface vertices, as the engine takes it (one subscene)
+        self._body_row_subscene = np.zeros(model.body_count, np.int64)
         if model.shape_count:
             shape_type = model.shape_type.numpy()
             shape_body = model.shape_body.numpy()
@@ -4940,6 +5142,7 @@ class SolverIPC(SolverBase, CouplingInterface):
                 if parts
                 else self._subscene_of_body(b)
             )
+            self._body_row_subscene[b] = np.atleast_1d(subscene)[0]
             thickness = np.concatenate([np.full(len(v), margin[s]) for v, _, s in parts]) if parts else 0.0
             volume = sum(_closed_volume(v, f) for v, f, _ in parts)
             if volume <= 0.0:
@@ -5199,6 +5402,14 @@ class SolverIPC(SolverBase, CouplingInterface):
         else:
             status = self._advance_eager(dt)
             self._keep_status()
+            if status.failed and self._failed_alone(status):
+                # libuipc-warp put the worlds that failed back at their state at the step's start and stepped the
+                # others: state_out holds both, then the step raises, naming the worlds that failed
+                failed = self._failed_worlds()
+                self._shift_joint_history()
+                self._store(state_in.body_q, state_in.body_qd, state_out)
+                self._write_observables(observables, state_out)
+                raise RuntimeError(self._world_failure(failed))
             if status.failed:
                 self._write_observables(observables, state_out)
                 self._forget_written()  # the engine holds the failed solve: the next step takes state_in
@@ -5284,7 +5495,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._aim_bodies_of(state_in)
             self._load_joints(state_in)
         # the subscenes of the particles and bodies that took state_in discard their friction, and under BDF2 their
-        # step is an implicit Euler step (BDF1: nothing); with coupled_worlds the other worlds go on as they were
+        # step is an implicit Euler step (BDF1: nothing); with several worlds the other worlds go on as they were
         eng.discard_friction(where=self._changed)
         eng.restart_history(where=self._changed)
 
@@ -5450,7 +5661,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         target_q, target_qd, joint_f = control.joint_target_q, control.joint_target_qd, control.joint_f
         bdf2 = self._config.integrator == "bdf2"
         restart = self._engine.bdf1_frame[0:1] if bdf2 else self._no_restart
-        # with coupled_worlds a reset or a new state restarts the rows of its worlds only (reset, _load)
+        # with several worlds a reset or a new state restarts the rows of its worlds only (reset, _load)
         rows = self._engine.restart_rows if bdf2 else None
         restart_rows = self._no_restart if rows is None else rows
         for kind, group, scale in (("revolute", groups.revolute, 1.0), ("prismatic", groups.prismatic, 0.5)):
@@ -5703,6 +5914,39 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._write_stitch_stiffness(self._dt)
         self._write_body_stiffness(self._dt)
 
+    def _failed_alone(self, status) -> bool:
+        """Whether a failed step failed in some independent worlds alone (``status``: the step's ``frame_status``):
+        libuipc-warp's frame of worlds puts a world that fails on a value libuipc asserts on (a non-finite value, a CCD
+        fraction that is not positive, a pair at or inside its thickness) back at its frame start, and the others take
+        their step. An overflow of the contact lists, which the worlds share, and an exhausted traversal are every
+        world's, as without independent worlds."""
+        return (
+            self._independent
+            and len(self._status_entries) > 1
+            and not (status.overflowed or status.traversal_exhausted)
+        )
+
+    def _world_failure(self, failed: dict[int, int]) -> str:
+        """Why a step failed in some of the independent worlds (``_failed_worlds``), and what ``state_out`` holds."""
+        return (
+            f"SolverIPC: the step failed in {len(failed)} of its {len(self._status_entries)} worlds, "
+            f"{self._name_worlds(failed)}. Those worlds are back at their state at the step's start, with their "
+            "friction discarded and their BDF2 history started anew, and every other world took the step: state_out "
+            "holds both. Surfaces must start apart (outside their contact thickness), and the state must stay finite."
+        )
+
+    def _name_worlds(self, failed: dict[int, int]) -> str:
+        """``failed`` (bits by world entry) as ``world 1 on THICKNESS_VIOLATED and world 3 on ...``, the first eight."""
+        names = [
+            ("the global world" if k == self.model.world_count else f"world {k}")
+            + " on "
+            + "|".join(bit.name for bit in self.StatusBits if bit & self.StatusBits.FAILED and bit & failed[k])
+            for k in sorted(failed)
+        ]
+        if len(names) > 8:
+            names = [*names[:8], f"{len(names) - 8} more"]
+        return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
     def _failure(self, status) -> str:
         """Why a step failed, with what libuipc would print."""
         if status.overflowed:
@@ -5729,6 +5973,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         )
         if status is None and residual is None:
             return
+        if self._independent:  # every world its own, the entries of the global world and of worlds without unknowns 0
+            self._write_world_status(status, residual)
+            return
         if len(self._world_entries) <= 2:
             for entry in self._world_entries:
                 self._uipc_warp.arrays.write_frame_status(self._engine, status, residual, index=int(entry))
@@ -5751,6 +5998,26 @@ class SolverIPC(SolverBase, CouplingInterface):
             ],
             device=self.model.device,
         )
+
+    def _write_world_status(self, flags, residual) -> None:
+        """With independent worlds: every world's status bits and Newton residual into its entry of ``flags`` and
+        ``residual`` (libuipc-warp's ``write_frame_status`` with ``worlds``, the record of each world), or the one
+        solve's when one world holds unknowns, the engine then being that world's alone; nothing when none does. The
+        entries of the global world and of worlds without unknowns are not written: they take no step."""
+        entries = self._status_entries
+        if len(entries) > 1:
+            self._uipc_warp.arrays.write_frame_status(self._engine, flags, residual, worlds=self._status_entries_device)
+        elif len(entries) == 1:
+            self._uipc_warp.arrays.write_frame_status(self._engine, flags, residual, index=int(entries[0]))
+
+    def _failed_worlds(self) -> dict[int, int]:
+        """With independent worlds, after a step that is not captured: the status bits of every world whose step
+        failed, by world (reads every world's word back; one synchronization)."""
+        self._world_words.zero_()
+        self._write_world_status(self._world_words, None)
+        words = self._world_words.numpy()
+        failed = int(self.StatusBits.FAILED)
+        return {int(k): int(words[k]) for k in np.flatnonzero(words & failed)}
 
     def _write_contacts(self, observables: SolverBase.Observables | None, state_out: State | None) -> None:
         """With ``CONTACT_F`` requested: the solver's contact terms of the step into the step's ``Contacts``, one row
@@ -5906,7 +6173,8 @@ class SolverIPC(SolverBase, CouplingInterface):
 
         Raises:
             RuntimeError: When a bit of :attr:`SolverIPC.StatusBits.FAILED` is set and ``grow`` does not take an
-                ``OVERFLOW``: the step's result must not be used.
+                ``OVERFLOW``: the step's result must not be used. With independent worlds the bits are every world's
+                own, and the message names the worlds that failed, whose results alone must not be used.
             ValueError: When ``observables`` does not hold the ``STATUS`` observable, or is ``None`` and the solver
                 is no entry of a coupled solver.
 
@@ -5918,7 +6186,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             raise RuntimeError("SolverIPC.check_status() reads from the device; call it outside graph capture.")
         residual = ""
         if observables is None and self._sticky_status is not None:  # an entry of a coupled solver: its kept bits
-            bits = self.StatusBits(int(self._sticky_status.numpy()[0]))
+            words = self._sticky_status.numpy()
             self._sticky_status.zero_()
         elif observables is None or not observables.is_requested(self.ObservableKind.STATUS):
             raise ValueError(
@@ -5926,11 +6194,12 @@ class SolverIPC(SolverBase, CouplingInterface):
                 "entry of a coupled solver."
             )
         else:
-            bits = self.StatusBits(int(np.bitwise_or.reduce(observables.status.numpy())))
+            words = observables.status.numpy()
             if observables.is_requested(SolverBase.ObservableKind.SOLVER_RESIDUAL):
                 residual = (
                     f" (residual {float(observables.solver_residual.numpy().max()):.3g}, at most 1 when converged)"
                 )
+        bits = self.StatusBits(int(np.bitwise_or.reduce(words)))
         if bits & self.StatusBits.OVERFLOW and grow:
             self.grow()
             return True
@@ -5958,6 +6227,15 @@ class SolverIPC(SolverBase, CouplingInterface):
                 )
             if failed & self.StatusBits.TRAVERSAL_EXHAUSTED:
                 causes.append("A BVH traversal ran out of its node budget, so contact candidates are missing.")
+            if self._independent:  # every world its own bits: the worlds that failed, the others took their step
+                worlds = {int(k): int(words[k]) for k in np.flatnonzero(words & int(self.StatusBits.FAILED))}
+                which = self._name_worlds(worlds)
+                if len(worlds) < len(self._status_entries):
+                    subject = f"in {which}{residual}; the result of those worlds must not be used, the other worlds"
+                    subject += " took their step"
+                else:
+                    subject = f"in every world ({which}){residual}; its result must not be used"
+                raise RuntimeError(f"SolverIPC: a step failed {subject}. " + " ".join(causes))
             last = self._uipc_warp.arrays.frame_status(self._engine)
             if last.nonfinite and failed & self.StatusBits(1 << last.nonfinite):
                 report = self._engine.nonfinite_report()
@@ -5996,11 +6274,12 @@ class SolverIPC(SolverBase, CouplingInterface):
         Args:
             state: Unused; the next step reads its own ``state_in``.
             world_mask: Optional boolean mask of shape ``(world_count + 1,)``, the last entry the global entities.
-                With ``coupled_worlds`` the reset applies to the worlds it selects: their friction is discarded and
-                their BDF2 history starts anew, and every other world keeps its own, bit for bit (the worlds still
-                share one solve, see **Worlds**). A reset of the global entities discards the friction of every pair
-                with a global entity, a global ground plane among them. Without ``coupled_worlds`` the reset applies
-                when the mask selects a world that owns particles or bodies. ``None`` resets.
+                With several worlds the reset applies to the worlds it selects: their friction is discarded and their
+                BDF2 history starts anew, and every other world keeps its own, bit for bit. With independent worlds
+                (the default) the last entry selects nothing, since the global entities are no unknowns, as Newton
+                lets a solver without global dynamic objects take it; with ``coupled_worlds`` it discards the friction
+                of every pair with a global entity, a global ground plane among them (see **Worlds**). With one world
+                the reset applies when the mask selects a world that owns particles or bodies. ``None`` resets.
             flags: Unused.
         """
         del state, flags
@@ -6035,7 +6314,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             wp.launch(
                 _subscenes_selected,
                 self._worlds.count,
-                inputs=[world_mask, self._subscene_entry],
+                inputs=[world_mask, self._subscene_entry, int(self._independent)],
                 outputs=[self._selected],
                 device=self.model.device,
             )
@@ -6117,7 +6396,7 @@ class SolverIPC(SolverBase, CouplingInterface):
                 aims = self._aim_bodies
                 rebuild |= any(not np.array_equal(a[aims], b[aims]) for a, b in zip(dyadic, self._dyadic, strict=True))
         if rebuild:
-            _check_supported(model, self._coupled_worlds, self._joint_options)
+            _check_supported(model, self._joint_options)
             self._build_engine()
             return
         if flags & ModelFlags.MODEL_PROPERTIES:
@@ -6153,9 +6432,7 @@ class SolverIPC(SolverBase, CouplingInterface):
                 "step's solve on the device. Use iterations=1."
             )
         if self._sticky_status is None:  # outside graph capture: the coupler calls this once, after construction
-            device = self.model.device
-            self._sticky_status = wp.zeros(1, dtype=wp.int32, device=device)
-            self._step_status = wp.zeros(1, dtype=wp.int32, device=device)
+            self._allocate_kept_status()
 
     @override
     def coupling_notify_input_state_update(
@@ -6280,12 +6557,35 @@ class SolverIPC(SolverBase, CouplingInterface):
             device=self.model.device,
         )
 
+    def _kept_words(self) -> int:
+        """The status words an entry of a coupled solver keeps: one per world entry with independent worlds, else
+        one, the solve's."""
+        return self.model.world_count + 1 if self._independent else 1
+
+    def _allocate_kept_status(self) -> None:
+        """The status words an entry of a coupled solver keeps for :meth:`check_status` (``_kept_words``), zeroed,
+        and the scratch words of one step. Outside graph capture."""
+        device = self.model.device
+        self._sticky_status = wp.zeros(self._kept_words(), dtype=wp.int32, device=device)
+        self._step_status = wp.zeros(self._kept_words(), dtype=wp.int32, device=device)
+
     def _keep_status(self) -> None:
-        """An entry of a coupled solver: the step's status bits joined into those kept for :meth:`check_status`."""
+        """An entry of a coupled solver: the step's status bits joined into those kept for :meth:`check_status`, with
+        independent worlds every world's into its entry."""
         if self._sticky_status is None:
             return
-        self._uipc_warp.arrays.write_frame_status(self._engine, self._step_status)
-        wp.launch(_keep_status, 1, inputs=[self._step_status], outputs=[self._sticky_status], device=self.model.device)
+        if self._independent:
+            self._step_status.zero_()
+            self._write_world_status(self._step_status, None)
+        else:
+            self._uipc_warp.arrays.write_frame_status(self._engine, self._step_status)
+        wp.launch(
+            _keep_status,
+            self._step_status.shape[0],
+            inputs=[self._step_status],
+            outputs=[self._sticky_status],
+            device=self.model.device,
+        )
 
     def contact_stiffness(self, dt: float) -> float:
         """The contact stiffness [Pa] of every contact pair in a step of length ``dt`` [s]: ``kappa``, or with
@@ -6300,6 +6600,7 @@ class SolverIPC(SolverBase, CouplingInterface):
     def frame_stats(self) -> dict:
         """Solver counters of the last step: Newton/PCG iterations, line-search trials, convergence.
 
-        Synchronizes with the device.
+        With independent worlds the counts are those of the step's loops, which run as long as a world is in them: the
+        Newton iterations of the slowest world. Synchronizes with the device.
         """
         return {} if self._engine is None else self._engine.frame_stats()
