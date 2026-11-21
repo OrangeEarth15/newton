@@ -1446,6 +1446,86 @@ def _contact_rows(
 
 
 @wp.kernel
+def _proxy_wrenches(
+    rec_vertices: wp.array[wp.vec4i],
+    rec_forces: wp.array2d[wp.vec3],
+    rec_counts: wp.array[wp.int32],
+    rec_offsets: wp.array[wp.int32],
+    nthreads: int,
+    x: wp.array[wp.vec3d],
+    vertex_body: wp.array[wp.int32],
+    proxy_of_body: wp.array[int],
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    out: wp.array[wp.spatial_vector],
+):
+    """A coupled solver's proxy-body feedback (class docstring, **Coupling**): the force of every contact term of the
+    step on a vertex of a proxy body, and its torque about the body's centre of mass at the end of the step, added at
+    the proxy's index ``proxy_of_body[b]``. Grid-stride over the live records of libuipc-warp's ``ContactForces``."""
+    tid = wp.tid()
+    total = int(0)
+    for k in range(10):
+        total += rec_counts[k]
+    for idx in range(tid, total, nthreads):
+        seg = int(0)
+        i = idx
+        while seg < 9 and i >= rec_counts[seg]:
+            i -= rec_counts[seg]
+            seg += 1
+        r = rec_offsets[seg] + i
+        q = rec_vertices[r]
+        _first, count = _term_sides(seg % 5)  # a half-plane term holds its plane after its one vertex
+        for k in range(count):
+            b = vertex_body[q[k]]
+            if b < 0:
+                continue
+            g = proxy_of_body[b]
+            if g < 0:
+                continue
+            f = _record_force(rec_forces, r, k)
+            c = wp.transform_point(body_q[b], body_com[b])
+            arm = x[q[k]] - wp.vec3d(wp.float64(c[0]), wp.float64(c[1]), wp.float64(c[2]))
+            wp.atomic_add(out, g, wp.spatial_vector(_to32v(f), _to32v(wp.cross(arm, f))))
+
+
+@wp.kernel
+def _proxy_particle_forces(
+    rec_vertices: wp.array[wp.vec4i],
+    rec_forces: wp.array2d[wp.vec3],
+    rec_counts: wp.array[wp.int32],
+    rec_offsets: wp.array[wp.int32],
+    nthreads: int,
+    n_particles: int,
+    proxy_of_particle: wp.array[int],
+    out: wp.array[wp.vec3],
+):
+    """A coupled solver's proxy-particle feedback (class docstring, **Coupling**): the force of every contact term of
+    the step on a proxy particle, added at the proxy's index ``proxy_of_particle[p]``. Grid-stride over the live
+    records of libuipc-warp's ``ContactForces``."""
+    tid = wp.tid()
+    total = int(0)
+    for k in range(10):
+        total += rec_counts[k]
+    for idx in range(tid, total, nthreads):
+        seg = int(0)
+        i = idx
+        while seg < 9 and i >= rec_counts[seg]:
+            i -= rec_counts[seg]
+            seg += 1
+        r = rec_offsets[seg] + i
+        q = rec_vertices[r]
+        _first, count = _term_sides(seg % 5)
+        for k in range(count):
+            p = q[k]
+            if p >= n_particles:
+                continue
+            g = proxy_of_particle[p]
+            if g < 0:
+                continue
+            wp.atomic_add(out, g, rec_forces[r, k])
+
+
+@wp.kernel
 def _body_stiffness(
     inertia_per_volume: wp.array[wp.float64],
     cap: wp.float64,
@@ -3319,19 +3399,24 @@ class SolverIPC(SolverBase, CouplingInterface):
     discards friction after any write of a state: a proxy would otherwise
     never have friction. A proxy's new pose is not swept: a source solver that
     moves a proxy into this entry's content by more than the room the barrier
-    leaves fails the step. A proxy's feedback is the interface's default,
-    its change of momentum in the step, which balances the step to the
-    Newton tolerance: give an entry with proxies converged steps
-    (``semi_implicit=False`` and a ``newton_velocity_tol`` of about 1e-4 m/s).
-    With
+    leaves fails the step. A proxy's feedback is the force of the step's
+    contact terms on it at the end of the step, a wrench about its centre of
+    mass for a body (``coupling_harvest_proxy_wrenches``,
+    ``coupling_harvest_proxy_particle_forces``), as SolverVBD harvests it,
+    rather than its change of momentum. The barrier's force is steep in the
+    distance, so the feedback is as accurate as the step's convergence: give
+    an entry with proxies converged steps (``semi_implicit=False`` and a
+    ``newton_velocity_tol`` of about 1e-4 m/s). At the default tolerances the
+    step of an impact can end before the barrier has relaxed, with a force
+    tens of times the change of momentum it caused. With
     ``SolverCoupledProxy``'s lagged transfer, the default, a proxy resting on
     this entry's content does not come to rest: the feedback of a contact this
     stiff reaches the source one step late and keeps the proxy bouncing,
     though its average holds the proxy up; the staggered transfer
     (``mode="staggered"``) brings it to rest. Proxies are refused with
     ``integrator="bdf2"``, whose history the coupler's writes would leave
-    behind, and with ``contact_constitution="al-ipc"``, which would not sweep a
-    proxy's synced pose into its active set.
+    behind, and with ``contact_constitution="al-ipc"``, which neither sweeps a
+    proxy's synced pose into its active set nor exports its contact forces.
     The effective masses, gravity and the rewinds of the proxies take the
     interface's defaults.
 
@@ -3653,6 +3738,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         # (allocated with the request and with every engine built after it, outside any capture)
         self._contact_output = False
         self._contact_export = None
+        self._steps = 0  # steps taken, which the contact export's records follow (_contact_records)
         # an entry of a coupled solver (coupling_notify_iteration_restarts): the status bits of its steps since
         # check_status() last read them, and the scratch word of one step's bits
         self._sticky_status = self._step_status = None
@@ -3912,12 +3998,17 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._body_q_written = wp.empty(nb, dtype=wp.transform, device=device)
             self._body_qd_written = wp.empty(nb, dtype=wp.spatial_vector, device=device)
             self._forget_written()
+        if self._proxy_body.any():  # the body of every surface vertex, for the proxy feedback (-1 elsewhere)
+            vertex_body = np.full(layout.n, -1, np.int32)
+            for b in range(nb):
+                vertex_body[layout.body_vertex_offsets[b] : layout.body_vertex_offsets[b + 1]] = b
+            self._vertex_body = wp.array(vertex_body, dtype=wp.int32, device=device)
         self._make_engine(None)
 
     def _check_proxies(self) -> None:
         """``NotImplementedError`` for the options a coupled solver's proxies cannot take (class docstring,
         **Coupling**): BDF2, whose history a proxy's state, written by the coupler at every step, would leave behind,
-        and AL-IPC, which would not sweep the proxies' synced poses into its active set."""
+        and AL-IPC, which has no contact forces to harvest the proxies' feedback from."""
         if self._config.integrator == "bdf2":
             raise NotImplementedError(
                 "SolverIPC: integrator='bdf2' is not offered to an entry of a coupled solver with proxies. The coupler "
@@ -3927,8 +4018,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         if self._config.contact_constitution == "al-ipc":
             raise NotImplementedError(
                 "SolverIPC: contact_constitution='al-ipc' is not offered to an entry of a coupled solver with proxies: "
-                "the coupler writes a proxy's pose at every step, and AL-IPC takes a pair into its active set only when "
-                "the step's motion sweeps into it."
+                "the proxies' feedback is the force of the step's contact terms on them, which AL-IPC does not export."
             )
 
     def _check_al_ipc(self, elements: _ContactElements) -> None:
@@ -4359,14 +4449,25 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._make_contact_export()
 
     def _make_contact_export(self) -> None:
-        """libuipc-warp's ``ContactForces`` of the engine and what the contact rows read besides it, once a container
-        requested ``CONTACT_F`` (class docstring, **Contact output**): at the request and whenever the engine is built
-        again, outside any capture. None otherwise, and for a model whose contact holds no shape, which has no rows."""
+        """libuipc-warp's ``ContactForces`` of the engine, at the request and whenever the engine is built again,
+        outside any capture: once a container requested ``CONTACT_F`` (class docstring, **Contact output**), with
+        what the contact rows read besides it, for a model whose contact holds a shape (one without has no rows); and
+        for a coupled solver's proxies, whose feedback is the force of the contact terms on them (**Coupling**). None
+        otherwise."""
         self._contact_export = None
-        if not self._contact_output or self._engine is None or len(self._contact_shapes) == 0:
+        self._export_step = -1  # the step whose records the export holds
+        if self._engine is None:
+            return
+        rows = self._contact_output and len(self._contact_shapes) > 0
+        if not (rows or self._proxies):
             return
         device = self.model.device
         self._contact_export = self._uipc_warp.arrays.ContactForces(self._engine)
+        records = self._contact_export.capacity
+        blocks = max(1, min(-(-records // _CONTACT_ROW_BLOCK), 4 * device.sm_count))
+        self._contact_threads = blocks * _CONTACT_ROW_BLOCK
+        if not rows:
+            return
         self._contact_vertex_shape = wp.array(self._vertex_shape, dtype=wp.int32, device=device)
         P, N, shapes = self._planes
         n_planes = max(len(shapes), 1)
@@ -4380,9 +4481,6 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._contact_plane_N = wp.zeros(n_planes, dtype=wp.vec3d, device=device)
         self._no_transform = wp.zeros(1, dtype=wp.transform, device=device)
         self._no_vec3 = wp.zeros(1, dtype=wp.vec3, device=device)
-        records = self._contact_export.capacity
-        blocks = max(1, min(-(-records // _CONTACT_ROW_BLOCK), 4 * device.sm_count))
-        self._contact_threads = blocks * _CONTACT_ROW_BLOCK
 
     def _find_body_stiffness(self) -> None:
         """With the default ``body_kappa``: the engine's group of orthogonality potentials, whose stiffness array a
@@ -5096,6 +5194,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         if control is None:
             control = self._control_of_model()
         self._dt, self._control = dt, control
+        self._steps += 1
         self._report_clamp(dt)
         self._load(state_in)
         self._write_forces(state_in, control)
@@ -5677,10 +5776,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         contacts.rigid_contact_count.zero_()
         contacts.soft_contact_count.zero_()
         contact_f.zero_()
-        export = self._contact_export
-        if export is None or state_out is None:
+        if self._contact_export is None or state_out is None or len(self._contact_shapes) == 0:
             return
-        export.update()
+        export = self._contact_records()
         model = self.model
         body_q = state_out.body_q if model.body_count and state_out.body_q is not None else self._no_transform
         body_com = model.body_com if model.body_count else self._no_vec3
@@ -5732,6 +5830,14 @@ class SolverIPC(SolverBase, CouplingInterface):
             block_dim=_CONTACT_ROW_BLOCK,
             device=model.device,
         )
+
+    def _contact_records(self):
+        """libuipc-warp's ``ContactForces`` with the records of the last step: its ``update()`` enqueued once per step,
+        for the contact rows and the proxies' feedback alike."""
+        if self._export_step != self._steps:
+            self._contact_export.update()
+            self._export_step = self._steps
+        return self._contact_export
 
     def grow(self) -> None:
         """Enlarge the contact lists after a captured step reported :attr:`SolverIPC.StatusBits.OVERFLOW`.
@@ -6110,6 +6216,87 @@ class SolverIPC(SolverBase, CouplingInterface):
         with another proxy or with a static shape do not exist in its own (class docstring, **Coupling**)."""
         del state, contacts_freshly_detected
         return contacts
+
+    @override
+    def coupling_harvest_proxy_wrenches(
+        self,
+        body_local_to_proxy_global: wp.array[int],
+        out_body_f: wp.array[wp.spatial_vector],
+        *,
+        body_qd_before: wp.array[wp.spatial_vector],
+        state: State,
+        state_out: State,
+        contacts: Contacts | None,
+        dt: float,
+    ) -> None:
+        """The proxy bodies' feedback of the step, from its contact forces (class docstring, **Coupling**).
+
+        Zeroes ``out_body_f`` and adds, at every proxy body's index, the force at the end of the step of every contact
+        term on the body's vertices, with its torque about the body's centre of mass in ``state_out``: the force this
+        entry's content exerts on the proxy, as SolverVBD harvests it, rather than its change of momentum. Device work
+        only; call it after :meth:`step`.
+        """
+        del body_qd_before, state, contacts, dt
+        out_body_f.zero_()
+        if self._engine is None or not self._proxy_body.any() or body_local_to_proxy_global.shape[0] == 0:
+            return
+        export = self._contact_records()
+        wp.launch(
+            _proxy_wrenches,
+            self._contact_threads,
+            inputs=[
+                export.vertices,
+                export.forces,
+                export.counts,
+                export.segment_offsets,
+                self._contact_threads,
+                self._engine.vm.x,
+                self._vertex_body,
+                body_local_to_proxy_global,
+                state_out.body_q,
+                self.model.body_com,
+            ],
+            outputs=[out_body_f],
+            block_dim=_CONTACT_ROW_BLOCK,
+            device=self.model.device,
+        )
+
+    @override
+    def coupling_harvest_proxy_particle_forces(
+        self,
+        particle_local_to_proxy_global: wp.array[int],
+        out_particle_f: wp.array[wp.vec3],
+        *,
+        particle_qd_before: wp.array[wp.vec3],
+        state: State,
+        state_out: State,
+        contacts: Contacts | None,
+        dt: float,
+    ) -> None:
+        """The proxy particles' feedback of the step, from its contact forces (class docstring, **Coupling**): zeroes
+        ``out_particle_f`` and adds, at every proxy particle's index, the force at the end of the step of every contact
+        term on the particle. Device work only; call it after :meth:`step`."""
+        del particle_qd_before, state, state_out, contacts, dt
+        out_particle_f.zero_()
+        if self._engine is None or not self._proxy_particle.any() or particle_local_to_proxy_global.shape[0] == 0:
+            return
+        export = self._contact_records()
+        wp.launch(
+            _proxy_particle_forces,
+            self._contact_threads,
+            inputs=[
+                export.vertices,
+                export.forces,
+                export.counts,
+                export.segment_offsets,
+                self._contact_threads,
+                self.model.particle_count,
+                particle_local_to_proxy_global,
+            ],
+            outputs=[out_particle_f],
+            block_dim=_CONTACT_ROW_BLOCK,
+            device=self.model.device,
+        )
 
     def _keep_status(self) -> None:
         """An entry of a coupled solver: the step's status bits joined into those kept for :meth:`check_status`."""

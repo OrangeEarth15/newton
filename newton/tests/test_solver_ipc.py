@@ -5640,6 +5640,139 @@ def test_proxies_refuse_bdf2_and_al_ipc(test, device):
     test.assertIs(ipc.coupling_prepare_proxy_contacts(model.state(), contacts), contacts)
 
 
+def test_proxy_particles_rest_on_a_body(test, device):
+    """SolverCoupledProxy with XPBD owning four particles and SolverIPC a box standing on the ground, the particles
+    SolverIPC's proxies, staggered at 1/240 s with converged steps: the particles come to rest on the box, each
+    harvesting its weight as its feedback within 1%, the box at rest on the ground. A proxy particle meets the box and
+    neither the ground, a static shape, nor another proxy particle."""
+    from newton.solvers.experimental.coupled import SolverCoupledProxy  # noqa: PLC0415
+
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    box = _box_body(builder, (0.0, 0.0, 0.1005), (0.1, 0.1, 0.1))
+    for x, y in ((-0.05, -0.05), (0.05, -0.05), (-0.05, 0.05), (0.05, 0.05)):
+        builder.add_particle(wp.vec3(x, y, 0.2355), wp.vec3(0.0, 0.0, 0.0), mass=0.01, radius=0.01)
+    model = builder.finalize(device=device)
+    particles = list(range(model.particle_count))
+    coupled = SolverCoupledProxy(
+        model,
+        [
+            SolverCoupledProxy.Entry("xpbd", newton.solvers.SolverXPBD, particles=particles),
+            SolverCoupledProxy.Entry(
+                "ipc",
+                lambda view: newton.solvers.SolverIPC(view, **_CONVERGED),
+                bodies=[box],
+                joints=_joints_of(model, [box]),
+            ),
+        ],
+        SolverCoupledProxy.Config(
+            proxies=[SolverCoupledProxy.Proxy(source="xpbd", destination="ipc", particles=particles, mode="staggered")]
+        ),
+    )
+    ipc = coupled.solver("ipc")
+    test.assertTrue(ipc._proxy_particle.all())
+    element = ipc._cids[particles]
+    test.assertEqual(len(set(element.tolist())), 1)
+    box_element = ipc._cids[ipc._vertex_shape == int(model.body_shapes[box][0])][0]
+    ground = ipc._plane_cids[0]
+    test.assertTrue(ipc._enabled[element[0], box_element])
+    test.assertFalse(ipc._enabled[element[0], ground])
+    test.assertFalse(ipc._enabled[element[0], element[0]])
+    s0, s1 = model.state(), model.state()
+    for _ in range(240):
+        coupled.step(s0, s1, None, None, 1.0 / 240.0)
+        s0, s1 = s1, s0
+    ipc.check_status()
+    feedback = coupled._proxy_particle_mappings[0].coupling_forces.numpy()[particles]
+    np.testing.assert_allclose(feedback[:, 2], 0.01 * 9.81, rtol=0.01)
+    test.assertLess(np.abs(feedback[:, :2]).max(), 1e-3 * 0.0981)
+    z = s0.particle_q.numpy()[particles, 2]
+    top = float(s0.body_q.numpy()[box, 2]) + 0.1
+    test.assertTrue(np.all(z > top + 0.01))  # resting on the box, a radius above its top
+    test.assertTrue(np.all(z < top + 0.01 + D_HAT))
+    test.assertLess(np.abs(s0.particle_qd.numpy()[particles]).max(), 1e-3)
+
+
+def test_proxy_feedback_is_the_contact_force(test, device):
+    """A proxy's feedback is the force of the step's contact terms on it at the end of the step. In a view of a box
+    resting on a larger box on the ground and of a particle resting on the larger box, the box and the particle
+    SolverIPC's proxies (a coupled solver's view, built by hand), after 120 steps at tight tolerances:
+    coupling_harvest_proxy_wrenches gives the proxy box the forces of libuipc-warp's records on its vertices, summed with
+    their torques about its centre of mass (to float32 rounding), the net force of the step's CONTACT_F rows on it, and
+    its weight within 1e-3 with no torque; coupling_harvest_proxy_particle_forces gives the particle the records' forces
+    on it, minus the soft rows' force on the larger box by it, and its weight. Both zero their outputs first and write no
+    other index."""
+    from newton.solvers.experimental.coupled import ModelView  # noqa: PLC0415
+
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    _box_body(builder, (0.0, 0.0, 0.1005), (0.2, 0.2, 0.1))  # the base, which the proxies rest on
+    top = _box_body(builder, (0.05, 0.0, 0.2535), (0.05, 0.05, 0.05))
+    builder.add_particle(wp.vec3(-0.1, 0.0, 0.2135), wp.vec3(0.0, 0.0, 0.0), mass=0.02, radius=0.01)
+    model = builder.finalize(device=device)
+    view = ModelView(model, "ipc")
+    view.mark_proxy_bodies(wp.array([top], dtype=int, device=device))
+    view.mark_proxy_particles(wp.array([0], dtype=int, device=device))
+    solver = newton.solvers.SolverIPC(view, **_CONVERGED)
+    contacts = _native_contacts(solver, model)
+    observables = solver.observables({solver.ObservableKind.CONTACT_F, solver.ObservableKind.STATUS}, contacts=contacts)
+    dt = 1.0 / 120.0
+    s0, s1 = view.state(), view.state()
+    for _ in range(120):
+        solver.step(s0, s1, None, contacts, dt, observables=observables)
+        s0, s1 = s1, s0
+    solver.check_status(observables)
+    # the harvest of the last step, which wrote s0
+    proxy_of_body = wp.array([-1, 7], dtype=int, device=device)  # the proxy box at the coupler's index 7
+    out = wp.full(9, wp.spatial_vector(1.0, 1.0, 1.0, 1.0, 1.0, 1.0), dtype=wp.spatial_vector, device=device)
+    solver.coupling_harvest_proxy_wrenches(
+        proxy_of_body, out, body_qd_before=s0.body_qd, state=s1, state_out=s0, contacts=contacts, dt=dt
+    )
+    wrench = out.numpy()
+    test.assertTrue(np.all(np.delete(wrench, 7, axis=0) == 0.0))
+    # the records on the proxy box's vertices
+    layout = solver._scene.layout()
+    first, last = layout.body_vertex_offsets[top], layout.body_vertex_offsets[top + 1]
+    x = solver._engine.vm.x.numpy()
+    com = _transform_points(s0.body_q.numpy()[top], model.body_com.numpy()[top : top + 1])[0]
+    force, torque = np.zeros(3), np.zeros(3)
+    particle_force = np.zeros(3)
+    for name, (vertices, forces) in solver._contact_export.numpy().items():
+        count = 1 if name.startswith("PH") else (4 if name[:2] in ("PT", "EE") else 3 if name[:2] == "PE" else 2)
+        for k in range(count):
+            v, f = vertices[:, k], forces[:, k].astype(np.float64)
+            on = (v >= first) & (v < last)
+            force += f[on].sum(axis=0)
+            torque += np.cross(x[v[on]] - com, f[on]).sum(axis=0)
+            particle_force += f[v == 0].sum(axis=0)
+    np.testing.assert_allclose(wrench[7, :3], force, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(wrench[7, 3:], torque, atol=1e-5)
+    # the CONTACT_F rows on the proxy box: rows where its shape is shape 0 push it, rows where it is shape 1 the reverse
+    shape = int(model.body_shapes[top][0])
+    s0_, s1_, rows = _rigid_rows(contacts, observables)
+    net = rows[s0_ == shape, :3].sum(axis=0) - rows[s1_ == shape, :3].sum(axis=0)
+    np.testing.assert_allclose(wrench[7, :3], net, rtol=1e-4, atol=1e-4)
+    weight = float(model.body_mass.numpy()[top]) * 9.81
+    np.testing.assert_allclose(wrench[7, :3], [0.0, 0.0, weight], atol=1e-3 * weight)
+    test.assertLess(np.abs(wrench[7, 3:]).max(), 1e-3 * weight * 0.05)
+    # the proxy particle: the records' force on it, minus the soft rows' force on the base by it
+    proxy_of_particle = wp.array([3], dtype=int, device=device)
+    out = wp.full(5, wp.vec3(1.0, 1.0, 1.0), dtype=wp.vec3, device=device)
+    solver.coupling_harvest_proxy_particle_forces(
+        proxy_of_particle, out, particle_qd_before=s0.particle_qd, state=s1, state_out=s0, contacts=contacts, dt=dt
+    )
+    got = out.numpy()
+    test.assertTrue(np.all(np.delete(got, 3, axis=0) == 0.0))
+    np.testing.assert_allclose(got[3], particle_force, rtol=1e-5, atol=1e-6)
+    n = min(int(contacts.soft_contact_count.numpy()[0]), contacts.soft_contact_max)
+    mine = contacts.soft_contact_particle.numpy()[:n] == 0
+    by_rows = -observables.contact_f.numpy()[contacts.rigid_contact_max : contacts.rigid_contact_max + n][mine, :3].sum(
+        axis=0
+    )
+    np.testing.assert_allclose(got[3], by_rows, rtol=1e-4, atol=1e-6)
+    np.testing.assert_allclose(got[3], [0.0, 0.0, 0.02 * 9.81], atol=1e-3 * 0.02 * 9.81)
+
+
 class TestSolverIPC(unittest.TestCase):
     pass
 
@@ -6264,10 +6397,12 @@ for name, func in (
 for name, func in (
     ("test_coupled_entry_steps_as_alone", test_coupled_entry_steps_as_alone),
     ("test_proxy_box_rests_on_cloth", test_proxy_box_rests_on_cloth),
+    ("test_proxy_particles_rest_on_a_body", test_proxy_particles_rest_on_a_body),
     ("test_coupled_restarts_refused", test_coupled_restarts_refused),
     ("test_coupled_status_of_captured_steps", test_coupled_status_of_captured_steps),
     ("test_coupled_reset_is_the_solvers_reset", test_coupled_reset_is_the_solvers_reset),
     ("test_proxies_refuse_bdf2_and_al_ipc", test_proxies_refuse_bdf2_and_al_ipc),
+    ("test_proxy_feedback_is_the_contact_force", test_proxy_feedback_is_the_contact_force),
 ):
     add_function_test(TestSolverIPCCoupling, name, func, devices=devices)
 
