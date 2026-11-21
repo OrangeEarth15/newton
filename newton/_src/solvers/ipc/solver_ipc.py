@@ -2992,11 +2992,14 @@ class SolverIPC(SolverBase, CouplingInterface):
     static or kinematic content) stay 0. A step that is not captured and fails
     in some worlds writes ``state_out``, those worlds at the step's start and
     the others at their step, and raises :class:`RuntimeError` naming the
-    worlds and their bits; :meth:`check_status` names them too. An overflow of
-    the contact lists, which the worlds share, is still every world's: an
-    eager step grows them and solves the step again for every world, and a
-    captured step sets ``OVERFLOW`` in every world (a quota of the lists per
-    world is a later step of libuipc-warp). A reset with a ``world_mask``, or
+    worlds and their bits; :meth:`check_status` names them too. The worlds
+    share the contact lists, and every world has a quota of them, sized as for
+    that world alone (libuipc-warp's capacity per world): a world whose
+    contact asks for more than its quota fails alone in the same way, while
+    the other worlds keep every contact pair and take their step. An eager
+    step then grows that world's quota and solves the step again for every
+    world; a captured step sets ``OVERFLOW`` in that world's entry alone, and
+    :meth:`grow` grows its quota. A reset with a ``world_mask``, or
     a new state written for one world, discards that world's friction and
     starts its BDF2 history anew and leaves the other worlds as they were; the
     mask's global entry selects nothing, since the global entities are no
@@ -3372,8 +3375,9 @@ class SolverIPC(SolverBase, CouplingInterface):
     in :class:`SolverIPC.StatusBits`.
 
     A step that is not captured reads the status itself after the solve, with
-    one synchronization. When a contact list overflowed it enlarges the lists
-    and solves the step again; when the step failed otherwise (a non-finite
+    one synchronization. When a contact list overflowed (with independent
+    worlds, a world's quota of the lists) it enlarges the lists and solves the
+    step again; when the step failed otherwise (a non-finite
     value, a contact starting at or inside its thickness, an exhausted BVH
     traversal), it raises :class:`RuntimeError` and leaves ``state_out``
     unwritten, but where independent worlds failed alone: there it writes
@@ -3451,12 +3455,12 @@ class SolverIPC(SolverBase, CouplingInterface):
     count. A step that failed writes no rows. The order of the rows changes
     from run to run (atomic counters), their set and values do not. With
     several worlds the rows of every world share the buffer, and the shapes
-    tell the worlds apart. With independent worlds a step in which any world
-    failed writes no row of any world: libuipc-warp exports the contact forces
-    of a frame only when no world of it failed (its export per world is still
-    to come), and so the feedback forces of a coupled solver's proxies (see
-    **Coupling**) are zero in such a step too. Not with
-    ``contact_constitution="al-ipc"``.
+    tell the worlds apart. With independent worlds a step in which some worlds
+    failed writes no row of those worlds and the rows of the others:
+    libuipc-warp's records give the terms of a world that failed no force, so
+    the feedback forces of a coupled solver's proxies (see **Coupling**) in
+    such a world are zero in that step, and those in the other worlds are
+    their step's. Not with ``contact_constitution="al-ipc"``.
     The output costs, only when requested, one pass over the step's contact
     terms and one over its rows, and 64 bytes per slot of the contact lists.
 
@@ -3673,8 +3677,10 @@ class SolverIPC(SolverBase, CouplingInterface):
         """
 
         OVERFLOW = 1 << 0
-        """A contact list overflowed and dropped pairs: the step ran without them. Set from then on until the
-        lists are enlarged (:meth:`SolverIPC.grow`, or an eager step)."""
+        """A contact list overflowed and dropped pairs: the step ran without them. With independent worlds a world
+        asked for more than its quota of the lists: the bit is in that world's entry alone, and that world is back at
+        its state at the step's start. Set from then on until the lists are enlarged (:meth:`SolverIPC.grow`, or an
+        eager step)."""
 
         NONFINITE_ENERGY = 1 << 1
         """The line search met a non-finite energy."""
@@ -5918,8 +5924,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         """Whether a failed step failed in some independent worlds alone (``status``: the step's ``frame_status``):
         libuipc-warp's frame of worlds puts a world that fails on a value libuipc asserts on (a non-finite value, a CCD
         fraction that is not positive, a pair at or inside its thickness) back at its frame start, and the others take
-        their step. An overflow of the contact lists, which the worlds share, and an exhausted traversal are every
-        world's, as without independent worlds."""
+        their step. An exhausted traversal is every world's, the traversal being shared; an overflow fails only the
+        world over its quota of the contact lists, but an eager step grows that quota and solves the step again, so
+        one that is left after the last enlargement is the solver's failure, as without independent worlds."""
         return (
             self._independent
             and len(self._status_entries) > 1
@@ -6098,8 +6105,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         A captured step cannot enlarge them: it drops the pairs that do not fit, sets the bit and keeps it set.
         This builds the solve again with lists that hold what the last step asks for (solving that step again
         until it fits, as an eager step does) and returns to the state the last step started from, so that the
-        same ``state_in`` repeats it. The new solve has new arrays: capture every graph that holds :meth:`step`
-        again. Synchronizes; does nothing when no list overflowed.
+        same ``state_in`` repeats it. With independent worlds the quotas of the worlds that went over theirs grow,
+        and the other worlds keep theirs. The new solve has new arrays: capture every graph that holds
+        :meth:`step` again. Synchronizes; does nothing when no list overflowed.
         """
         if self._engine is None:
             return

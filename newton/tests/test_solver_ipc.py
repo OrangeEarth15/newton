@@ -3086,19 +3086,24 @@ def test_independent_world_fails_alone(test, device):
         solver.check_status(observables)
 
 
-def test_independent_worlds_overflow_together(test, device):
-    """Three worlds of ``_world_content`` at heights 3 cm apart on contact lists of one pair, which the worlds share and
-    which overflow at their first contacts: an eager step grows the lists and solves the step again for every world,
-    each world then taking the Newton iterations of its run alone, on lists that hold its pairs, with its positions
-    within 1e-6 m. A captured step sets OVERFLOW in every world's entry (a quota per world is libuipc-warp's next step),
-    and check_status(grow=True) grows the lists, after which the step repeated reports nothing."""
+def test_independent_worlds_overflow_alone(test, device):
+    """Three worlds of ``_world_content`` at heights 3 cm apart, world 1 with a quota of one pair of every active
+    contact list (libuipc-warp's capacity per world, a count per world, 0 keeping a world's own; the worlds share the
+    lists). Eager steps grow world 1's quota and solve the step again, every world then taking the Newton iterations of
+    its run alone, with its positions within 1e-6 m. Captured beside a solver without the quota, a step in which world
+    1 asks for more sets OVERFLOW in world 1's entry alone and leaves world 1 at the state it started from, bit for
+    bit, while worlds 0 and 2 take the other solver's step within 1e-6 m; check_status(grow=True) grows the lists, and
+    the step repeated from the same state reports nothing and takes every world to the other solver's step."""
     overflow = int(newton.solvers.SolverIPC.StatusBits.OVERFLOW)
     shifts, steps = (0.0, 0.03, 0.06), 30
+    one_pair = {"active": {kind: [0, 1, 0] for kind in ("PP", "PE", "PT", "EE")}}
     model = _worlds_at(device, shifts)
+    rows = _world_rows(model, len(shifts))
     solver = newton.solvers.SolverIPC(model)
-    solver._make_engine(_TINY_LISTS)
+    solver._make_engine(one_pair)
+    first = solver._engine
     run = _record_worlds(model, solver, steps)
-    test.assertGreater(_active_slots(solver)[0], 1)  # the point-triangle list grew from _TINY_LISTS's one pair
+    test.assertIsNot(solver._engine, first)  # built again on world 1's grown quota
     np.testing.assert_array_equal(run["status"], 0)
     for k, shift in enumerate(shifts):
         one = _worlds_at(device, [shift])
@@ -3106,28 +3111,47 @@ def test_independent_worlds_overflow_together(test, device):
         np.testing.assert_array_equal(run["iterations"][:, k], alone["iterations"][:, 0], f"world {k}")
         test.assertLess(np.abs(run["q"][:, k] - alone["q"][:, 0]).max(), 1e-6, f"world {k}")
 
-    solver = newton.solvers.SolverIPC(model)
-    solver._make_engine(_TINY_LISTS)
-    observables = solver.observables({solver.ObservableKind.STATUS})
-    s0, s1 = model.state(), model.state()
+    def of_world(state, k, names=("particle_q", "particle_qd", "body_q", "body_qd")):
+        p, b = rows[k]
+        return [getattr(state, name).numpy()[p if name.startswith("particle") else b] for name in names]
 
-    def capture():
+    def apart(a, b, k):
+        """The largest distance of world ``k``'s particle and body positions between states ``a`` and ``b``."""
+        names = ("particle_q", "body_q")
+        return max(np.abs(x - y).max() for x, y in zip(of_world(a, k, names), of_world(b, k, names), strict=True))
+
+    def capture(solver, observables, s0, s1):
         with wp.ScopedCapture(device=device) as cap:
             solver.step(s0, s1, None, None, 0.01, observables=observables)
         return cap.graph
 
-    graph, grown = capture(), 0
+    kinds = {newton.solvers.SolverIPC.ObservableKind.STATUS}
+    plain, solver = newton.solvers.SolverIPC(model), newton.solvers.SolverIPC(model)
+    solver._make_engine(one_pair)
+    plain_observables, observables = plain.observables(kinds), solver.observables(kinds)
+    p0, p1, s0, s1 = (model.state() for _ in range(4))
+    plain_graph, graph, grown = capture(plain, plain_observables, p0, p1), capture(solver, observables, s0, s1), 0
     for _ in range(steps):
+        wp.capture_launch(plain_graph)
         wp.capture_launch(graph)
+        test.assertFalse(np.any(plain_observables.status.numpy() & overflow))
         words = observables.status.numpy()
-        if words[0] & overflow:
-            test.assertEqual([bool(w & overflow) for w in words], [True, True, True, False])
+        if np.any(words & overflow):
+            test.assertEqual([bool(w & overflow) for w in words], [False, True, False, False])
+            for got, start in zip(of_world(s1, 1), of_world(s0, 1), strict=True):
+                np.testing.assert_array_equal(got, start)  # world 1 at the state it started from
+            for k in (0, 2):
+                test.assertLess(apart(s1, p1, k), 1e-6, f"world {k}")
+                test.assertGreater(apart(s1, s0, k), 1e-6, f"world {k}")  # it took its step
             test.assertTrue(solver.check_status(observables, grow=True))
             grown += 1
-            graph = capture()  # the step again from the same input state, on the grown lists
+            graph = capture(solver, observables, s0, s1)  # the step again from the same input state, grown
             wp.capture_launch(graph)
             test.assertFalse(solver.check_status(observables))
+        for k in range(len(shifts)):
+            test.assertLess(apart(s1, p1, k), 1e-6, f"world {k}")
         s0.assign(s1)
+        p0.assign(p1)
     test.assertGreater(grown, 0)
 
 
@@ -5251,7 +5275,7 @@ def test_contact_output_independent_worlds(test, device):
     """With independent worlds the rows of every world share the buffer: four worlds of a box resting on the global
     ground report every world's box at its weight within 1% through SensorContact, and every world's shapes have rows.
     A step in which world 0's box is written 1 cm through the ground fails in world 0 alone and writes no row of world
-    0 (libuipc-warp exports a frame's contact forces only when none of its worlds failed, so none of any world)."""
+    0 (the other worlds' rows: ``test_contact_output_when_a_world_fails``)."""
     from newton.sensors import SensorContact  # noqa: PLC0415
 
     def content():
@@ -5291,6 +5315,65 @@ def test_contact_output_independent_worlds(test, device):
     words = observables.status.numpy()
     test.assertEqual([bool(w & int(solver.StatusBits.FAILED)) for w in words], [True, False, False, False, False])
     test.assertNotIn(0, row_worlds())
+
+
+def test_contact_output_when_a_world_fails(test, device):
+    """Four independent worlds of a box resting on the global ground, two solvers in lockstep, one of them clean. A
+    step in which world 0's box is written 1 cm through the ground fails in world 0 alone and writes the rows of worlds
+    1 to 3 as the clean solver's same step writes them (libuipc-warp's records give the terms of a world that failed
+    no force): the same shape pairs, their points within 1e-6 m and their forces and torques within 1e-4, each of those
+    boxes reporting its weight within 1% through SensorContact, and no row of world 0, whose box reports no force."""
+    from newton.sensors import SensorContact  # noqa: PLC0415
+
+    def content():
+        world = newton.ModelBuilder()
+        _box_body(world, (0.0, 0.0, 0.0505), (0.05, 0.05, 0.05))
+        return world
+
+    scene = newton.ModelBuilder()
+    scene.add_ground_plane()
+    scene.replicate(content(), 4)
+    model = scene.finalize(device=device)
+    worlds = model.shape_world.numpy()
+    runs = []
+    for _ in range(2):
+        solver = newton.solvers.SolverIPC(model)
+        sensor = SensorContact(model, request_contact_attributes=False, sensing_bodies="*")
+        contacts = _native_contacts(solver, model)
+        observables = solver.observables(sensor.solver_observable_kinds, contacts=contacts)
+        state = _contact_steps(model, solver, contacts, observables, 60, 0.01)
+        runs.append((solver, sensor, contacts, observables, state))
+    (clean, _, clean_contacts, clean_observables, c0), (faulty, sensor, contacts, observables, f0) = runs
+    q = f0.body_q.numpy()
+    q[0, 2] = 0.04  # world 0's box 1 cm through the ground
+    f0.body_q.assign(q)
+    c1, f1 = model.state(), model.state()
+    clean.step(c0, c1, None, clean_contacts, 0.01, observables=clean_observables)
+    with test.assertRaisesRegex(RuntimeError, r"failed in 1 of its 4 worlds, world 0 on"):
+        faulty.step(f0, f1, None, contacts, 0.01, observables=observables)
+
+    def rows(contacts, observables):
+        """The rigid rows (shape 0, shape 1, point 0, contact_f) in one order, and the world of each."""
+        n = min(int(contacts.rigid_contact_count.numpy()[0]), contacts.rigid_contact_max)
+        shape0, shape1 = contacts.rigid_contact_shape0.numpy()[:n], contacts.rigid_contact_shape1.numpy()[:n]
+        point0, force = contacts.rigid_contact_point0.numpy()[:n], observables.contact_f.numpy()[:n]
+        order = np.lexsort((point0[:, 2], point0[:, 1], point0[:, 0], shape1, shape0))
+        world = np.maximum(worlds[shape0], worlds[shape1])[order]
+        return shape0[order], shape1[order], point0[order], force[order], world
+
+    got, want = rows(contacts, observables), rows(clean_contacts, clean_observables)
+    test.assertEqual(set(got[4].tolist()), {1, 2, 3})
+    test.assertEqual(set(want[4].tolist()), {0, 1, 2, 3})
+    kept = want[4] != 0
+    np.testing.assert_array_equal(got[0], want[0][kept])
+    np.testing.assert_array_equal(got[1], want[1][kept])
+    np.testing.assert_allclose(got[2], want[2][kept], rtol=0.0, atol=1e-6)
+    np.testing.assert_allclose(got[3], want[3][kept], rtol=0.0, atol=1e-4)
+    sensor.update(f1, contacts, observables=observables)
+    total = sensor.total_force.numpy()[:, 2]
+    weight = model.body_mass.numpy() * 9.81
+    test.assertEqual(float(total[0]), 0.0)
+    np.testing.assert_allclose(total[1:], weight[1:], rtol=0.01)
 
 
 # ---------------------------------------------------------------------------- joints on request (enable_*)
@@ -6892,7 +6975,7 @@ for name, func in (
     ("test_independent_worlds_with_attachments", test_independent_worlds_with_attachments),
     ("test_independent_worlds_with_kinematic_aims", test_independent_worlds_with_kinematic_aims),
     ("test_many_independent_worlds", test_many_independent_worlds),
-    ("test_independent_worlds_overflow_together", test_independent_worlds_overflow_together),
+    ("test_independent_worlds_overflow_alone", test_independent_worlds_overflow_alone),
 ):
     add_function_test(TestSolverIPCWorlds, name, func, devices=devices)
 
@@ -6961,6 +7044,7 @@ for name, func in (
     ("test_contact_output_refusals", test_contact_output_refusals),
     ("test_contact_output_coupled_worlds", test_contact_output_coupled_worlds),
     ("test_contact_output_independent_worlds", test_contact_output_independent_worlds),
+    ("test_contact_output_when_a_world_fails", test_contact_output_when_a_world_fails),
 ):
     add_function_test(TestSolverIPCContactOutput, name, func, devices=devices)
 for name, func in (
