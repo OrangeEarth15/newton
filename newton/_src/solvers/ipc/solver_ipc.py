@@ -3520,12 +3520,30 @@ class SolverIPC(SolverBase, CouplingInterface):
     interface's defaults.
 
     A coupler that solves a step more than once (a ``SolverCoupledProxy`` or
-    ``SolverCoupledADMM`` with more than one iteration) is refused when it is
-    built: the solver cannot yet start a step's solve again from the same
-    state. The coupler steps its entries without observables, so the solver as
-    an entry keeps the status bits of its steps, captured or not, with
-    independent worlds a word for every world entry, and :meth:`check_status`
-    without a container reports them, naming the worlds, and clears them. A
+    ``SolverCoupledADMM`` with more than one iteration) starts every pass after
+    the first from the step's start. The solver keeps that start on the
+    device: libuipc-warp's frame restart (the float64 positions and
+    velocities, the BDF2 history, the active contact set the step takes its
+    friction from, the step's requests to discard friction and restart the
+    history, the joints' angles) and what the solver carries from step to step
+    (what it wrote of the bodies and joints, the kinematic bodies it holds
+    toward their aims, the joints' BDF2 history). The step after a coupler's
+    write of the input state copies the start, and the step after a restart's
+    notification copies it back: device copies, inside a captured graph too.
+    Every pass therefore starts from the same float64 state with the same
+    friction, where taking ``state_in``'s float32 rounding would discard the
+    friction, and a pass with the inputs of the one before repeats it, bit for
+    bit where a step repeats itself (where sums add with atomics, to their
+    rounding). With independent worlds every world starts again, also one
+    that failed in the pass before. An entry with several substeps per coupled
+    step keeps the start of the first. The copy holds the vertices' state, the
+    active contact lists and the joints' coordinates, and a solver whose
+    coupler does not restart allocates none of it. The coupler steps its
+    entries without observables, so the solver as an entry keeps the status
+    bits of its steps, captured or not, with independent worlds a word for
+    every world entry, and :meth:`check_status` without a container reports
+    them, naming the worlds, and clears them; a restarted pass replaces the
+    bits of the pass before it, so a coupled step reports its last pass. A
     reset through the coupler is :meth:`reset` with the coupler's world mask.
     Of a view that the coupler cannot compact, the other entries' joints are
     in the view, disabled, and are checked as the solver's own.
@@ -3847,6 +3865,13 @@ class SolverIPC(SolverBase, CouplingInterface):
         # an entry of a coupled solver (coupling_notify_iteration_restarts): the status bits of its steps since
         # check_status() last read them, and the scratch word of one step's bits
         self._sticky_status = self._step_status = None
+        # an entry of a coupler that restarts its steps (coupling_notify_iteration_restarts): the start of a coupled step
+        # kept on the device, saved by the step after the coupler wrote the input state and restored by the step after
+        # a restart's notification (_save_step, _restore_step); the (array, copy) of what the solver carries from step
+        # to step (_allocate_restart)
+        self._restarts = False
+        self._save_pending = self._restore_pending = False
+        self._carried = []
         self._build_engine()
         self._check_start()
 
@@ -3930,8 +3955,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         # captured steps, the restart of a BDF2 history and the friction discard per subscene (with the rows a restart
         # per subscene takes), the stitches (with the anchors and stitch_groups of the same release), the soft
         # transform constraint (with constraint_groups), the contact forces, the external accelerations, the bodies'
-        # orthogonality stiffness and the redo of an overflowing step (with the documented engine members of the
-        # same release)
+        # orthogonality stiffness, the redo of an overflowing step (with the documented engine members of the same
+        # release) and the frame start kept on the device for a coupler's restarts
         needed = (
             (uipc_warp.arrays, "write_frame_status"),
             (uipc_warp.arrays.ArrayScene, "contact_model"),
@@ -3949,6 +3974,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             (uipc_warp.arrays, "ExternalAcceleration"),
             (uipc_warp.arrays, "orthogonality"),
             (uipc_warp.SimEngine, "redo_state"),
+            (uipc_warp.SimEngine, "enable_frame_restart"),
         )
         # and the keywords of the newest calls: independent worlds, the scene's flag and the status of every world
         keywords = (
@@ -4131,6 +4157,8 @@ class SolverIPC(SolverBase, CouplingInterface):
                 vertex_body[layout.body_vertex_offsets[b] : layout.body_vertex_offsets[b + 1]] = b
             self._vertex_body = wp.array(vertex_body, dtype=wp.int32, device=device)
         self._make_engine(None)
+        if self._restarts:  # an entry of a coupler that restarts its steps: the new solve's copies
+            self._allocate_restart()
 
     def _check_proxies(self) -> None:
         """``NotImplementedError`` for the options a coupled solver's proxies cannot take (class docstring,
@@ -5387,6 +5415,12 @@ class SolverIPC(SolverBase, CouplingInterface):
         if self._engine is None:
             self._write_contacts(observables, None)  # no particles and no bodies: no contact
             return
+        if self._restarts:  # an entry of a coupler that restarts its steps (class docstring, **Coupling**)
+            if self._restore_pending:
+                self._restore_step()
+            elif self._save_pending:
+                self._save_step()
+            self._save_pending = self._restore_pending = False
         if control is None:
             control = self._control_of_model()
         self._dt, self._control = dt, control
@@ -5924,12 +5958,16 @@ class SolverIPC(SolverBase, CouplingInterface):
         old = self._engine
         capacity = old.grown_capacity()
         redo = old.redo_state()
+        # an entry of a coupler that restarts its steps: the start of the coupled step, which the new engine keeps
+        restart = None if old.frame_restart is None else old.frame_restart.saved()
         forces = None if self._forces is None else self._forces.a
         aims = None if self._aim_group is None else self._aim_group
         # release the old engine before the new one allocates (the contact export holds it too)
         self._engine = self._frame_graph = self._forces = self._contact_export = old = None
         self._make_engine(capacity)
         self._engine.load_redo_state(redo)
+        if restart is not None:
+            self._engine.enable_frame_restart().load_saved(restart)
         if forces is not None:
             wp.copy(self._forces.a, forces)
         if aims is not None:  # the aims of the step, which the new engine solves again
@@ -6184,7 +6222,8 @@ class SolverIPC(SolverBase, CouplingInterface):
 
         A coupled solver steps its entries without observables. The solver as an entry (class docstring,
         **Coupling**) keeps the status bits of every step it takes, captured or not, until a call without a container
-        reads them: that call reports every step since the last such call, and clears the bits.
+        reads them: that call reports every step since the last such call, and clears the bits. A pass of a coupled step
+        that the coupler solves again is replaced by the next pass: a coupled step reports its last pass.
 
         Args:
             observables: A container from :meth:`observables` with :attr:`SolverIPC.ObservableKind.STATUS`
@@ -6314,6 +6353,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         world_mask = _normalize_reset_world_mask(
             world_mask, world_count=int(self.model.world_count), device=self.model.device
         )
+        self._restore_pending = False  # the next step starts from the reset, not from a coupled step's start
         if self._engine is None:
             return
         if world_mask is None:
@@ -6445,22 +6485,19 @@ class SolverIPC(SolverBase, CouplingInterface):
     @override
     def coupling_notify_iteration_restarts(self, enabled: bool) -> None:
         """Become an entry of a coupled solver (class docstring, **Coupling**): keep the status bits of every step for
-        :meth:`check_status`. Raises :class:`NotImplementedError` when the coupler may solve a step again from its
-        start, which the solver cannot do yet.
+        :meth:`check_status`, and when the coupler may solve a step again from its start, keep that start on the
+        device. Outside graph capture: the coupler calls this once, after construction.
 
         Args:
             enabled: Whether the coupler may restart a step's solve: a ``SolverCoupledProxy`` with more than one
-                iteration per step, or a ``SolverCoupledADMM`` with more than one.
+                iteration per step, or a ``SolverCoupledADMM`` with more than one. The solver then allocates the
+                copy of a step's start (libuipc-warp's frame restart, and what the solver carries from step to step).
         """
-        if enabled:
-            raise NotImplementedError(
-                "SolverIPC cannot solve a coupled step again from its start: the coupler runs more than one iteration "
-                "per step (SolverCoupledProxy.Config(iterations=...) or SolverCoupledADMM.Config(iterations=..., 5 by "
-                "default) above 1), which restarts its entries' solves, and SolverIPC does not keep the start of a "
-                "step's solve on the device. Use iterations=1."
-            )
-        if self._sticky_status is None:  # outside graph capture: the coupler calls this once, after construction
+        if self._sticky_status is None:
             self._allocate_kept_status()
+        self._restarts = bool(enabled)
+        if self._restarts:
+            self._allocate_restart()
 
     @override
     def coupling_notify_input_state_update(
@@ -6473,18 +6510,33 @@ class SolverIPC(SolverBase, CouplingInterface):
     ) -> None:
         """Take note of a coupled solver's write of the entry's input state (class docstring, **Coupling**).
 
-        Nothing is done for a write: every step compares ``state_in`` with what the solver wrote last and takes what
-        differs (class docstring, **State**), a proxy's pose and twist without discarding friction. A reset's
-        notification (``dt`` 0) needs nothing either: the coupled solver's ``reset`` calls :meth:`reset` next, with
-        its world mask, which discards the friction and releases the kinematic aims of the worlds it selects. A
-        restart of the step's solve (``iteration_restart`` with ``dt`` above 0) raises :class:`NotImplementedError`,
-        as :meth:`coupling_notify_iteration_restarts` does.
+        Every step compares ``state_in`` with what the solver wrote last and takes what differs (class docstring,
+        **State**), a proxy's pose and twist without discarding friction, so a write needs nothing of its own. When the
+        coupler restarts steps (:meth:`coupling_notify_iteration_restarts`), the next step after a write (``dt`` above
+        0) keeps its start on the device before it takes ``state_in``, and the next step after a restart's notification
+        (``iteration_restart`` with ``dt`` above 0) starts from that start again instead: device copies, also inside a
+        graph capture. A reset's notification (``dt`` 0) needs nothing: the coupled solver's ``reset`` calls
+        :meth:`reset` next, with its world mask, which discards the friction and releases the kinematic aims of the
+        worlds it selects.
+
+        Raises:
+            NotImplementedError: For a restart's notification from a coupler that did not announce restarts through
+                :meth:`coupling_notify_iteration_restarts`: the solver keeps no start to restart from.
         """
         del state, flags
-        if iteration_restart and dt > 0.0:
-            raise NotImplementedError(
-                "SolverIPC cannot solve a coupled step again from its start; use a coupler with one iteration per step."
-            )
+        if dt <= 0.0:
+            return
+        if not self._restarts:
+            if iteration_restart:
+                raise NotImplementedError(
+                    "SolverIPC cannot solve a step again from its start: the coupler did not announce restarts "
+                    "(coupling_notify_iteration_restarts(True)), so the solver keeps no start to restart from."
+                )
+            return
+        if iteration_restart:
+            self._restore_pending = True
+        else:
+            self._save_pending = True
 
     @override
     def coupling_supports_full_surface_soft_contacts(self) -> bool:
@@ -6614,6 +6666,37 @@ class SolverIPC(SolverBase, CouplingInterface):
             outputs=[self._sticky_status],
             device=self.model.device,
         )
+
+    def _allocate_restart(self) -> None:
+        """An entry of a coupler that restarts its steps: the engine keeps its frame start on the device
+        (libuipc-warp's ``enable_frame_restart``), and the solver a copy of what it carries from one step to the next:
+        what it wrote of the bodies and the joints, the kinematic bodies it holds toward their aims, the joints'
+        history under BDF2, and the status bits it keeps for :meth:`check_status`, so that a restarted step replaces
+        the bits of the pass before it. Outside graph capture."""
+        self._carried = []
+        if self._engine is None:
+            return
+        self._engine.enable_frame_restart()
+        carried = [] if self._sticky_status is None else [self._sticky_status]
+        if self.model.body_count:
+            carried += [self._body_q_written, self._body_qd_written, self._body_hold]
+        if self.model.joint_count:
+            carried.append(self._joint_q_written)
+        for _, q_prev, q_kept in (*self._joint_history.values(), *self._joint_rate.values()):
+            carried += [q_prev, q_kept]
+        self._carried = [(a, wp.clone(a)) for a in carried if a.size]
+
+    def _save_step(self) -> None:
+        """Keep the start of a coupled step: the engine's frame start and what the solver carries (device copies)."""
+        self._engine.save_frame_start()
+        for live, kept in self._carried:
+            wp.copy(kept, live)
+
+    def _restore_step(self) -> None:
+        """Start the step again where the last ``_save_step`` kept it (device copies)."""
+        self._engine.restore_frame_start()
+        for live, kept in self._carried:
+            wp.copy(live, kept)
 
     def contact_stiffness(self, dt: float) -> float | np.ndarray:
         """The contact stiffness [Pa] of every contact pair in a step of length ``dt`` [s]: ``kappa``, or with

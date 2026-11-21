@@ -6160,45 +6160,318 @@ def test_proxy_box_rests_on_cloth(test, device):
             test.assertTrue(np.isfinite(feedback.body_f.numpy()).all())
 
 
-def test_coupled_restarts_refused(test, device):
-    """A coupler that solves a step more than once is refused when it is built, with SolverIPC as either entry:
-    SolverCoupledProxy with two iterations and SolverCoupledADMM with its default five, naming the iterations. The
-    restart notification itself raises too, and a reset's (dt 0) does not."""
-    from newton.solvers.experimental.coupled import SolverCoupledADMM, SolverCoupledProxy  # noqa: PLC0415
+def _repeating_particles(device):
+    """Four particles of 1 g with friction on the ground plane: one sliding, two meeting head on, one landing. Every
+    particle's contact terms add into its gradient one at a time, so SolverIPC repeats these steps bit for bit."""
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    for p, v in (((0.0, 0.0, 0.0105), (1.0, 0.0, 0.0)), ((0.3, 0.0, 0.0105), (0.5, 0.2, 0.0)),
+                 ((0.4, 0.0, 0.0105), (-0.5, 0.0, 0.0)), ((0.8, 0.0, 0.05), (0.0, 0.0, 0.0))):  # fmt: skip
+        builder.add_particle(wp.vec3(*p), wp.vec3(*v), 1.0e-3, radius=0.01)
+    return builder.finalize(device=device)
 
-    model, box = _proxy_scene(device)
-    particles = list(range(model.particle_count))
-    for source in ("xpbd", "ipc"):
-        with test.subTest(source=source):
-            bodies = {"xpbd": [box], "ipc": []}
-            entries = [
-                SolverCoupledProxy.Entry(
-                    "xpbd", newton.solvers.SolverXPBD, bodies=bodies["xpbd"], joints=_joints_of(model, bodies["xpbd"])
-                ),
-                SolverCoupledProxy.Entry("ipc", newton.solvers.SolverIPC, particles=particles),
-            ]
-            proxy = SolverCoupledProxy.Proxy(source="xpbd", destination="ipc", bodies=[box])
-            if source == "ipc":  # the cloth's particles proxied into XPBD
-                proxy = SolverCoupledProxy.Proxy(source="ipc", destination="xpbd", particles=particles[:4])
-            with test.assertRaisesRegex(NotImplementedError, "iterations"):
-                SolverCoupledProxy(model, entries, SolverCoupledProxy.Config(proxies=[proxy], iterations=2))
-    with test.assertRaisesRegex(NotImplementedError, "iterations"):
-        SolverCoupledADMM(
-            model,
-            [
-                SolverCoupledADMM.Entry(
-                    "xpbd", newton.solvers.SolverXPBD, bodies=[box], joints=_joints_of(model, [box])
-                ),
-                SolverCoupledADMM.Entry("ipc", newton.solvers.SolverIPC, particles=particles),
-            ],
-            SolverCoupledADMM.Config(),
-        )
+
+def _engine_state(solver):
+    """Where the last step of ``solver`` ended, as host arrays: libuipc-warp's float64 positions and velocities of every
+    vertex (``engine.vm.x``, ``engine.vm.v``)."""
+    e = solver._engine
+    return {"x": e.vm.x.numpy().copy(), "v": e.vm.v.numpy().copy()}
+
+
+def _two_passes(model, solver, steps, dt=0.01, capture=False, inputs=None, start=None):
+    """``steps`` coupled steps of two passes each, with the coupler's protocol by hand: a write of the input state
+    (``coupling_notify_input_state_update``), the first pass, a restart's notification, the second pass, both from the
+    same ``state_in``; ``inputs(k, pass)`` may write the input state of a pass first. The solver is an entry whose
+    coupler restarts (``coupling_notify_iteration_restarts(True)``). Captured: the two passes and the copy of the result
+    into the input in one graph, replayed; ``start``: the state of the first step (the model's by default). Returns the
+    (first, second) ``_engine_state`` of every step (of the first pass, captured, its positions) and the state."""
+    solver.coupling_notify_iteration_restarts(True)
+    s0, s1 = model.state(), model.state()
+    if start is not None:
+        s0.assign(start)
+    flags = newton.StateFlags.ALL
+    out, first = [], [None]
+
+    def passes(k):
+        solver.coupling_notify_input_state_update(s0, flags, dt=dt)
+        if inputs is not None:
+            inputs(k, 0, s0)
+        solver.step(s0, s1, None, None, dt)
+        if not capture:
+            first[0] = _engine_state(solver)
+        else:
+            wp.copy(kept_x, solver._engine.vm.x)
+        solver.coupling_notify_input_state_update(s0, flags, iteration_restart=True, dt=dt)
+        if inputs is not None:
+            inputs(k, 1, s0)
+        solver.step(s0, s1, None, None, dt)
+        s0.assign(s1)
+
+    if capture:
+        kept_x = wp.empty_like(solver._engine.vm.x)
+        with wp.ScopedCapture(device=model.device) as cap:
+            passes(0)
+    for k in range(steps):
+        if capture:
+            wp.capture_launch(cap.graph)
+            second = _engine_state(solver)
+            out.append(({"x": kept_x.numpy().copy()}, second))
+        else:
+            passes(k)
+            out.append((first[0], _engine_state(solver)))
+    return out, s0
+
+
+def test_restarted_passes_repeat(test, device):
+    """The coupler's protocol by hand (``_two_passes``): a pass after a restart starts where the first pass of the step
+    started, from the float64 state with the friction candidates of the step's start, so that a pass with the first's
+    input repeats it. On particles that repeat bit for bit, every second pass is its first pass bit for bit, eager and
+    captured, and the run is SolverIPC's run without restarts, bit for bit; and so on a driven pendulum under
+    ``integrator="bdf2"``, whose drive reads the joint coordinate of the step before, which the solver carries from step
+    to step and restores with the step's start. Without restarts (the negative control) a second step from the same
+    state_in starts from state_in's float32 rounding: the passes differ."""
+    pendulum, pendulum_start, _ = _hinged(device, gravity=9.81, offset=(0.0, 0.3, 0.0), radius=0.05, target_ke=5.0,
+                                          target_kd=0.1)  # fmt: skip
+    pendulum_start.joint_q.assign(np.array([0.5], np.float32))  # swinging from 0.5 rad
+    newton.eval_fk(pendulum, pendulum_start.joint_q, pendulum_start.joint_qd, pendulum_start)
+    cases = (
+        ("particles", _repeating_particles(device), None, {}),
+        ("pendulum, bdf2", pendulum, pendulum_start, {"integrator": "bdf2"}),
+    )
+    for name, model, start, options in cases:
+        alone = newton.solvers.SolverIPC(model, **options)
+        a0, a1 = model.state(), model.state()
+        if start is not None:
+            a0.assign(start)
+        plain = []
+        for _ in range(30):
+            alone.step(a0, a1, None, None, 0.01)
+            a0, a1 = a1, a0
+            plain.append(_engine_state(alone))
+        for capture in (False, True):
+            with test.subTest(name, captured=capture):
+                solver = newton.solvers.SolverIPC(model, **options)
+                passes, _ = _two_passes(model, solver, 30, capture=capture, start=start)
+                for k, ((first, second), p) in enumerate(zip(passes, plain, strict=True)):
+                    for key, a in first.items():
+                        test.assertEqual(a.tobytes(), second[key].tobytes(), f"step {k}: {key} of the two passes")
+                    for key, a in p.items():
+                        test.assertEqual(a.tobytes(), second[key].tobytes(), f"step {k}: {key} against the plain run")
+                solver.check_status()
+    model = _repeating_particles(device)
+    # the negative control: two steps from one state_in without restarts
     solver = newton.solvers.SolverIPC(model)
-    state = model.state()
+    s0, s1 = model.state(), model.state()
+    moved = 0
+    for _ in range(30):
+        solver.step(s0, s1, None, None, 0.01)
+        once = _engine_state(solver)
+        solver.step(s0, s1, None, None, 0.01)
+        moved += once["x"].tobytes() != _engine_state(solver)["x"].tobytes()
+        s0.assign(s1)
+    test.assertGreater(moved, 20)
+
+
+def test_restart_restores_every_world(test, device):
+    """Three independent worlds of a soft cube, a box and a particle (``_world_content``), with the coupler's protocol by
+    hand: after ten steps the first pass of a step takes world 1's particle written through the ground, which fails
+    world 1 alone (put back at its start, its friction and history requested anew for the next step); the second pass,
+    restarted with the particle written back, starts every world from the step's start again, the failed world and its
+    requests too, and takes the step of a solver that never failed, in every world within 1e-6 m. In every other step
+    the two passes end within the rounding of the soft cube's sums, 1e-9 m."""
+    shifts = (0.0, 0.03, 0.06)
+    model = _worlds_at(device, shifts)
+    rows = _world_rows(model, len(shifts))
+    particle = int(rows[1][0][-1])
+    heights = {}
+
+    def inputs(k, attempt, state):
+        if k == 10 and attempt == 0:
+            heights[k] = float(state.particle_q.numpy()[particle, 2])
+            _write_particle(state, particle, z=-0.01)
+        elif k == 10:
+            _write_particle(state, particle, z=heights[k])
+
+    solver = newton.solvers.SolverIPC(model)
+    clean = newton.solvers.SolverIPC(model)
+    c0, c1 = model.state(), model.state()
+    reference = []
+    for _ in range(12):
+        clean.step(c0, c1, None, None, 0.01)
+        c0, c1 = c1, c0
+        reference.append(c0.particle_q.numpy().copy())
+    failed = []
+    real = solver.step
+
+    def step(*args, **kw):
+        try:
+            real(*args, **kw)
+        except RuntimeError as e:  # the eager first pass of step 10 fails in world 1 alone
+            failed.append(str(e))
+
+    solver.step = step
+    passes, state = _two_passes(model, solver, 12, inputs=inputs)
+    test.assertEqual(len(failed), 1)
+    test.assertRegex(failed[0], r"failed in 1 of its 3 worlds, world 1")
+    for k, (first, second) in enumerate(passes):
+        if k != 10:
+            np.testing.assert_allclose(second["x"], first["x"], rtol=0.0, atol=1e-9, err_msg=f"step {k}")
+    np.testing.assert_allclose(state.particle_q.numpy(), reference[-1], rtol=0.0, atol=1e-6)
+    solver.check_status()  # the failed pass was replaced by its restart
+
+
+def test_restart_replaces_the_status_of_a_pass(test, device):
+    """Captured passes of one step: a first pass whose input gives a particle a velocity that is not a number fails
+    (a NONFINITE bit, as the same pass alone reports), and its restart from the step's start with a clean input does
+    not; the status bits an entry keeps are the last pass's, so check_status() reports nothing."""
+    model = _repeating_particles(device)
+    solver = newton.solvers.SolverIPC(model)
+    solver.coupling_notify_iteration_restarts(True)
+    flags = newton.StateFlags.PARTICLE_Q | newton.StateFlags.PARTICLE_QD
+    s0, s1, bad = model.state(), model.state(), model.state()
+    solver.step(s0, s1, None, None, 0.01)  # loads the state and the modules
+    s0.assign(s1)
+    bad.assign(s0)
+    _write_particle(bad, 0, qd=(np.nan, 0.0, 0.0))
+    with wp.ScopedCapture(device=device) as cap:
+        solver.coupling_notify_input_state_update(bad, flags, dt=0.01)
+        solver.step(bad, s1, None, None, 0.01)
+        solver.coupling_notify_input_state_update(s0, flags, iteration_restart=True, dt=0.01)
+        solver.step(s0, s1, None, None, 0.01)
+    wp.capture_launch(cap.graph)
+    test.assertFalse(solver.check_status())
+    # the same first pass alone is a failure the kept bits report
+    with wp.ScopedCapture(device=device) as cap:
+        solver.coupling_notify_input_state_update(bad, flags, dt=0.01)
+        solver.step(bad, s1, None, None, 0.01)
+    wp.capture_launch(cap.graph)
+    with test.assertRaisesRegex(RuntimeError, "NONFINITE"):
+        solver.check_status()
+
+
+def test_admm_with_two_iterations(test, device):
+    """``SolverCoupledADMM`` with two iterations, SolverIPC owning four particles with friction on the ground and XPBD a
+    box falling 3 m away: every step solves SolverIPC's entry twice, the second from the step's start restored on the
+    device; with nothing coupling the entries both passes have the same input, and the second ends where the first did,
+    bit for bit, and the entry steps as SolverIPC alone, bit for bit, over 30 steps; the box falls on its own. A
+    restart's notification from a coupler that did not announce restarts is refused, and a reset's is not."""
+    from newton.solvers.experimental.coupled import SolverCoupledADMM  # noqa: PLC0415
+
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    for p, v in (((0.0, 0.0, 0.0105), (1.0, 0.0, 0.0)), ((0.3, 0.0, 0.0105), (0.5, 0.2, 0.0)),
+                 ((0.4, 0.0, 0.0105), (-0.5, 0.0, 0.0)), ((0.8, 0.0, 0.05), (0.0, 0.0, 0.0))):  # fmt: skip
+        builder.add_particle(wp.vec3(*p), wp.vec3(*v), 1.0e-3, radius=0.01)
+    box = _box_body(builder, (3.0, 0.0, 0.5), (0.05, 0.05, 0.05))
+    model = builder.finalize(device=device)
+    coupled = SolverCoupledADMM(
+        model,
+        [
+            SolverCoupledADMM.Entry("ipc", newton.solvers.SolverIPC, particles=list(range(model.particle_count))),
+            SolverCoupledADMM.Entry("xpbd", newton.solvers.SolverXPBD, bodies=[box], joints=_joints_of(model, [box])),
+        ],
+        SolverCoupledADMM.Config(iterations=2),
+    )
+    ipc = coupled.solver("ipc")
+    starts, real = [], ipc.step
+
+    def step(*args, **kw):
+        real(*args, **kw)
+        starts.append(_engine_state(ipc))
+
+    ipc.step = step
+    alone_model = _repeating_particles(device)
+    alone = newton.solvers.SolverIPC(alone_model)
+    s0, s1, a0, a1 = model.state(), model.state(), alone_model.state(), alone_model.state()
+    z0 = float(s0.body_q.numpy()[box, 2])
+    for k in range(30):
+        starts.clear()
+        coupled.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+        alone.step(a0, a1, None, None, 0.01)
+        a0, a1 = a1, a0
+        test.assertEqual(len(starts), 2)
+        for name in ("x", "v"):
+            test.assertEqual(starts[0][name].tobytes(), starts[1][name].tobytes(), f"step {k}: {name}")
+        x, xa = ipc._engine.vm.x.numpy(), alone._engine.vm.x.numpy()
+        test.assertEqual(x.tobytes(), xa.tobytes(), f"step {k}")
+    ipc.check_status()
+    test.assertLess(float(s0.body_q.numpy()[box, 2]), z0 - 0.3)
+    # a coupler that did not announce restarts
+    solver = newton.solvers.SolverIPC(alone_model)
+    state = alone_model.state()
+    solver.coupling_notify_iteration_restarts(False)
     solver.coupling_notify_input_state_update(state, newton.StateFlags.ALL, iteration_restart=True, dt=0.0)
-    with test.assertRaisesRegex(NotImplementedError, "again from its start"):
+    with test.assertRaisesRegex(NotImplementedError, "did not announce restarts"):
         solver.coupling_notify_input_state_update(state, newton.StateFlags.ALL, iteration_restart=True, dt=0.01)
-    solver.coupling_notify_iteration_restarts(False)  # one iteration: an entry
+
+
+def test_proxy_passes_converge(test, device):
+    """``SolverCoupledProxy`` with several passes per step: XPBD's 1 kg box on SolverIPC's cloth over a static support
+    (``_proxy_scene``), at 1/240 s with converged steps. Every pass of SolverIPC's entry starts from the step's start,
+    and the coupler iterates the step's feedback: the source steps again with the feedback of the pass before, so the
+    feedback is no longer one step late. Lagged transfer, four passes: the passes converge (the last two differ by less
+    than 0.1% of the weight in each of the last 60 steps) and the box comes to rest with its weight as feedback within
+    0.1%, where one pass keeps it bouncing (``test_proxy_box_rests_on_cloth``). Staggered transfer: the feedback of a
+    pass undoes the motion that made it, so the passes alternate unless relaxed; with a relaxation of 0.5, two passes
+    rest the box with its weight within 0.1%. No crossing and no failure in any step."""
+    from uipc_warp.validation import SurfaceChecker  # noqa: PLC0415
+
+    from newton.solvers.experimental.coupled import SolverCoupledProxy  # noqa: PLC0415
+
+    dt = 1.0 / 240.0
+    for mode, iterations, relaxation in (("lagged", 4, 1.0), ("staggered", 2, 0.5)):
+        with test.subTest(mode=mode):
+            model, box = _proxy_scene(device)
+            coupled = SolverCoupledProxy(
+                model,
+                [
+                    SolverCoupledProxy.Entry(
+                        "xpbd", newton.solvers.SolverXPBD, bodies=[box], joints=_joints_of(model, [box])
+                    ),
+                    SolverCoupledProxy.Entry(
+                        "ipc",
+                        lambda view: newton.solvers.SolverIPC(view, **_CONVERGED),
+                        particles=list(range(model.particle_count)),
+                    ),
+                ],
+                SolverCoupledProxy.Config(
+                    proxies=[
+                        SolverCoupledProxy.Proxy(
+                            source="xpbd", destination="ipc", bodies=[box], mode=mode, proxy_relaxation=relaxation
+                        )
+                    ],
+                    iterations=iterations,
+                ),
+            )
+            ipc = coupled.solver("ipc")
+            checker = SurfaceChecker.from_engine(ipc._engine)
+            feedback = coupled._proxy_mappings[0].coupling_forces
+            passes = []
+
+            def step_proxy(*args, real=coupled._step_proxy, passes=passes, feedback=feedback, box=box, **kw):
+                real(*args, **kw)
+                passes.append(float(feedback.numpy()[box, 2]))
+
+            coupled._step_proxy = step_proxy
+            weight = float(model.body_mass.numpy()[box]) * 9.81
+            s0, s1 = model.state(), model.state()
+            fz, z, hits = [], [], 0
+            for _ in range(240):
+                passes.clear()
+                coupled.step(s0, s1, None, None, dt)
+                s0, s1 = s1, s0
+                test.assertEqual(len(passes), iterations)
+                fz.append(list(passes))
+                z.append(float(s0.body_q.numpy()[box, 2]))
+                hits += checker.intersections(ipc._engine.vm.x)
+            ipc.check_status()
+            test.assertEqual(hits, 0)
+            fz = np.array(fz) / weight
+            np.testing.assert_allclose(fz[-60:, -1], 1.0, rtol=0.0, atol=1e-3)
+            test.assertLess(np.abs(fz[-60:, -1] - fz[-60:, -2]).max(), 1e-3)
+            test.assertLess(np.ptp(z[-60:]), 1e-5)  # at rest
+            test.assertGreater(min(z), 0.15)  # on the cloth, above the support
 
 
 def _coupled_boxes(device):
@@ -7149,7 +7422,11 @@ for name, func in (
     ("test_coupled_entry_steps_as_alone", test_coupled_entry_steps_as_alone),
     ("test_proxy_box_rests_on_cloth", test_proxy_box_rests_on_cloth),
     ("test_proxy_particles_rest_on_a_body", test_proxy_particles_rest_on_a_body),
-    ("test_coupled_restarts_refused", test_coupled_restarts_refused),
+    ("test_restarted_passes_repeat", test_restarted_passes_repeat),
+    ("test_restart_restores_every_world", test_restart_restores_every_world),
+    ("test_restart_replaces_the_status_of_a_pass", test_restart_replaces_the_status_of_a_pass),
+    ("test_admm_with_two_iterations", test_admm_with_two_iterations),
+    ("test_proxy_passes_converge", test_proxy_passes_converge),
     ("test_coupled_status_of_captured_steps", test_coupled_status_of_captured_steps),
     ("test_coupled_reset_is_the_solvers_reset", test_coupled_reset_is_the_solvers_reset),
     ("test_proxies_refuse_bdf2_and_al_ipc", test_proxies_refuse_bdf2_and_al_ipc),
