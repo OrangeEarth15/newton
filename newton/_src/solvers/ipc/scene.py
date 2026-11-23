@@ -1006,19 +1006,21 @@ def _add_shapes_and_bodies(
     ]
 
     mass, first, second = _body_mass_moments(solver, stacklevel=5)
-    # kinematic_motion="aim": the kinematic bodies with colliding shapes, which move toward their aims
-    solver._aim_bodies = np.zeros(0, np.int64)
-    solver._aim_mesh_moments = {}
+    # the bodies with colliding shapes, and with kinematic_motion="aim" those of them that are kinematic and have mass,
+    # which move toward their aims
+    solver._body_meshed = np.array([bool(meshes[b]) for b in range(model.body_count)], bool)
+    solver._aim_bodies = _aiming_bodies(solver, mass)
     # the bodies whose start the caller writes into the state, which the first step checks (_check_start)
     solver._posed_body = np.zeros(model.body_count, bool)
     if model.body_count == 0:
         return mass, first, second
-    if solver._aims:
-        solver._aim_bodies = np.flatnonzero(solver._kinematic_body & np.array([bool(meshes[b]) for b in meshes]))
-        for b in solver._aim_bodies:
-            if mass[b] <= 0.0:  # the mass of its collision meshes at 1000 kg/m^3
-                solver._aim_mesh_moments[int(b)] = _mesh_moments(solver, int(b), meshes[b])
-        mass, first, second = _with_aim_moments(solver, (mass, first, second))
+    inertia = model.body_inertia.numpy().astype(np.float64)
+    for b in solver._aim_bodies:
+        if np.linalg.eigvalsh(0.5 * (inertia[b] + inertia[b].T)).min() <= 0.0:
+            raise ValueError(
+                f"SolverIPC needs a positive-definite inertia for the kinematic body {b}, which "
+                "kinematic_motion='aim' moves with its mass."
+            )
     body_q, body_qd, placed = _start_bodies(solver)
     # a kinematic body, whose pose the caller writes at every step, and a link the model leaves at the identity,
     # which the caller places by writing forward kinematics into the state (docs/solvers/ipc.rst > "State")
@@ -1076,39 +1078,14 @@ def _add_shapes_and_bodies(
     return mass, first, second
 
 
-def _mesh_moments(solver: SolverIPC, b: int, parts: list) -> tuple[float, np.ndarray, np.ndarray]:
-    """The dyadic mass of body ``b``'s collision meshes ``parts`` at 1000 kg/m^3, for a kinematic body of mass 0
-    that moves toward its aim (``kinematic_motion="aim"``); ``NotImplementedError`` when they enclose no volume."""
-    m, mx, S = 0.0, np.zeros(3), np.zeros((3, 3))
-    for v, f, _ in parts:
-        pm, pmx, pS, vol = solver._uipc_warp.arrays.mesh_dyadic_mass(v, f, 1000.0)
-        sign = -1.0 if vol < 0.0 else 1.0  # a mesh wound inward
-        m, mx, S = m + sign * pm, mx + sign * pmx, S + sign * pS
-    if not m > 0.0:
-        raise NotImplementedError(
-            f"SolverIPC: kinematic_motion='aim' moves the kinematic body {b} with its mass; it has none, and its "
-            "collision shapes enclose no volume to give it one at 1000 kg/m^3."
-        )
-    return m, mx, S
-
-
-def _with_aim_moments(solver: SolverIPC, dyadic: tuple) -> tuple:
-    """``dyadic`` with the mass moments of the kinematic bodies that move toward their aims (``kinematic_motion=
-    "aim"``): Newton's for a body of positive mass, which needs a positive-definite inertia, else those of its
-    collision meshes (``_mesh_moments``)."""
-    if not len(solver._aim_bodies):
-        return dyadic
-    mass, first, second = (a.copy() for a in dyadic)
-    inertia = solver.model.body_inertia.numpy().astype(np.float64)
-    for b in solver._aim_bodies:
-        if int(b) in solver._aim_mesh_moments:
-            mass[b], first[b], second[b] = solver._aim_mesh_moments[int(b)]
-        elif np.linalg.eigvalsh(0.5 * (inertia[b] + inertia[b].T)).min() <= 0.0:
-            raise ValueError(
-                f"SolverIPC needs a positive-definite inertia for the kinematic body {b}, which "
-                "kinematic_motion='aim' moves with its mass."
-            )
-    return mass, first, second
+def _aiming_bodies(solver: SolverIPC, mass: np.ndarray) -> np.ndarray:
+    """With ``kinematic_motion="aim"``, the bodies that move toward their aims (:ref:`ipc-kinematic-bodies`): the
+    kinematic bodies with colliding shapes (``solver._body_meshed``) and a mass ``mass`` above 0. A kinematic body of
+    mass 0 keeps the jump: there is no mass for the soft transform constraint to move, and a soft anchor would let
+    the joints it holds sag. No body with ``"jump"``."""
+    if not solver._aims or solver.model.body_count == 0:
+        return np.zeros(0, np.int64)
+    return np.flatnonzero(solver._kinematic_body & solver._body_meshed & (mass > 0.0))
 
 
 def _start_bodies(solver: SolverIPC) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

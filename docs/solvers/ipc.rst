@@ -520,11 +520,12 @@ is soft, with the strength ratio :math:`\eta` = ``kinematic_strength_ratio``
 (libuipc's motors' 100) for translation and rotation alike: under a load
 :math:`F` a body of mass :math:`m` lags its aim by about
 :math:`F \Delta t^2 / ((1 + \eta) m)`, 2.8e-5 m for 10 N on 1 kg at 1/60 s. A
-kinematic body moves with Newton's mass; one of mass 0 takes the mass of its
-collision meshes at 1000 kg/m^3. A caller who writes consistent ``body_q`` and
-``body_qd`` every step gets the next pose as the aim, one who writes poses only
-(``body_qd`` 0) the written pose, one who writes nothing motion at constant
-twist. The step starts from the pose the body reached, so the motion from there
+kinematic body moves with Newton's mass; one of mass 0, such as a link of
+density 0 that anchors joints, keeps the jump: there is no mass for the
+constraint to move, and a soft anchor would let the joints it holds sag. A
+caller who writes consistent ``body_q`` and ``body_qd`` every step gets the
+next pose as the aim, one who writes poses only (``body_qd`` 0) the written
+pose, one who writes nothing motion at constant twist. The step starts from the pose the body reached, so the motion from there
 to the aim is swept, a jump included; the first step after the solver is built
 and the step after a :meth:`~newton.solvers.SolverIPC.reset` that selects the
 body's world take ``state_in`` instead, which is how a caller moves such a body

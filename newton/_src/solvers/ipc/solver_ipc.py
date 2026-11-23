@@ -74,6 +74,7 @@ from .scene import (
     _add_shapes_and_bodies,
     _add_springs,
     _add_stitches,
+    _aiming_bodies,
     _attachment_penalties,
     _body_mass_moments,
     _check_attachments,
@@ -94,7 +95,6 @@ from .scene import (
     _spreads,
     _subscene_of_shape,
     _vertex_gravity,
-    _with_aim_moments,
     _world_gravity,
     _Worlds,
     _write_body_stiffness,
@@ -1985,8 +1985,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES) and model.body_count:
             dyadic = _body_mass_moments(self, stacklevel=3)
             rebuild |= not np.array_equal(self._kinematic_body, kinematic)
-            if not rebuild:
-                dyadic = _with_aim_moments(self, dyadic)
+            # kinematic_motion="aim": a kinematic body that gains or loses its mass starts or stops moving toward its
+            # aims
+            rebuild |= not np.array_equal(_aiming_bodies(self, dyadic[0]), self._aim_bodies)
             changed = any(not np.array_equal(a, b) for a, b in zip(dyadic, self._dyadic, strict=True))
             if self._config.contact_constitution == "al-ipc":
                 # the AL-IPC contact penalty follows the masses the engine was built with

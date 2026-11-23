@@ -4,6 +4,7 @@
 """SolverIPC's kinematic_motion="aim": kinematic bodies moved inside the step toward their aims."""
 
 import unittest
+import warnings
 
 import numpy as np
 import warp as wp
@@ -244,7 +245,7 @@ def test_jump_mode_builds_the_engine_of_before(test, device):
     """The default kinematic_motion="jump" builds a kinematic body as before: fixed, without a soft transform
     constraint, with the contact elements of before, its state_out a copy of state_in; "aim" builds it free, with the
     constraint and the kinematic and static shapes in elements of their own. Invalid options and AL-IPC with aims are
-    refused, and so is a kinematic body of mass 0 whose shapes enclose no volume."""
+    refused."""
     from newton._src.solvers.ipc.contacts import _contact_elements  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
@@ -280,14 +281,6 @@ def test_jump_mode_builds_the_engine_of_before(test, device):
         newton.solvers.SolverIPC(model, kinematic_motion="aim", kinematic_strength_ratio=-1.0)
     with test.assertRaisesRegex(NotImplementedError, "al-ipc"):
         newton.solvers.SolverIPC(model, kinematic_motion="aim", contact_constitution="al-ipc")
-    sheet = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
-    b = sheet.add_body(mass=0.0, is_kinematic=True)
-    v = np.array([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.0, 0.1, 0.0]], np.float32)
-    sheet.add_shape_mesh(
-        b, mesh=newton.Mesh(v, np.array([0, 1, 2], np.int32)), cfg=newton.ModelBuilder.ShapeConfig(density=0.0)
-    )
-    with test.assertRaisesRegex(NotImplementedError, "enclose no volume"):
-        newton.solvers.SolverIPC(sheet.finalize(device=device), kinematic_motion="aim")
 
 
 @requires("uipc_warp")
@@ -309,6 +302,75 @@ for name, func in (
     ("test_jump_mode_builds_the_engine_of_before", test_jump_mode_builds_the_engine_of_before),
 ):
     add_function_test(TestSolverIPCKinematicAims, name, func, devices=devices)
+
+
+def _anchored_pendulum(device, sheet=False):
+    """basic_joints' revolute pendulum: an anchor link of density 0 (mass 0, so kinematic) fixed to the world at
+    z = 1, and a box of 1000 kg/m^3 hanging from it on a revolute joint about x, released 0.6 rad off the vertical;
+    with ``sheet`` also a kinematic body of mass 0 whose only shape is a single triangle, which encloses no volume.
+    Returns the model and the pendulum's body."""
+    builder = newton.ModelBuilder()
+    static = newton.ModelBuilder.ShapeConfig(density=0.0)
+    anchor = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()))
+    builder.add_shape_box(anchor, hx=0.05, hy=0.05, hz=0.05, cfg=static)
+    bob = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 0.7), wp.quat_identity()))
+    builder.add_shape_box(bob, hx=0.03, hy=0.03, hz=0.2)
+    fixed = builder.add_joint_fixed(-1, anchor, parent_xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()))
+    hinge = builder.add_joint_revolute(
+        anchor,
+        bob,
+        axis=wp.vec3(1.0, 0.0, 0.0),
+        parent_xform=wp.transform(wp.vec3(0.0, 0.0, -0.05), wp.quat_identity()),
+        child_xform=wp.transform(wp.vec3(0.0, 0.0, 0.25), wp.quat_identity()),
+    )
+    builder.add_articulation([fixed, hinge])
+    builder.joint_q[-1] = 0.6
+    if sheet:
+        b = builder.add_body(xform=wp.transform(wp.vec3(1.0, 0.0, 0.0), wp.quat_identity()), mass=0.0)
+        v = np.array([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.0, 0.1, 0.0]], np.float32)
+        builder.add_shape_mesh(b, mesh=newton.Mesh(v, np.array([0, 1, 2], np.int32)), cfg=static)
+    return builder.finalize(device=device), bob
+
+
+def test_massless_kinematic_bodies_keep_the_jump(test, device):
+    """A kinematic body of mass 0 keeps the jump under kinematic_motion="aim": there is no mass for the soft transform
+    constraint to move, and a soft anchor lets the joints it holds sag. basic_joints' revolute pendulum, whose anchor
+    is a link of density 0: under "aim" the anchor is fixed, as under "jump", and the pendulum swings in its hinge's
+    plane and as it swings under "jump" over 60 steps, to 1e-9 m. A kinematic body of mass 0 whose shapes enclose no
+    volume (a single triangle) is taken too, without a RuntimeWarning: the solver computes no mass from its shapes."""
+    model, bob = _anchored_pendulum(device)
+    paths = {}
+    for mode in ("jump", "aim"):
+        solver = newton.solvers.SolverIPC(model, kinematic_motion=mode, **_TIGHT)
+        test.assertEqual(len(solver._aim_bodies), 0)
+        layout = solver._scene.layout()
+        test.assertTrue(np.all(solver._engine.vm.fixed.numpy()[layout.body_base[0] : layout.body_base[0] + 4] != 0))
+        s0, s1 = model.state(), model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
+        path = []
+        for _ in range(60):
+            solver.step(s0, s1, None, None, 1.0 / 240.0)
+            s0, s1 = s1, s0
+            path.append(s0.body_q.numpy()[bob, :3].copy())
+        paths[mode] = np.array(path)
+    test.assertLess(np.abs(paths["aim"][:, 0]).max(), 1e-5)  # in the hinge's plane, basic_joints' check
+    test.assertGreater(np.ptp(paths["aim"][:, 1]), 0.05)  # it swings
+    np.testing.assert_allclose(paths["aim"], paths["jump"], rtol=0.0, atol=1e-9)
+    sheet_model, _ = _anchored_pendulum(device, sheet=True)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        solver = newton.solvers.SolverIPC(sheet_model, kinematic_motion="aim")
+    test.assertEqual([str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)], [])
+    test.assertEqual(len(solver._aim_bodies), 0)
+
+
+@requires("uipc_warp")
+class TestSolverIPCKinematicMotion(unittest.TestCase):
+    """Which kinematic bodies move toward their aims, and the twist of a body that becomes kinematic."""
+
+
+for name, func in (("test_massless_kinematic_bodies_keep_the_jump", test_massless_kinematic_bodies_keep_the_jump),):
+    add_function_test(TestSolverIPCKinematicMotion, name, func, devices=devices)
 
 
 if __name__ == "__main__":
