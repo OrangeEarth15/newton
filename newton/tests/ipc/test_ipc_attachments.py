@@ -192,7 +192,9 @@ def test_zero_length_springs_oscillate_as_implicit_euler(test, device):
 
 def test_attachment_changes(test, device):
     """notify_model_changed(CONSTRAINT_PROPERTIES): a new stiffness is taken at the next step without building the
-    solve again, damping is refused, and a new body point builds the solve again."""
+    solve again; a damping where the solve has none builds it again, with the damping of the attachment's stitch, and a
+    damping changed after that is taken at the next step without building it again; a new body point builds the solve
+    again."""
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     b = _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
     builder.add_particle(pos=wp.vec3(0.0, 0.0, 0.8), vel=wp.vec3(0.0, 0.0, 0.0), mass=0.01, radius=0.001)
@@ -208,9 +210,14 @@ def test_attachment_changes(test, device):
     [rows] = solver._uipc_warp.arrays.stitch_groups(solver._engine)
     np.testing.assert_array_equal(rows.kappa.numpy(), [20.0])
     model.attachment_particle_body_damping.assign(np.array([1.0], np.float32))
-    with test.assertRaisesRegex(NotImplementedError, "attachment 0 has damping 1.0; set it to 0"):
-        solver.notify_model_changed(newton.ModelFlags.CONSTRAINT_PROPERTIES)
-    model.attachment_particle_body_damping.assign(np.array([0.0], np.float32))
+    solver.notify_model_changed(newton.ModelFlags.CONSTRAINT_PROPERTIES)
+    test.assertIsNot(solver._engine, engine)
+    engine = solver._engine
+    model.attachment_particle_body_damping.assign(np.array([2.0], np.float32))
+    solver.notify_model_changed(newton.ModelFlags.CONSTRAINT_PROPERTIES)
+    test.assertIs(solver._engine, engine)
+    solver.step(s0, s1, None, None, 0.01)
+    np.testing.assert_array_equal(solver._damping.stitches.group.c.numpy(), [2.0])
     model.attachment_particle_body_body_point.assign(np.array([[0.0, 0.0, -0.19]], np.float32))
     solver.notify_model_changed(newton.ModelFlags.CONSTRAINT_PROPERTIES)
     test.assertIsNot(solver._engine, engine)

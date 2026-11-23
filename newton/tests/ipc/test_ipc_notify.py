@@ -155,9 +155,9 @@ def _particle_scene(device):
 
 def test_notify_rebuilds_for_new_particles_and_springs(test, device):
     """MODEL_PROPERTIES with a new soft_contact_mu (0.1), particle_mu (0.1), particle radius (1.5 cm), spring rest
-    length (12 cm) or spring stiffness (4 N/m) builds the solve again after two steps: the particles land, slide and
-    oscillate as a new solver on the changed model has them. A spring given damping in place is refused at the
-    notification, as at construction."""
+    length (12 cm), spring stiffness (4 N/m) or spring damping (0.5 N s/m) builds the solve again after two steps: the
+    particles land, slide and oscillate as a new solver on the changed model has them. A spring given a negative
+    damping in place is refused at the notification, as at construction."""
 
     def setter(name, value):
         def apply(model):
@@ -166,7 +166,14 @@ def test_notify_rebuilds_for_new_particles_and_springs(test, device):
         return apply
 
     flags = dict.fromkeys(
-        ("soft_contact_mu", "particle_mu", "particle_radius", "spring_rest_length", "spring_stiffness"),
+        (
+            "soft_contact_mu",
+            "particle_mu",
+            "particle_radius",
+            "spring_rest_length",
+            "spring_stiffness",
+            "spring_damping",
+        ),
         newton.ModelFlags.MODEL_PROPERTIES,
     )
     _check_rebuilds(
@@ -178,13 +185,14 @@ def test_notify_rebuilds_for_new_particles_and_springs(test, device):
             "particle_radius": _set("particle_radius", 0, 0.015),
             "spring_rest_length": _set("spring_rest_length", 0, 0.12),
             "spring_stiffness": _set("spring_stiffness", 0, 4.0),
+            "spring_damping": _set("spring_damping", 0, 0.5),
         },
         flags,
     )
     model = _particle_scene(device)
     solver = newton.solvers.SolverIPC(model, **_OPTIONS)
-    _set("spring_damping", 0, 0.5)(model)
-    with test.assertRaisesRegex(NotImplementedError, "spring 0 has spring_damping 0.5; set it to 0"):
+    _set("spring_damping", 0, -0.5)(model)
+    with test.assertRaisesRegex(NotImplementedError, "spring 0 has spring_damping -0.5; make it 0 or positive"):
         solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES)
 
 

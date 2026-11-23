@@ -45,7 +45,8 @@ The solver simulates:
 - particles (a particle on no cloth or tetrahedron is a sphere of its radius,
   see :ref:`ipc-contact`) and tetrahedra. Elasticity is the SNK1 stable
   Neo-Hookean model with Lamé parameters ``tet_materials[:, 0]`` (``k_mu``) and
-  ``tet_materials[:, 1]`` (``k_lambda``). ``k_damp`` is ignored.
+  ``tet_materials[:, 1]`` (``k_lambda``), and ``k_damp`` damps the rate of
+  their strain (see :ref:`ipc-damping`).
 - cloth: triangles of :attr:`~newton.Model.tri_indices` that are not on a
   tetrahedral body become libuipc's strain-limiting Baraff-Witkin membrane, and
   bending edges of :attr:`~newton.Model.edge_indices` become discrete-shell
@@ -101,9 +102,10 @@ Refused content
 ---------------
 
 Not supported, and rejected when the solver is constructed:
-:class:`NotImplementedError` for springs and particle-body attachments with
-damping (libuipc has no damping element), springs of a negative rest length or
-stiffness or that join a particle to itself, mimic constraints, enabled MuJoCo
+:class:`NotImplementedError` for a damping coefficient that is not finite or is
+negative and a damped bending edge without a positive ``edge_rest_length`` (see
+:ref:`ipc-damping`), springs of a negative rest length or stiffness or that join
+a particle to itself, mimic constraints, enabled MuJoCo
 equality rows that no loop joint holds (see :ref:`ipc-joints`), tendons, muscles, body variants (:meth:`~newton.ModelBuilder.add_body_variants`:
 the solver triangulates the shapes when it builds the solve and finds its own
 contacts, so it cannot follow a variant row's shape), non-zero triangle or
@@ -141,8 +143,7 @@ particles set one to other than Newton's default (its contact has one friction
 coefficient and no restitution, and MJCF's default friction holds Newton's
 default torsional and rolling coefficients), ``shape_gap`` (``d_hat`` is the
 solver's detection distance), the :attr:`~newton.Model.particle_radius` of cloth and tetrahedron
-vertices (see :ref:`ipc-contact`), damping coefficients, ``spring_control``,
-drag, lift, ``edge_rest_length`` (see :ref:`ipc-cloth`), the activations of a
+vertices (see :ref:`ipc-contact`), ``spring_control``, drag, lift, the activations of a
 :class:`~newton.Control` (an eager step refuses those other than 0, see
 :ref:`ipc-refused`), ``joint_target_mode``, ``joint_velocity_limit``, of
 which the solver warns once, with :class:`~newton.NewtonWarning` when it is
@@ -185,8 +186,8 @@ Newton's hinge energy is :math:`\tfrac{1}{2} k_e L_0 (\theta - \bar\theta)^2`
 :math:`\kappa L_0 (\theta - \bar\theta)^2 / \bar h` with
 :math:`\bar h = (A_1 + A_2) / (3 L_0)` from the two rest triangle areas, so each
 hinge gets :math:`\kappa = k_e \bar h / 2`. Particle masses are used as they
-are. The damping coefficients ``tri_kd`` and ``edge_kd``, drag and lift are
-ignored: implicit Euler supplies the only damping.
+are. The damping coefficients ``tri_kd`` and ``edge_kd`` act as :ref:`ipc-damping`
+describes; drag and lift are not read.
 
 Rest shapes are Newton's. A membrane triangle's rest edges are the inverse of
 its :attr:`~newton.Model.tri_poses` (the edges in the triangle's frame whose
@@ -212,7 +213,8 @@ rest angle: libuipc's angle, the arccosine of the normals' cosine, reads up to
 1.5e-8 rad on a flat hinge that Newton measures as 0. The hinges keep the rest
 lengths and areas of ``particle_q`` (libuipc's :math:`L_0` and :math:`\bar h`)
 where Newton's VBD takes ``edge_rest_length``; for a rest shape equal to the
-start the two agree.
+start the two agree. A hinge's damping takes ``edge_rest_length``, as VBD's
+does.
 
 The solve holds copies of the materials and rest shapes of the tetrahedra,
 triangles and hinges (``tet_materials``, ``tri_materials``,
@@ -221,6 +223,69 @@ and of :attr:`~newton.Model.particle_flags`. Newton has no flag of its own for
 them, so :meth:`~newton.solvers.SolverIPC.notify_model_changed` compares them at
 every notification, whatever its flags, and builds the solve again when one
 changed in place.
+
+.. _ipc-damping:
+
+Damping
+-------
+
+Newton's damping coefficients act as its VBD solver defines them: each resists
+the rate of one coordinate, as a dissipation potential of libuipc-warp's
+``uipc_warp.ext.damping`` that the implicit step solves with its own estimate of
+the rate at the end of the step. libuipc has no damping term.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Newton's input
+     - resists the rate of
+     - where
+   * - ``spring_damping`` [N s/m]
+     - a spring's length; for a spring of rest length 0, the vector between
+       its particles
+     - every spring
+   * - ``attachment_particle_body_damping`` [N s/m]
+     - the vector between the particle and its point on the body
+     - an enabled attachment
+   * - ``tet_materials[:, 2]`` (``k_damp``) [Pa s]
+     - a tetrahedron's :math:`F^T F`, over its rest volume
+     - ``k_mu`` or ``k_lambda`` above 0
+   * - ``tri_materials[:, 2]`` (``tri_kd``) [Pa s m]
+     - a cloth triangle's :math:`F^T F` with its ``tri_poses``, over its
+       ``tri_areas``
+     - ``tri_ke`` or ``tri_ka`` above 0
+   * - ``edge_bending_properties[:, 1]`` (``edge_kd``) [N s]
+     - a cloth hinge's dihedral angle, times its ``edge_rest_length``
+     - the hinge's stiffness and rest length above 0
+
+A coordinate of this kind does not change when its particles move as one
+rigid body, so the damping exerts no net force and no net moment and does not
+slow a rigid rotation of a stretched spring, element or hinge. The vector of an
+attachment or a zero-length spring turns with a rotation and is damped in
+every direction, as VBD damps an attachment. Where Newton's VBD differs:
+
+- it damps a spring of rest length 0 along its length, which has no direction
+  where such a spring rests; SolverIPC damps the vector, the damper that pairs
+  with the zero-length spring's force;
+- it ignores the damping of a hard attachment (infinite stiffness), whose row
+  allows no relative motion; SolverIPC holds a hard attachment by a penalty
+  (see :ref:`ipc-attachments`) and damps the penalty's stretch, which tends to
+  the same limit.
+
+Newton's builders give a cloth triangle ``tri_kd`` 10 by default
+(``ModelBuilder.default_tri_kd``), so every cloth takes this damping unless
+``tri_kd`` is set to 0. A kind of damping takes its terms when the solve is
+built: every term where its condition holds, if one has a coefficient above 0
+then, and none otherwise. The coefficients are read on the device at every
+step, so a captured step takes new values at its next replay. A coefficient
+changed in place is taken without a notification where the solve has terms of
+its kind; :meth:`~newton.solvers.SolverIPC.notify_model_changed` builds the
+solve again for a changed spring, element or hinge damping (it compares those
+arrays) and for an attachment damping where the solve has none.
+
+A step with damping solves a slightly larger system and changes the rounding
+of its sums, also where every coefficient is 0; a model without damping steps
+as before.
 
 .. _ipc-contact:
 
@@ -609,8 +674,8 @@ it is not fixed, and of the body, if it is dynamic, so that it holds a load
 :math:`F` within :math:`F \Delta t^2 / K`. The stiffness and the enabled flags
 are read at every step: a captured step takes new values at its next replay. A
 spring of rest length 0 is the same stitch between its two particles, with
-``spring_stiffness``. Damping is rejected: libuipc's stitch has none, and an
-implicit damping cannot be folded into it the way the joint drives fold theirs.
+``spring_stiffness``. Their damping acts on the vector between the stitch's two
+points (see :ref:`ipc-damping`).
 An attached particle does not collide with the body it is attached to, whether
 or not the attachment is enabled. So a particle may be attached at a point on
 the body's surface, where the start check would otherwise refuse it for

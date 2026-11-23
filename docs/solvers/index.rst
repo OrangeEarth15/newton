@@ -623,8 +623,9 @@ with ``integrate_with_external_rigid_solver=True``.
 vertex stitch: a spring of the attachment's ``stiffness`` between the particle
 and the body point, a term of each step's implicit solve, so a finite
 attachment is the spring of implicit Euler and its forces are equal and
-opposite. A hard attachment takes the penalty of SolverIPC's ball joint, and an
-attachment with damping is rejected, since libuipc's stitch has no damping.
+opposite. A hard attachment takes the penalty of SolverIPC's ball joint, and the
+attachment's ``damping`` resists the rate of the vector between the particle and
+the body point, as SolverVBD's (see :ref:`ipc-damping`).
 
 When the endpoints of a finite-stiffness attachment belong to two different solvers in a coupled simulation,
 :class:`~newton.solvers.experimental.coupled.SolverCoupledADMM` turns the same

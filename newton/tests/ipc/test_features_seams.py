@@ -149,10 +149,12 @@ def _attachment(damping=0.0, stiffness=None):
         builder.add_particle(wp.vec3(x, 3.0, 1.0), wp.vec3(0.0, 0.0, 0.0), 1.0)
         body = _box_body(builder, (x, 3.0, 1.5), (0.1, 0.1, 0.1))
         builder.add_attachment_particle_body(
-            len(builder.particle_q) - 1, body, body_point=(0.0, 0.0, -0.5), damping=damping
+            len(builder.particle_q) - 1, body, body_point=(0.0, 0.0, -0.5), damping=max(damping, 0.0)
         )
         if stiffness is not None:  # which the builder refuses: set afterwards
             builder.attachment_particle_body_stiffness[-1] = stiffness
+        if damping < 0.0:  # likewise
+            builder.attachment_particle_body_damping[-1] = damping
 
     return content
 
@@ -266,14 +268,14 @@ _MOVED = (
         "the bounds to -MAXVAL and MAXVAL. libuipc limits revolute and prismatic joints only.",
     ),
     (
-        "damping of a spring (damping)",
-        (_spring(damping=0.5),),
-        "SolverIPC: spring 0 has spring_damping 0.5; set it to 0. libuipc's springs have no damping.",
+        "a negative damping of a spring (damping)",
+        (_spring(damping=-0.5),),
+        "SolverIPC: spring 0 has spring_damping -0.5; make it 0 or positive.",
     ),
     (
-        "damping of a particle-body attachment (damping)",
-        (_attachment(), _attachment(damping=2.0)),
-        "SolverIPC: particle-body attachment 1 has damping 2.0; set it to 0. libuipc's stitch has no damping.",
+        "a negative damping of a particle-body attachment (damping)",
+        (_attachment(), _attachment(damping=-2.0)),
+        "SolverIPC: particle-body attachment 1 has damping -2.0; make it 0 or positive.",
     ),
     (
         "a surface velocity (surface_velocity)",
@@ -288,8 +290,8 @@ def test_moved_refusals_keep_their_messages(test, device):
     """Every refusal a feature module holds raises NotImplementedError with the message it had before the modules
     held it, when the solver is built: tendons, mimic constraints and the friction of revolute and free joints
     (joint_terms), D6 joints of no libuipc joint and distance joints with a range (universal), the friction,
-    armature, drives, damping, target mode and limits of ball and free joints (ball), damped springs and attachments
-    (damping) and a mesh with a surface velocity (surface_velocity). (contact_damping's is in
+    armature, drives, damping, target mode and limits of ball and free joints (ball), springs and attachments with a
+    negative damping (damping) and a mesh with a surface velocity (surface_velocity). (contact_damping's is in
     test_contact_damping_takes_none_only.)"""
     for name, contents, message in _MOVED:
         with test.subTest(name):
@@ -365,9 +367,9 @@ _ORDER = (
     ),
     (
         "the damping of springs before their rest lengths",
-        (_spring(rest=-0.1), _spring(damping=0.5)),
+        (_spring(rest=-0.1), _spring(damping=-0.5)),
         {},
-        "spring 1 has spring_damping 0.5;",
+        "spring 1 has spring_damping -0.5;",
     ),
     (
         "springs before attachments",
@@ -377,11 +379,11 @@ _ORDER = (
     ),
     (
         "the damping of attachments before their stiffness",
-        (_attachment(stiffness=-1.0), _attachment(damping=2.0)),
+        (_attachment(stiffness=-1.0), _attachment(damping=-2.0)),
         {},
-        "particle-body attachment 1 has damping 2.0;",
+        "particle-body attachment 1 has damping -2.0;",
     ),
-    ("attachments before surface velocities", (_belt, _attachment(damping=2.0)), {}, "particle-body attachment 0 has"),
+    ("attachments before surface velocities", (_belt, _attachment(damping=-2.0)), {}, "particle-body attachment 0 has"),
     ("the model before contact_damping", (_belt,), {"contact_damping": 1.0}, "shape 0 is a mesh with"),
 )
 
@@ -405,7 +407,8 @@ def test_refusals_keep_their_order(test, device):
 def test_refusals_at_notify(test, device):
     """notify_model_changed checks again where it did before: CONSTRAINT_PROPERTIES the mimic constraints and the
     attachments' damping (before their stiffness), the flags of the joints' degrees of freedom the joints, and a new
-    spring damping (MODEL_PROPERTIES) builds the solve again, which refuses it. Each refusal has its message."""
+    spring damping (MODEL_PROPERTIES) builds the solve again, which refuses a negative one. Each refusal has its
+    message."""
     flags = newton.ModelFlags
     model = _model(device, _revolute(), _revolute(), _attachment(), _attachment(), _spring())
     solver = newton.solvers.SolverIPC(model)
@@ -425,10 +428,10 @@ def test_refusals_at_notify(test, device):
     mimic[1] = -1
     model.joint_mimic_joint.assign(mimic)
     model.attachment_particle_body_stiffness.assign(np.array([-1.0, 1.0e4], np.float32))
-    model.attachment_particle_body_damping.assign(np.array([0.0, 2.0], np.float32))
+    model.attachment_particle_body_damping.assign(np.array([0.0, -2.0], np.float32))
     refused(
         flags.CONSTRAINT_PROPERTIES,
-        "SolverIPC: particle-body attachment 1 has damping 2.0; set it to 0. libuipc's stitch has no damping.",
+        "SolverIPC: particle-body attachment 1 has damping -2.0; make it 0 or positive.",
     )
     model.attachment_particle_body_damping.assign(np.array([0.0, 0.0], np.float32))
     refused(
@@ -447,10 +450,10 @@ def test_refusals_at_notify(test, device):
         "friction.",
     )
     model.joint_friction.assign(np.zeros_like(friction))
-    model.spring_damping.assign(np.array([0.5], np.float32))
+    model.spring_damping.assign(np.array([-0.5], np.float32))
     refused(
         flags.MODEL_PROPERTIES,
-        "SolverIPC: spring 0 has spring_damping 0.5; set it to 0. libuipc's springs have no damping.",
+        "SolverIPC: spring 0 has spring_damping -0.5; make it 0 or positive.",
     )
 
 

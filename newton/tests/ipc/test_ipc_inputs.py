@@ -34,10 +34,10 @@ def _two_particles():
 
 
 def test_rejects_springs_without_a_libuipc_form(test, device):
-    """Reject a damped spring (libuipc has no damping element), a spring of negative rest length or of negative
-    stiffness and one that joins a particle to itself."""
+    """Reject a spring of negative damping, negative rest length or negative stiffness, and one that joins a particle
+    to itself."""
     for case, pattern in (
-        ("damped", "spring 0 has spring_damping 0.5; set it to 0"),
+        ("damped", "spring 0 has spring_damping -0.5; make it 0 or positive"),
         ("negative rest length", "spring_rest_length -0.1[0-9]*; make it 0 or positive"),
         ("negative", "spring_stiffness -1000.0; make it 0 or positive"),
         ("itself", "joins particle 0 to itself"),
@@ -45,19 +45,21 @@ def test_rejects_springs_without_a_libuipc_form(test, device):
         with test.subTest(case=case):
             builder = _two_particles()
             builder.add_spring(0, 0 if case == "itself" else 1, -1.0e3 if case == "negative" else 1.0e3,
-                               0.5 if case == "damped" else 0.0, 0.0)  # fmt: skip
+                               -0.5 if case == "damped" else 0.0, 0.0)  # fmt: skip
             if case == "negative rest length":
                 builder.spring_rest_length[0] = -0.1
             _rejects(test, builder, pattern, device)
 
 
 def test_rejects_attachment_damping(test, device):
-    """Reject a particle-body attachment with damping, naming it: libuipc's stitch has no damping."""
+    """Reject a particle-body attachment with a negative damping, naming it (Newton's builder refuses one, a model may
+    hold one)."""
     builder = _two_particles()
     b = _box_body(builder, (0.0, 0.0, 2.0), (0.1, 0.1, 0.1))
     builder.add_attachment_particle_body(0, b, body_point=(0.0, 0.0, -0.5))
     builder.add_attachment_particle_body(1, b, body_point=(0.1, 0.0, -0.5), damping=2.0)
-    _rejects(test, builder, "particle-body attachment 1 has damping 2.0; set it to 0", device)
+    builder.attachment_particle_body_damping[1] = -2.0
+    _rejects(test, builder, "particle-body attachment 1 has damping -2.0; make it 0 or positive", device)
 
 
 def _hinged_pair(builder):
