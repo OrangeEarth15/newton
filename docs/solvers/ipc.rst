@@ -25,7 +25,12 @@ never synchronizes with the host when it is captured in a CUDA graph. A step
 that is not captured captures the solve itself and checks how it ended (see
 :ref:`ipc-status`).
 
-SolverIPC requires the optional ``libuipc-warp`` package (``import uipc_warp``).
+SolverIPC requires the optional ``libuipc-warp`` package, 0.4.4 or newer
+(``import uipc_warp``): an older one, or a build without the capabilities the
+solver calls (``EngineOptions(affine_rotation=)`` for ``body_rotation="rigid"``,
+``EngineOptions(al_sweep_kinematic=)`` for AL-IPC, and the frame restart for an
+entry of a coupler that restarts its steps), raises :class:`ImportError` naming
+what it lacks.
 This page describes how the solver takes Newton's model, state and control and
 what it refuses; the API reference of :class:`~newton.solvers.SolverIPC` lists
 the constructor's arguments.

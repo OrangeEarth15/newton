@@ -603,15 +603,6 @@ class TestSolverIPCInputs(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "CUDA"):
             newton.solvers.SolverIPC(model)
 
-    def test_version_mismatches(self):
-        """Name libuipc-warp releases outside the supported range and a Warp outside libuipc-warp's requirement."""
-        from newton._src.solvers.ipc.solver_ipc import _version_mismatches  # noqa: PLC0415
-
-        self.assertEqual(_version_mismatches("0.4.0.dev0", "1.19.0", ">=1.19,<1.20"), [])
-        self.assertEqual(_version_mismatches("0.4.2", "1.19.3", None), [])
-        for uipc_warp, warp in (("0.3.0", "1.19.0"), ("0.5.0", "1.19.0"), ("0.4.0", "1.20.0"), ("0.4.0", "1.18.1")):
-            self.assertEqual(len(_version_mismatches(uipc_warp, warp, ">=1.19,<1.20")), 1, (uipc_warp, warp))
-
     def test_imports_only_public_newton_names(self):
         """SolverIPC's modules import Newton through its public modules only: no import of theirs resolves under
         newton._src outside SolverIPC's own package."""
@@ -698,29 +689,38 @@ class TestSolverIPCInputs(unittest.TestCase):
                 bent = max(bent, float(np.abs(angles).max()))
         self.assertGreater(bent, 1.0)  # folded hinges too, not only flat ones
 
-    def test_import_names_missing_calls(self):
-        """Refuse a libuipc-warp that lacks a call the solver makes, or a keyword it passes (the status of every
-        independent world), naming it."""
-        import uipc_warp.arrays  # noqa: PLC0415
+    def test_import_checks_the_version_and_the_capabilities(self):
+        """Refuse a libuipc-warp older than the release SolverIPC is written for, naming it, and one without a
+        capability SolverIPC calls (the rigid flight, AL-IPC's sweep of kinematic moves, the frame restart), naming
+        what it lacks; take a development build of the release. Every refusal says where to install it from."""
+        import uipc_warp  # noqa: PLC0415
 
-        imported, contact_model = newton.solvers.SolverIPC._uipc_warp, uipc_warp.arrays.ArrayScene.contact_model
-        try:
+        imported = newton.solvers.SolverIPC._uipc_warp
+
+        def refused(pattern):
             newton.solvers.SolverIPC._uipc_warp = None
-            del uipc_warp.arrays.ArrayScene.contact_model
-            with self.assertRaisesRegex(ImportError, r"lacks ArrayScene\.contact_model"):
+            with self.assertRaisesRegex(ImportError, pattern + r".*pip install git\+https://github\.com/OrangeEarth15"):
                 newton.solvers.SolverIPC._import_uipc_warp()
-        finally:
-            uipc_warp.arrays.ArrayScene.contact_model = contact_model
-            newton.solvers.SolverIPC._uipc_warp = imported
 
-        def status_of_one_world(engine, flags=None, residual=None, index=0):  # a release without independent worlds
-            del engine, flags, residual, index
-
+        names = uipc_warp.EngineOptions.names()
         try:
-            newton.solvers.SolverIPC._uipc_warp = None
-            with mock.patch.object(uipc_warp.arrays, "write_frame_status", status_of_one_world):
-                with self.assertRaisesRegex(ImportError, r"lacks write_frame_status\(worlds=\)"):
-                    newton.solvers.SolverIPC._import_uipc_warp()
+            for version in ("0.4.4.dev0", "0.4.4", "0.5.0", "1.0"):
+                with mock.patch.object(uipc_warp, "__version__", version):
+                    newton.solvers.SolverIPC._uipc_warp = None
+                    self.assertIs(newton.solvers.SolverIPC._import_uipc_warp(), uipc_warp)
+            for version in ("0.4.3", "0.3.0"):
+                with mock.patch.object(uipc_warp, "__version__", version):
+                    refused(f"requires libuipc-warp 0\\.4\\.4 or newer, and the installed one is {version}")
+            for option in ("affine_rotation", "al_sweep_kinematic"):
+                without = tuple(name for name in names if name != option)
+                with mock.patch.object(uipc_warp.EngineOptions, "names", return_value=without):
+                    refused(f"lacks EngineOptions\\({option}=\\)")
+
+            class WithoutRestart:  # an engine of a build without the frame restart
+                place_kinematic = uipc_warp.SimEngine.place_kinematic
+
+            with mock.patch.object(uipc_warp, "SimEngine", WithoutRestart):
+                refused(r"lacks the frame restart \(SimEngine\.enable_frame_restart\)")
         finally:
             newton.solvers.SolverIPC._uipc_warp = imported
 

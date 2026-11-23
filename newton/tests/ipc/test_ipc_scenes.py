@@ -4,7 +4,6 @@
 """Scenes of every kind of content SolverIPC takes: soft bodies, cloth, rigid bodies and their contact."""
 
 import unittest
-from unittest import mock
 
 import numpy as np
 import warp as wp
@@ -595,10 +594,7 @@ def test_body_rotation_defaults_to_rigid(test, device):
     """body_rotation defaults to "rigid" under implicit Euler and to "linear", libuipc's step, under BDF2, which the
     rigid flight does not take. By default a cube keeps its spin over 50 steps of 0.01 s at converged tolerances, as with
     body_rotation="rigid", where libuipc's step keeps 0.976 of it; under BDF2 the default steps as body_rotation="linear"
-    does; body_rotation="rigid" with BDF2 is refused, naming what to pass instead; and a libuipc-warp without the rigid
-    flight is refused by default, naming body_rotation="linear", which takes it."""
-    import uipc_warp  # noqa: PLC0415
-
+    does; and body_rotation="rigid" with BDF2 is refused, naming what to pass instead."""
     tight = {"newton_velocity_tol": 1e-9, "newton_transrate_tol": 1e-9, "linear_tol_rate": 1e-14, "semi_implicit": False,
              "newton_max_iter": 256}  # fmt: skip
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -627,12 +623,6 @@ def test_body_rotation_defaults_to_rigid(test, device):
         ValueError, r"body_rotation='rigid' integrates the rigid bodies with implicit Euler.* leave body_rotation unset"
     ):
         newton.solvers.SolverIPC(model, body_rotation="rigid", integrator="bdf2")
-
-    names = tuple(name for name in uipc_warp.EngineOptions.names() if name != "affine_rotation")
-    with mock.patch.object(uipc_warp.EngineOptions, "names", return_value=names):
-        with test.assertRaisesRegex(NotImplementedError, r"body_rotation='linear' takes libuipc's step without it"):
-            newton.solvers.SolverIPC(model)
-        newton.solvers.SolverIPC(model, body_rotation="linear")
 
 
 @requires("uipc_warp")

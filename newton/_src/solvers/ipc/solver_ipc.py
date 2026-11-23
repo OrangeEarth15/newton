@@ -6,9 +6,6 @@
 from __future__ import annotations
 
 import gc
-import importlib.metadata
-import inspect
-import operator
 import re
 import warnings
 from dataclasses import dataclass
@@ -116,8 +113,10 @@ else:
                 return method
 
 
-# libuipc-warp releases the solver is written for: from the first to before the second
-_UIPC_WARP_RELEASES = ((0, 4), (0, 5))
+# The oldest libuipc-warp SolverIPC takes, its development builds counted as their release ("0.4.4.dev0" as 0.4.4), and
+# where to install it from
+_UIPC_WARP_MINIMUM = (0, 4, 4)
+_UIPC_WARP_INSTALL = "pip install git+https://github.com/OrangeEarth15/libuipc-warp"
 # grow-and-redo attempts of an eager step whose contact lists keep overflowing, as libuipc-warp's FrameRunner
 _MAX_REGROWS = 8
 # libuipc's strength ratio of a joint (the default of its joints' apply_to): the default joint_strength_ratio
@@ -125,63 +124,24 @@ _JOINT_STRENGTH_RATIO = 100.0
 
 
 def _release(version: str) -> tuple[int, ...]:
-    """The release numbers at the start of a version string (``"0.4.0.dev0"`` gives ``(0, 4, 0)``)."""
+    """The release numbers at the start of a version string (``"0.4.4.dev0"`` gives ``(0, 4, 4)``)."""
     match = re.match(r"\d+(?:\.\d+)*", version)
     return tuple(int(part) for part in match.group(0).split(".")) if match else ()
 
 
-_VERSION_OPERATORS = {
-    ">=": operator.ge,
-    ">": operator.gt,
-    "<=": operator.le,
-    "<": operator.lt,
-    "==": operator.eq,
-    "!=": operator.ne,
-}
-
-
-def _satisfies(version: str, specifier: str) -> bool:
-    """Whether ``version`` meets every clause of a requirement specifier such as ``>=1.19,<1.20``, comparing
-    release numbers only (a pre-release counts as its release)."""
-    have = _release(version)
-    for clause in specifier.split(","):
-        match = re.fullmatch(r"\s*(~=|>=|<=|==|!=|>|<)\s*([0-9][0-9.]*)\S*\s*", clause)
-        if match is None:
-            continue
-        op, bound = match.group(1), _release(match.group(2))
-        width = max(len(have), len(bound))
-        a, b = have + (0,) * (width - len(have)), bound + (0,) * (width - len(bound))
-        ok = a >= b and have[: len(bound) - 1] == bound[:-1] if op == "~=" else _VERSION_OPERATORS[op](a, b)
-        if not ok:
-            return False
-    return True
-
-
-def _version_mismatches(uipc_warp_version: str, warp_version: str, warp_requirement: str | None) -> list[str]:
-    """The installed versions outside the range this solver is written for, and Warp outside libuipc-warp's."""
-    low, high = _UIPC_WARP_RELEASES
-    out = []
-    if not low <= _release(uipc_warp_version) < high:
-        out.append(
-            f"libuipc-warp {uipc_warp_version} (SolverIPC is written for libuipc-warp >={'.'.join(map(str, low))},"
-            f"<{'.'.join(map(str, high))})"
-        )
-    if warp_requirement and not _satisfies(warp_version, warp_requirement):
-        out.append(f"warp-lang {warp_version} (libuipc-warp requires warp-lang{warp_requirement})")
-    return out
-
-
-def _warp_requirement() -> str | None:
-    """libuipc-warp's requirement on warp-lang, from its installed metadata (None without one)."""
-    try:
-        requirements = importlib.metadata.requires("libuipc-warp") or []
-    except importlib.metadata.PackageNotFoundError:
-        return None
-    for requirement in requirements:
-        match = re.match(r"warp-lang\s*\(?([^;)]*)\)?", requirement)
-        if match:
-            return match.group(1).strip() or None
-    return None
+def _capabilities(uipc_warp) -> dict[str, bool]:
+    """Whether libuipc-warp has the capabilities SolverIPC calls that a build of ``_UIPC_WARP_MINIMUM`` may lack, a
+    development build among them, by name: the rotation of rigid bodies as a rigid body's (``body_rotation="rigid"``,
+    the default), AL-IPC's sweep of kinematic moves (``contact_constitution="al-ipc"``) and the frame restart (an entry
+    of a coupler that restarts its steps)."""
+    options = uipc_warp.EngineOptions.names()
+    engine = uipc_warp.SimEngine
+    return {
+        "EngineOptions(affine_rotation=)": "affine_rotation" in options,
+        "EngineOptions(al_sweep_kinematic=) with SimEngine.place_kinematic": "al_sweep_kinematic" in options
+        and hasattr(engine, "place_kinematic"),
+        "the frame restart (SimEngine.enable_frame_restart)": hasattr(engine, "enable_frame_restart"),
+    }
 
 
 def _check_choice(name: str, value: str, accepted: tuple) -> None:
@@ -298,7 +258,7 @@ class SolverIPC(SolverBase, CouplingInterface):
     (:ref:`ipc-contact-output`), and the solver is an entry of Newton's coupled
     solvers (:ref:`ipc-coupling`).
 
-    This solver requires the optional ``libuipc-warp`` package (``import uipc_warp``).
+    This solver requires the optional ``libuipc-warp`` package, 0.4.4 or newer (``import uipc_warp``).
 
     Args:
         model: The model to simulate.
@@ -588,12 +548,6 @@ class SolverIPC(SolverBase, CouplingInterface):
         # "Rigid bodies")
         self._rigid_rotation = body_rotation == "rigid"
         if self._rigid_rotation:
-            if "affine_rotation" not in uipc_warp.EngineOptions.names():
-                raise NotImplementedError(
-                    "SolverIPC: body_rotation='rigid', the default under integrator='bdf1', needs libuipc-warp's "
-                    "option affine_rotation (libuipc-warp 0.4.4 or later); the installed libuipc-warp is "
-                    f"{uipc_warp.__version__}. body_rotation='linear' takes libuipc's step without it."
-                )
             options["affine_rotation"] = "rigid"
         self._options = uipc_warp.EngineOptions(**options) if options else None
         self._adaptive_kappa = bool(adaptive_kappa)
@@ -701,8 +655,8 @@ class SolverIPC(SolverBase, CouplingInterface):
 
     @classmethod
     def _import_uipc_warp(cls):
-        """Import libuipc-warp once: raise if it is missing or lacks what the solver calls, warn on versions it was
-        not written for."""
+        """Import libuipc-warp once: raise when it is missing, older than ``_UIPC_WARP_MINIMUM``, without one of the
+        capabilities SolverIPC calls (``_capabilities``) or with other status bits than ``StatusBits``."""
         if cls._uipc_warp is not None:
             return cls._uipc_warp
         try:
@@ -710,50 +664,19 @@ class SolverIPC(SolverBase, CouplingInterface):
             import uipc_warp.arrays  # noqa: PLC0415
             import uipc_warp.validation  # noqa: PLC0415
         except ImportError as e:
-            raise ImportError(
-                "SolverIPC requires the libuipc-warp package: pip install git+https://github.com/OrangeEarth15/libuipc-warp"
-            ) from e
+            raise ImportError(f"SolverIPC requires the libuipc-warp package: {_UIPC_WARP_INSTALL}") from e
         version = getattr(uipc_warp, "__version__", "0")
-        # the newest calls of each kind the solver makes, all of them public names of libuipc-warp: the frame status,
-        # the contact and subscene tabulars and the stiffness policy, the start check, the joints, the iterations of
-        # captured steps, the restart of a BDF2 history and the friction discard per subscene (with the rows a restart
-        # per subscene takes), the stitches (with the anchors and stitch_groups of the same release), the soft
-        # transform constraint (with constraint_groups), the contact forces, the external accelerations, the bodies'
-        # orthogonality stiffness, the redo of an overflowing step (with the documented engine members of the same
-        # release), the frame start kept on the device for a coupler's restarts and AL-IPC's sweep of kinematic moves
-        needed = (
-            (uipc_warp.arrays, "write_frame_status"),
-            (uipc_warp.arrays.ArrayScene, "contact_model"),
-            (uipc_warp.arrays.ArrayScene, "subscene_model"),
-            (uipc_warp.arrays, "ContactStiffness"),
-            (uipc_warp.validation.SurfaceChecker, "min_gap"),
-            (uipc_warp.arrays, "joint_groups"),
-            (uipc_warp.arrays, "add_frame_iterations"),
-            (uipc_warp.SimEngine, "prepare_capture"),
-            (uipc_warp.SimEngine, "restart_history"),
-            (uipc_warp.SimEngine, "restart_rows"),
-            (uipc_warp.arrays.ArrayScene, "add_stitches"),
-            (uipc_warp.arrays.ArrayScene, "add_soft_transform_constraints"),
-            (uipc_warp.arrays, "ContactForces"),
-            (uipc_warp.arrays, "ExternalAcceleration"),
-            (uipc_warp.arrays, "orthogonality"),
-            (uipc_warp.SimEngine, "redo_state"),
-            (uipc_warp.SimEngine, "enable_frame_restart"),
-            (uipc_warp.SimEngine, "place_kinematic"),
-        )
-        # and the keywords of the newest calls: independent worlds, the scene's flag and the status of every world
-        keywords = (
-            ("ArrayScene(independent_subscenes=)", "independent_subscenes", uipc_warp.arrays.ArrayScene),
-            ("write_frame_status(worlds=)", "worlds", uipc_warp.arrays.write_frame_status),
-            ("EngineOptions(al_sweep_kinematic=)", "al_sweep_kinematic", uipc_warp.EngineOptions),
-        )
-        missing = [f"{owner.__name__}.{name}" for owner, name in needed if not hasattr(owner, name)]
-        missing += [call for call, keyword, owner in keywords if keyword not in inspect.signature(owner).parameters]
-        if missing:
-            calls = [f"{o.__name__}.{n}" for o, n in needed] + [call for call, _, _ in keywords]
+        minimum = ".".join(map(str, _UIPC_WARP_MINIMUM))
+        if _release(version) < _UIPC_WARP_MINIMUM:
             raise ImportError(
-                f"SolverIPC requires libuipc-warp 0.4 or newer with {', '.join(calls)}; the installed one ({version}) "
-                f"lacks {', '.join(missing)}."
+                f"SolverIPC requires libuipc-warp {minimum} or newer, and the installed one is {version}: "
+                f"{_UIPC_WARP_INSTALL}"
+            )
+        missing = [name for name, present in _capabilities(uipc_warp).items() if not present]
+        if missing:
+            raise ImportError(
+                f"SolverIPC requires libuipc-warp {minimum} or newer with {', '.join(_capabilities(uipc_warp))}; "
+                f"the installed one ({version}) lacks {', '.join(missing)}: {_UIPC_WARP_INSTALL}"
             )
         # write_frame_status writes libuipc-warp's FrameStatusFlags into the status arrays: the same bits under the
         # same names, but for the CCD bit, which libuipc-warp names after the time of impact
@@ -763,13 +686,6 @@ class SolverIPC(SolverBase, CouplingInterface):
         if flags.keys() != bits.keys() or any(flags[b] != bits[b] for b in bits if b != renamed):
             raise RuntimeError(
                 f"Incompatible libuipc-warp {version}: its FrameStatusFlags {flags} are not SolverIPC.StatusBits."
-            )
-        mismatches = _version_mismatches(version, wp.config.version, _warp_requirement())
-        if mismatches:
-            warnings.warn(
-                "SolverIPC is not tested with " + "; ".join(mismatches) + ".",
-                NewtonWarning,
-                stacklevel=3,
             )
         cls._uipc_warp = uipc_warp
         return uipc_warp
