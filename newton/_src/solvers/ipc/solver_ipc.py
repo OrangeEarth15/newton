@@ -26,6 +26,7 @@ from .contacts import (
     _contact_elements,
     _contact_records,
     _make_contact_export,
+    _unread_materials,
     _write_contacts,
 )
 from .joints import (
@@ -558,6 +559,15 @@ class SolverIPC(SolverBase, CouplingInterface):
         _check_supported(model, self._joint_options)
         self._velocity_limits_warned = False
         _warn_of_velocity_limits(self, stacklevel=3)
+        unread = _unread_materials(model)
+        if unread:
+            warnings.warn(
+                f"SolverIPC does not read {', '.join(unread)}: its contact has no restitution and one friction "
+                "coefficient, without torsional or rolling friction (see Inputs not read in Newton's IPC solver "
+                "guide).",
+                NewtonWarning,
+                stacklevel=2,
+            )
         _check_choice("integrator", integrator, ("bdf1", "bdf2"))
         # the rigid flight under implicit Euler, libuipc's step under BDF2 (docs/solvers/ipc.rst > "Rigid bodies")
         if body_rotation is None:

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import warp as wp
 
-from newton import GeoType, Mesh, Model, ParticleFlags, ShapeFlags, State
+from newton import GeoType, Mesh, Model, ModelBuilder, ParticleFlags, ShapeFlags, State
 from newton.solvers import SolverBase
 
 from .kernels import _contact_rows
@@ -336,6 +336,36 @@ def _check_surface_velocity(model: Model) -> None:
                 f"SolverIPC: shape {int(s)} is a mesh with enable_surface_velocity=True; turn the surface velocity "
                 "off. SolverIPC finds its own contacts, which do not apply surface velocities."
             )
+
+
+def _unread_materials(model: Model) -> list[str]:
+    """The contact coefficients SolverIPC does not read, where the model sets them to other than Newton's defaults
+    (``ModelBuilder.ShapeConfig``'s): a colliding shape's restitution, a static friction coefficient other than its
+    ``shape_material_mu``, and torsional and rolling friction, and the particles' ``soft_contact_restitution``. Each is
+    named with the first shape that sets it."""
+    out = []
+    if model.shape_count:
+        colliding = np.flatnonzero(_colliding_shapes(model))
+        default = ModelBuilder.ShapeConfig()
+        mu = model.shape_material_mu.numpy()
+        for name, default_value in (
+            ("shape_material_restitution", default.restitution),
+            ("shape_material_mu_static", None),  # the dynamic coefficient where none is set
+            ("shape_material_mu_torsional", default.mu_torsional),
+            ("shape_material_mu_rolling", default.mu_rolling),
+        ):
+            array = getattr(model, name)
+            if array is None:
+                continue
+            values = array.numpy()
+            expected = mu if default_value is None else np.full(len(values), default_value, np.float32)
+            other = colliding[values[colliding] != expected[colliding]]
+            if len(other):
+                s = int(other[0])
+                out.append(f"{name} {float(values[s]):g} of shape {s}")
+    if model.particle_count and model.soft_contact_restitution != 0.0:
+        out.append(f"soft_contact_restitution {float(model.soft_contact_restitution):g}")
+    return out
 
 
 def _check_al_ipc(solver: SolverIPC, elements: _ContactElements) -> None:

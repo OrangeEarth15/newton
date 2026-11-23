@@ -131,9 +131,15 @@ Inputs not read
 
 Not read: the penalty contact parameters of shapes and particles (``ke``,
 ``kd``, ``kf``, ``ka``, ``particle_cohesion`` and ``particle_adhesion``:
-``kappa`` holds for every pair), restitution, torsional and rolling friction,
-``shape_material_mu_static``, ``shape_gap`` (``d_hat`` is the solver's detection
-distance), the :attr:`~newton.Model.particle_radius` of cloth and tetrahedron
+``kappa`` holds for every pair), restitution (``shape_material_restitution``,
+``soft_contact_restitution``), static friction (``shape_material_mu_static``),
+torsional and rolling friction (``shape_material_mu_torsional``,
+``shape_material_mu_rolling``), of which the solver warns once, with
+:class:`~newton.NewtonWarning` when it is built, where a colliding shape or the
+particles set one to other than Newton's default (its contact has one friction
+coefficient and no restitution, and MJCF's default friction holds Newton's
+default torsional and rolling coefficients), ``shape_gap`` (``d_hat`` is the
+solver's detection distance), the :attr:`~newton.Model.particle_radius` of cloth and tetrahedron
 vertices (see :ref:`ipc-contact`), damping coefficients, ``spring_control``,
 drag, lift, ``edge_rest_length`` (see :ref:`ipc-cloth`), the activations of a
 :class:`~newton.Control` (an eager step refuses those other than 0, see

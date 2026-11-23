@@ -344,6 +344,51 @@ def test_particle_contact_follows_the_particle_grid(test, device):
     np.testing.assert_allclose(heights(model, solver), [1.2, 0.9], atol=1e-6)
 
 
+def test_warns_of_unread_contact_coefficients(test, device):
+    """The solver warns once, when it is built, of the contact coefficients it does not read that a colliding shape or
+    the particles set to other than Newton's defaults: restitution, a static friction other than the dynamic one, and
+    torsional and rolling friction, each named with its first shape. Newton's defaults, which MJCF's default friction
+    "1 0.005 0.0001" holds, draw no warning."""
+
+    def model(cfg=None, mjcf=False, particle_restitution=0.0):
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        if mjcf:
+            builder.add_mjcf(
+                '<mujoco><worldbody><body pos="0 0 1"><freejoint/><geom type="box" size="0.1 0.1 0.1"/></body>'
+                "</worldbody></mujoco>"
+            )
+        else:
+            body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()))
+            builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+        builder.add_particle(wp.vec3(1.0, 0.0, 1.0), wp.vec3(0.0, 0.0, 0.0), 1.0, radius=0.01)
+        model = builder.finalize(device=device)
+        model.soft_contact_restitution = particle_restitution
+        return model
+
+    for kwargs in ({}, {"mjcf": True}):
+        m = model(**kwargs)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            newton.solvers.SolverIPC(m)
+    Shape = newton.ModelBuilder.ShapeConfig
+    for kwargs, named in (
+        ({"cfg": Shape(restitution=0.5)}, "shape_material_restitution 0.5 of shape 1"),
+        ({"cfg": Shape(mu=0.5, mu_static=0.8)}, "shape_material_mu_static 0.8 of shape 1"),
+        ({"cfg": Shape(mu_torsional=0.01, mu_rolling=0.0)}, "shape_material_mu_torsional 0.01 of shape 1, "
+         "shape_material_mu_rolling 0 of shape 1"),
+        ({"particle_restitution": 0.3}, "soft_contact_restitution 0.3"),
+    ):  # fmt: skip
+        with test.subTest(named):
+            m = model(**kwargs)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                newton.solvers.SolverIPC(m)
+            messages = [str(w.message) for w in caught if issubclass(w.category, newton.NewtonWarning)]
+            test.assertEqual(len(messages), 1, messages)
+            test.assertIn(f"SolverIPC does not read {named}: its contact has no restitution", messages[0])
+
+
 @wp.kernel
 def _newton_heightfield_triangles(
     fields: wp.array[HeightfieldData],
@@ -753,6 +798,7 @@ for name, func in (
     ("test_excluded_pairs_never_collide", test_excluded_pairs_never_collide),
     ("test_particle_only_shapes", test_particle_only_shapes),
     ("test_inactive_particles_do_not_collide", test_inactive_particles_do_not_collide),
+    ("test_warns_of_unread_contact_coefficients", test_warns_of_unread_contact_coefficients),
     ("test_particle_contact_follows_the_particle_grid", test_particle_contact_follows_the_particle_grid),
     ("test_rest_heights_follow_radius_and_margin", test_rest_heights_follow_radius_and_margin),
     ("test_springs_oscillate_as_implicit_euler", test_springs_oscillate_as_implicit_euler),

@@ -1,0 +1,1 @@
+Warn once with NewtonWarning, when SolverIPC is built, of the contact coefficients it does not read that a colliding shape or the particles set to other than Newton's defaults: restitution, a static friction other than the dynamic one, and torsional and rolling friction. They were ignored without a word; Newton's defaults, which MJCF's default friction holds, draw no warning.
