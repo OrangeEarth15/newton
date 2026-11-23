@@ -16,7 +16,7 @@ import numpy as np
 import warp as wp
 from newton.solvers.experimental.coupled import CouplingInterface
 
-from newton import Contacts, Control, Model, ModelFlags, NewtonWarning, State, StateFlags
+from newton import Contacts, Control, JointType, Model, ModelFlags, NewtonWarning, State, StateFlags
 from newton.solvers import SolverBase
 
 from .contacts import (
@@ -123,6 +123,10 @@ _UIPC_WARP_INSTALL = "pip install git+https://github.com/OrangeEarth15/libuipc-w
 _MAX_REGROWS = 8
 # libuipc's strength ratio of a joint (the default of its joints' apply_to): the default joint_strength_ratio
 _JOINT_STRENGTH_RATIO = 100.0
+# MuJoCo's CONNECT and WELD equality types (mjtEq), and the target kind with which Newton's importers link an equality
+# row to the loop joint they turned it into (MjcEqualityTargetKind.JOINT); neither has a public name in Newton
+_EQ_CONNECT, _EQ_WELD = 0, 1
+_EQ_TARGET_JOINT = 1
 
 
 def _release(version: str) -> tuple[int, ...]:
@@ -152,6 +156,69 @@ def _check_choice(name: str, value: str, accepted: tuple) -> None:
         raise ValueError(f"SolverIPC: {name} must be one of {', '.join(map(repr, accepted))}, got {value!r}.")
 
 
+def _unprojected_equality_rows(model: Model) -> np.ndarray:
+    """The enabled rows of ``model.mujoco``'s equality constraints that no loop joint holds, by SolverSteel's rule.
+    Newton's importers turn a CONNECT row into a BALL joint and a WELD row into a FIXED joint (a BALL joint when its
+    torquescale is 0), outside every articulation and between the row's two bodies (or its body and the world), keep
+    the row and link it to the joint (``equality_constraint_target_kind`` JOINT and ``equality_constraint_target``);
+    SolverIPC simulates the joint as every other. A row that names another joint, or none, is not held; neither is a
+    JOINT row, whose mimic constraint SolverIPC refuses."""
+    mujoco = getattr(model, "mujoco", None)
+    count = int(getattr(mujoco, "equality_constraint_count", 0) or 0) if mujoco is not None else 0
+    if count == 0:
+        return np.zeros(0, np.int64)
+
+    def field(name: str, missing) -> np.ndarray:
+        values = getattr(mujoco, f"equality_constraint_{name}", None)
+        return np.full(count, missing) if values is None else values.numpy()
+
+    enabled = field("enabled", True).astype(bool)
+    target_kind, target = field("target_kind", 0), field("target", -1)
+    linked = np.flatnonzero(enabled & (target_kind == _EQ_TARGET_JOINT) & (target >= 0) & (target < model.joint_count))
+    projected = np.zeros(count, bool)
+    if len(linked):
+        eq_type, torquescale = field("type", -1), field("torquescale", 1.0)
+        body1, body2 = field("body1", -2), field("body2", -2)
+        joint_type, parent, child = (a.numpy() for a in (model.joint_type, model.joint_parent, model.joint_child))
+        articulation = model.joint_articulation.numpy()
+        for row in linked:
+            j = int(target[row])
+            expected = {_EQ_CONNECT: JointType.BALL, _EQ_WELD: JointType.FIXED}.get(int(eq_type[row]))
+            if expected == JointType.FIXED and float(torquescale[row]) == 0.0:
+                expected = JointType.BALL  # a weld without its rotation, as the importers turn it
+            projected[row] = (
+                expected is not None
+                and int(joint_type[j]) == int(expected)
+                and articulation[j] < 0
+                and child[j] >= 0
+                and {int(parent[j]), int(child[j])} == {int(body1[row]), int(body2[row])}
+            )
+    return np.flatnonzero(enabled & ~projected)
+
+
+def _check_constraints(model: Model) -> None:
+    """``NotImplementedError`` for a mimic constraint, and for an enabled equality row that no loop joint holds
+    (``_unprojected_equality_rows``)."""
+    mimic = int(model.constraint_mimic_count)
+    if model.joint_count and model.joint_mimic_joint is not None:
+        mimic += int(np.count_nonzero(model.joint_mimic_joint.numpy() >= 0))
+    if mimic:
+        raise NotImplementedError(
+            f"SolverIPC: the model has {mimic} mimic constraints; remove them. SolverIPC does not enforce mimic "
+            "constraints."
+        )
+    rows = _unprojected_equality_rows(model)
+    if len(rows):
+        shown = rows[:8].tolist()
+        raise NotImplementedError(
+            f"SolverIPC: model.mujoco has {len(rows)} enabled equality rows that no loop joint holds (rows {shown}"
+            f"{' and more' if len(rows) > 8 else ''}); import CONNECT and WELD equalities with "
+            "convert_mjc_equality_constraints=True, model the constraints with Newton's joints, or disable the rows "
+            "(equality_constraint_enabled). SolverIPC enforces only the rows that Newton's importers turn into loop "
+            "joints, through those joints."
+        )
+
+
 def _check_supported(model: Model, joints: _JointOptions | None = None) -> None:
     """Reject model content the solver would otherwise accept and ignore; joints as ``joints`` maps them
     (``_JointOptions``). What independent worlds refuse is checked when the solve is laid out
@@ -169,24 +236,7 @@ def _check_supported(model: Model, joints: _JointOptions | None = None) -> None:
             raise NotImplementedError(
                 f"SolverIPC: the model has {count} {name}; remove them. SolverIPC does not simulate {name}."
             )
-    mimic = int(model.constraint_mimic_count)
-    if model.joint_count and model.joint_mimic_joint is not None:
-        mimic += int(np.count_nonzero(model.joint_mimic_joint.numpy() >= 0))
-    if mimic:
-        raise NotImplementedError(
-            f"SolverIPC: the model has {mimic} mimic constraints; remove them. SolverIPC does not enforce mimic "
-            "constraints."
-        )
-    mujoco = getattr(model, "mujoco", None)
-    rows = int(getattr(mujoco, "equality_constraint_count", 0) or 0) if mujoco is not None else 0
-    if rows:
-        enabled = getattr(mujoco, "equality_constraint_enabled", None)
-        rows = int(np.count_nonzero(enabled.numpy())) if enabled is not None else rows
-    if rows:
-        raise NotImplementedError(
-            f"SolverIPC: model.mujoco has {rows} enabled equality rows; disable them (equality_constraint_enabled). "
-            "SolverIPC does not enforce equality constraints."
-        )
+    _check_constraints(model)
     own_tris, own_tets, _ = _own_elements(model)
     for name, activations, own in (
         ("triangle", model.tri_activations, own_tris),

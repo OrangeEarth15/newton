@@ -103,8 +103,8 @@ Refused content
 Not supported, and rejected when the solver is constructed:
 :class:`NotImplementedError` for springs and particle-body attachments with
 damping (libuipc has no damping element), springs of a negative rest length or
-stiffness or that join a particle to itself, mimic and equality constraints,
-tendons, muscles, non-zero triangle or tetrahedron activations, the joint types
+stiffness or that join a particle to itself, mimic constraints, enabled MuJoCo
+equality rows that no loop joint holds (see :ref:`ipc-joints`), tendons, muscles, non-zero triangle or tetrahedron activations, the joint types
 and properties that :ref:`ipc-joints` rejects, gradients
 (``model.requires_grad``), with independent worlds what :ref:`ipc-worlds`
 refuses (an unknown of the global world, an element that joins two worlds, and
@@ -721,6 +721,18 @@ limit, which SolverIPC does not, as MuJoCo does not). A joint that reaches its
 limit within a step is damped from the next step on; a limit of
 ``joint_limit_ke`` 0 damps nothing. With ``enable_joint_limit_damping=False``
 ``joint_limit_kd`` is not read.
+
+Newton's MJCF and USD importers turn a CONNECT or a WELD equality into a BALL or
+a FIXED joint outside the articulations (a loop joint), and keep the equality
+row, linked to the joint (``model.mujoco.equality_constraint_target_kind`` and
+``equality_constraint_target``). SolverIPC simulates the loop joint as any other
+joint and takes the row as held by it, by SolverSteel's rule: a CONNECT row
+linked to a BALL joint, or a WELD row to a FIXED joint (to a BALL joint when its
+``torquescale`` is 0), that is in no articulation and joins the row's two
+bodies (or its body and the world). Every other enabled row raises
+:class:`NotImplementedError` when the solver is built; a row's
+``equality_constraint_enabled`` does not switch its loop joint,
+``joint_enabled`` does.
 
 :attr:`~newton.Control.joint_f` of a revolute or prismatic joint is libuipc's
 joint torque or force between the two bodies; of a ball joint a torque in the

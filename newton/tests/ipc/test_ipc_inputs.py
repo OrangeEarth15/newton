@@ -79,8 +79,8 @@ def test_rejects_mimic_constraints(test, device):
     _rejects(test, builder, "mimic", device)
 
 
-def test_rejects_equality_constraints(test, device):
-    """Reject an enabled MuJoCo equality row instead of letting the body fall through it."""
+def _equality_row(enabled):
+    """A box body and a MuJoCo CONNECT row that holds it to the world, linked to no loop joint."""
     builder = newton.ModelBuilder()
     body = _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
     builder.add_custom_values(
@@ -90,10 +90,96 @@ def test_rejects_equality_constraints(test, device):
             "mujoco:equality_constraint_body1": body,
             "mujoco:equality_constraint_body2": -1,
             "mujoco:equality_constraint_anchor": wp.vec3(0.0, 0.0, 1.0),
-            "mujoco:equality_constraint_enabled": True,
+            "mujoco:equality_constraint_enabled": enabled,
         }
     )
-    _rejects(test, builder, "equality", device)
+    return builder
+
+
+def test_rejects_equality_constraints(test, device):
+    """Reject an enabled MuJoCo equality row that no loop joint holds instead of letting the body fall through it."""
+    _rejects(test, _equality_row(True), "1 enabled equality rows that no loop joint holds \\(rows \\[0\\]\\)", device)
+
+
+# Newton's importers turn the weld into a FIXED joint between the boxes and the connect into a BALL joint from the world
+# to box a, both loop joints, and keep the two rows linked to them
+_LOOP_MJCF = """
+<mujoco>
+  <worldbody>
+    <body name="a" pos="0 0 1.0">
+      <freejoint/>
+      <geom type="box" size="0.05 0.05 0.05" density="1000"/>
+    </body>
+    <body name="b" pos="0.3 0 1.0">
+      <freejoint/>
+      <geom type="box" size="0.05 0.05 0.05" density="1000"/>
+    </body>
+  </worldbody>
+  <equality>
+    <weld body1="a" body2="b"/>
+    <connect body1="a" anchor="0 0 0"/>
+  </equality>
+</mujoco>
+"""
+
+
+def _rotation(q):
+    """The rotation matrix of the xyzw quaternion ``q``."""
+    x, y, z, w = (float(v) for v in q)
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
+
+
+def test_equality_rows_held_by_loop_joints(test, device):
+    """The MJCF equalities that Newton's importers turn into loop joints are taken, by SolverSteel's rule: a connect of
+    a free box to the world at its centre and a weld of a second free box to it become a BALL and a FIXED joint in no
+    articulation, their rows stay enabled and linked to them, and over 30 steps of 0.01 s the first box stays at its
+    anchor and the second keeps its pose in the first's frame, within the joints' penalties, while the pair swings
+    down under gravity. The model imported without the conversion keeps rows linked to no joint, which are refused,
+    and a row linked to a joint of another kind is refused too."""
+
+    def imported(convert):
+        builder = newton.ModelBuilder()
+        if convert:
+            with test.assertWarnsRegex(newton.NewtonWarning, "another joint already connects these bodies"):
+                builder.add_mjcf(_LOOP_MJCF)
+        else:
+            builder.add_mjcf(_LOOP_MJCF, convert_mjc_equality_constraints=False)
+        return builder.finalize(device=device)
+
+    model = imported(True)
+    rows = model.mujoco
+    kinds = [newton.JointType(int(t)) for t in model.joint_type.numpy()]
+    targets = rows.equality_constraint_target.numpy()
+    test.assertEqual(rows.equality_constraint_enabled.numpy().tolist(), [True, True])
+    test.assertEqual(sorted(kinds[t] for t in targets), [newton.JointType.BALL, newton.JointType.FIXED])
+    test.assertTrue(np.all(model.joint_articulation.numpy()[targets] < 0))
+    solver = newton.solvers.SolverIPC(model)
+    s0, s1 = model.state(), model.state()
+    for _ in range(30):
+        solver.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+    q = s0.body_q.numpy().astype(np.float64)
+    a, b = q[0], q[1]
+    np.testing.assert_allclose(a[:3], (0.0, 0.0, 1.0), rtol=0.0, atol=1e-4)  # the connect
+    R_a, R_b = _rotation(a[3:]), _rotation(b[3:])
+    np.testing.assert_allclose(R_a.T @ (b[:3] - a[:3]), (0.3, 0.0, 0.0), rtol=0.0, atol=1e-3)  # the weld
+    np.testing.assert_allclose(R_a.T @ R_b, np.eye(3), rtol=0.0, atol=1e-3)
+    test.assertGreater(1.0 - b[2], 0.05)  # the pair swings down about a's centre
+
+    with test.assertRaisesRegex(
+        NotImplementedError, "2 enabled equality rows that no loop joint holds \\(rows \\[0, 1\\]\\)"
+    ):
+        newton.solvers.SolverIPC(imported(False))
+    swapped = imported(True)
+    swapped.mujoco.equality_constraint_target.assign(targets[::-1].copy())  # each row on the other's joint
+    with test.assertRaisesRegex(NotImplementedError, "2 enabled equality rows that no loop joint holds"):
+        newton.solvers.SolverIPC(swapped)
 
 
 def test_rejects_tendons(test, device):
@@ -680,6 +766,18 @@ class TestSolverIPCInputs(unittest.TestCase):
 
         self.assertEqual(_VELOCITY_LIMIT, newton.ModelBuilder.JointDofConfig().velocity_limit)
 
+    def test_equality_constants_are_newtons(self):
+        """SolverIPC's copies of MuJoCo's CONNECT and WELD equality types and of Newton's target kind of a row turned
+        into a loop joint, which have no public name, are Newton's."""
+        from newton._src.solvers.ipc import solver_ipc  # noqa: PLC0415
+        from newton._src.solvers.mujoco.enums import EqType  # noqa: PLC0415
+        from newton._src.solvers.mujoco.equality import MjcEqualityTargetKind  # noqa: PLC0415
+
+        self.assertEqual(
+            (solver_ipc._EQ_CONNECT, solver_ipc._EQ_WELD, solver_ipc._EQ_TARGET_JOINT),
+            (int(EqType.CONNECT), int(EqType.WELD), int(MjcEqualityTargetKind.JOINT)),
+        )
+
     def test_imports_only_public_newton_names(self):
         """SolverIPC's modules import Newton through its public modules only: no import of theirs resolves under
         newton._src outside SolverIPC's own package."""
@@ -1048,6 +1146,7 @@ for name, func in (
     ("test_rejects_attachment_damping", test_rejects_attachment_damping),
     ("test_rejects_mimic_constraints", test_rejects_mimic_constraints),
     ("test_rejects_equality_constraints", test_rejects_equality_constraints),
+    ("test_equality_rows_held_by_loop_joints", test_equality_rows_held_by_loop_joints),
     ("test_rejects_tendons", test_rejects_tendons),
     ("test_rejects_muscles", test_rejects_muscles),
     ("test_rejects_activations", test_rejects_activations),
