@@ -417,10 +417,14 @@ class SolverIPC(SolverBase, CouplingInterface):
         contact_constitution: ``"ipc"`` (barrier contact) or ``"al-ipc"`` (see
             :ref:`ipc-al-ipc`).
         contact_damping: A damping of the motion of surfaces in contact
-            along their normal. Only ``None``, the default, is taken: it adds
-            no damping, the contact's barrier and friction being its only
-            forces (see :ref:`ipc-contact`). Any other value raises
-            :class:`NotImplementedError`.
+            along their normal, so that impacts lose energy (see
+            :ref:`ipc-contact-damping`). ``None`` (the default) adds none, the
+            contact's barrier and friction being its only forces; a number is
+            every contact pair's coefficient [N s/m]; ``"material"`` takes
+            :attr:`~newton.Model.shape_material_kd` and
+            :attr:`~newton.Model.soft_contact_kd` as
+            :class:`~newton.solvers.SolverVBD` combines them. AL-IPC refuses
+            any value but ``None``.
         fem_preconditioner: ``"diag"`` (block diagonal) or ``"mas"`` for
             particles, cloth and tetrahedra (see :ref:`ipc-mas`).
         kinematic_motion: How a kinematic body with mass and colliding shapes

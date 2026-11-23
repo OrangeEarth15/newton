@@ -118,7 +118,6 @@ and properties that :ref:`ipc-joints` rejects, gradients
 refuses (an unknown of the global world, an element that joins two worlds, and
 the options they do not take yet), a :attr:`~newton.Model.shape_contact_pairs`
 array assigned to the model, more contact elements than the engine takes (see
-:ref:`ipc-contact`), a ``contact_damping`` other than ``None`` (see
 :ref:`ipc-contact`), and a CPU device. Gaussian shapes and planes attached to bodies raise
 when the shapes are triangulated. A step that is not captured raises
 :class:`NotImplementedError` when its :class:`~newton.Control` holds a triangle
@@ -134,8 +133,9 @@ Inputs not read
 ---------------
 
 Not read: the penalty contact parameters of shapes and particles (``ke``,
-``kd``, ``kf``, ``ka``, ``particle_cohesion`` and ``particle_adhesion``:
-``kappa`` holds for every pair), restitution (``shape_material_restitution``,
+``kf``, ``ka``, ``particle_cohesion`` and ``particle_adhesion``: ``kappa``
+holds for every pair; ``kd`` but with ``contact_damping="material"``, see
+:ref:`ipc-contact-damping`), restitution (``shape_material_restitution``,
 ``soft_contact_restitution``), static friction (``shape_material_mu_static``),
 torsional and rolling friction (``shape_material_mu_torsional``,
 ``shape_material_mu_rolling``), of which the solver warns once, with
@@ -363,11 +363,64 @@ any ``dt``; with independent worlds every world takes the range of the same
 world alone, from its own vertices and the global ones, and every pair of a
 world its value (see :ref:`ipc-worlds`).
 
-Contact has no damping term: its forces are the barrier's and friction's. The
-shapes' contact damping :attr:`~newton.Model.shape_material_kd`, which
-Newton's penalty-based solvers apply, is not read (see :ref:`ipc-not-read`).
-The ``contact_damping`` argument takes only ``None``, its default, which adds
-no damping; any other value raises :class:`NotImplementedError`.
+.. _ipc-contact-damping:
+
+Contact damping
+~~~~~~~~~~~~~~~
+
+libuipc's contact has no damping: the barrier gives back the energy an impact
+stores in it, and what an impact loses is the integrator's numerical damping.
+Under implicit Euler at the usual steps that is nearly all of it, but under
+``integrator="bdf2"``, or with small steps, a body rebounds at most of its
+impact speed. ``contact_damping`` adds a viscous force against the motion of
+two surfaces in contact along their normal, through libuipc-warp's
+``ContactDamping``:
+
+- ``None`` (the default): no damping, the barrier's and friction's forces only.
+- A number :math:`c` [N s/m]: every pair in contact takes the force
+  :math:`-c\, v_n \mathbf n`, :math:`v_n` the pair's velocity along its
+  normal :math:`\mathbf n` over the step.
+- ``"material"``: Newton's contact damping coefficients, combined as
+  :class:`~newton.solvers.SolverVBD` combines them: the mean of the two
+  shapes' :attr:`~newton.Model.shape_material_kd` for a pair of shapes, the
+  mean of :attr:`~newton.Model.soft_contact_kd` and the shape's for a particle
+  and a shape, and ``soft_contact_kd`` for two particles (the vertices of cloth
+  and tetrahedra are particles). Off by default because Newton's default
+  ``kd`` is 100 N s/m on every shape.
+
+The damping acts on the pairs in contact at the step's start, with their
+normals and closest points taken there and kept through the step, as friction
+takes them (also where friction is 0): a pair that comes into contact during a
+step is damped from the next step, and a step from a new state, which discards
+the friction of its contacts, has no damping either. It acts while a pair
+closes and while it opens (SolverSemiImplicit damps a contact only while it
+closes, and SolverVBD does so for rigid contacts by default), and it is zero at
+rest, so a body settles where it settles without it. It is the gradient of a
+dissipation potential that the step's energy holds beside the barrier, so the
+step stays a minimization and its convergence test does not change.
+
+What it gives: it lowers the rebound the integrator gives without it, the more
+the slower the impact. A pair of libuipc's barrier is a stiff spring, and an
+impact that takes many steps inside its range loses about
+:math:`1.75\, c\, \delta / (m v_0)` of its rebound (:math:`\delta` the depth
+at which the barrier holds the impact's energy, :math:`m` the mass behind the
+pair, :math:`v_0` the impact speed); an impact over in one or two steps keeps
+:math:`1 / (1 + c\, \Delta t / m)` of its rebound under implicit Euler, and
+more under BDF2. So the rebound depends on the impact speed: this is no
+coefficient of restitution, and :attr:`~newton.Model.shape_material_restitution`
+stays unread. Every contact term is damped, as Newton's solvers damp every
+contact point: a box resting on the ground plane through its four corners is
+damped with :math:`4c`, and one resting on a mesh through more terms, more.
+
+``"material"`` reads the coefficients when the solve is built:
+:meth:`~newton.solvers.SolverIPC.notify_model_changed` with
+``SHAPE_PROPERTIES`` or ``MODEL_PROPERTIES`` builds the solve again when they
+have changed, as it does for the friction coefficients. AL-IPC
+(``contact_constitution="al-ipc"``) refuses any value but ``None``
+(:class:`NotImplementedError`), and a value that is not ``None``,
+``"material"`` or a finite number not below 0 raises :class:`ValueError`.
+The damping's force is part of the friction rows of ``CONTACT_F`` (see
+:ref:`ipc-contact-output`).
 
 A collision mesh with ``Mesh.enable_surface_velocity`` is a surface whose
 material moves along it, such as a conveyor belt or a tank tread. The velocity

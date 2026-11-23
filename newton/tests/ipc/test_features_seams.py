@@ -291,7 +291,7 @@ def test_moved_refusals_keep_their_messages(test, device):
     free joints (joint_terms), D6 joints of no libuipc joint and distance joints with a range (universal), the
     armature, drives and target mode of free joints, the friction, armature, damping and limits of D6 joints that
     become ball joints and the limits of ball joints (ball), and springs and attachments with a negative damping
-    (damping). (contact_damping's is in test_contact_damping_takes_none_only.)"""
+    (damping)."""
     for name, contents, message in _MOVED:
         with test.subTest(name):
             test.assertEqual(_refusal(test, _model(device, *contents)), message)
@@ -382,7 +382,7 @@ _ORDER = (
         {},
         "particle-body attachment 1 has damping -2.0;",
     ),
-    ("the model before contact_damping", (_rod(),), {"contact_damping": 1.0}, "joint 0 is a ROD joint;"),
+    ("the model before contact_damping", (_rod(),), {"contact_damping": -1.0}, "joint 0 is a ROD joint;"),
 )
 
 
@@ -396,10 +396,10 @@ def test_refusals_keep_their_order(test, device):
         with test.subTest(name):
             message = _refusal(test, _model(device, *contents), **options)
             test.assertTrue(message.startswith(f"SolverIPC: {start}"), message)
-    # contact_damping is refused among the checks of the options, after the choices
+    # a contact_damping the module refuses is refused among the checks of the options, after the choices
     model = _model(device, _revolute())
     with test.assertRaisesRegex(ValueError, "integrator must be one of"):
-        newton.solvers.SolverIPC(model, integrator="bdf3", contact_damping=1.0)
+        newton.solvers.SolverIPC(model, integrator="bdf3", contact_damping=-1.0)
 
 
 def test_refusals_at_notify(test, device):
@@ -747,25 +747,6 @@ def _falling_box(device):
     return builder.finalize(device=device)
 
 
-def test_contact_damping_takes_none_only(test, device):
-    """contact_damping takes None, its default, which adds no damping: the solver is built and steps; any other value,
-    0 among them, raises NotImplementedError naming it, since the solver's contact has no damping term."""
-    model = _falling_box(device)
-    solver = newton.solvers.SolverIPC(model, contact_damping=None)
-    s0, s1 = model.state(), model.state()
-    solver.step(s0, s1, None, None, 0.01)
-    test.assertLess(float(s1.body_q.numpy()[0, 2]), 0.5)
-    for value in (1.0, 0.0, "material"):
-        with test.subTest(value=value):
-            with test.assertRaises(NotImplementedError) as caught:
-                newton.solvers.SolverIPC(model, contact_damping=value)
-            test.assertEqual(
-                str(caught.exception),
-                f"SolverIPC: contact_damping={value!r} is not offered yet: the solver's contact has no damping term. "
-                "Leave contact_damping at None, its default.",
-            )
-
-
 devices = get_cuda_test_devices()
 
 
@@ -786,7 +767,6 @@ for name, func in (
     ),
     ("test_observables_module_allocates_for_every_container", test_observables_module_allocates_for_every_container),
     ("test_prepare_reads_the_steps_observables", test_prepare_reads_the_steps_observables),
-    ("test_contact_damping_takes_none_only", test_contact_damping_takes_none_only),
 ):
     add_function_test(TestSolverIPCFeatureSeams, name, func, devices=devices)
 
