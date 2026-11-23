@@ -192,8 +192,7 @@ def test_zero_length_springs_oscillate_as_implicit_euler(test, device):
 
 def test_attachment_changes(test, device):
     """notify_model_changed(CONSTRAINT_PROPERTIES): a new stiffness is taken at the next step without building the
-    solve again, damping is refused, and a new body point builds the solve again; a particle attached on its body's
-    surface starts in contact with it, which the start check refuses."""
+    solve again, damping is refused, and a new body point builds the solve again."""
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     b = _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
     builder.add_particle(pos=wp.vec3(0.0, 0.0, 0.8), vel=wp.vec3(0.0, 0.0, 0.0), mass=0.01, radius=0.001)
@@ -215,12 +214,6 @@ def test_attachment_changes(test, device):
     model.attachment_particle_body_body_point.assign(np.array([[0.0, 0.0, -0.19]], np.float32))
     solver.notify_model_changed(newton.ModelFlags.CONSTRAINT_PROPERTIES)
     test.assertIsNot(solver._engine, engine)
-    touching = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
-    b = _box_body(touching, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
-    touching.add_particle(pos=wp.vec3(0.0, 0.0, 0.9), vel=wp.vec3(0.0, 0.0, 0.0), mass=0.01, radius=0.001)
-    touching.add_attachment_particle_body(0, b, body_point=(0.0, 0.0, -0.1))
-    with test.assertRaisesRegex(ValueError, "body 0 and particle 0 start 2.2.*e-08 m apart"):
-        newton.solvers.SolverIPC(touching.finalize(device=device))
 
 
 def test_no_stitches_without_attachments(test, device):
@@ -255,6 +248,63 @@ for name, func in (
     ("test_no_stitches_without_attachments", test_no_stitches_without_attachments),
 ):
     add_function_test(TestSolverIPCAttachments, name, func, devices=devices)
+
+
+def _particles_on_a_box(device, worlds=1):
+    """A 0.1 m box of 1 kg 1 mm above the ground, particle 0 attached at the centre of its top face (stiffness 1e4) and
+    particle 1, free, 5 mm above that face 3 cm from the centre, both of radius 1 mm and 10 g; ``worlds`` copies of it,
+    each in a world of its own. Returns the model."""
+    builder = newton.ModelBuilder()
+    box = _box_body(builder, (0.0, 0.0, 0.051), (0.05, 0.05, 0.05))
+    builder.add_particle(pos=wp.vec3(0.0, 0.0, 0.101), vel=wp.vec3(0.0, 0.0, 0.0), mass=0.01, radius=1.0e-3)
+    builder.add_particle(pos=wp.vec3(0.03, 0.0, 0.107), vel=wp.vec3(0.0, 0.0, 0.0), mass=0.01, radius=1.0e-3)
+    builder.add_attachment_particle_body(0, box, body_point=(0.0, 0.0, 0.05), stiffness=1.0e4)
+    if worlds == 1:
+        builder.add_ground_plane()
+        return builder.finalize(device=device)
+    scene = newton.ModelBuilder()
+    scene.add_ground_plane()
+    scene.replicate(builder, worlds)
+    return scene.finalize(device=device)
+
+
+def test_attached_particle_skips_its_body(test, device):
+    """A particle attached to a body does not collide with it: one attached at a point of the body's surface starts
+    in contact with it, which the barrier refuses. Particle 0, attached at the centre of a box's top face, takes a
+    contact element that collides with what a free particle's does but with that box; the free particle 1 still
+    collides with the box and lands on it, and particle 0 holds its point through 100 steps of 0.01 s (within 1e-4 m;
+    its weight over the stiffness is 1e-5 m) with no failed step. In two replicated worlds the attached particles share
+    one element, which the free ones do not."""
+    model = _particles_on_a_box(device)
+    solver = newton.solvers.SolverIPC(model)
+    e = solver._enabled
+    box_shape = int(model.body_shapes[0][0])
+    attached, free = (int(solver._cids[k]) for k in (0, 1))
+    box = int(solver._cids[solver._vertex_shape == box_shape][0])
+    test.assertNotEqual(attached, free)
+    test.assertFalse(e[attached, box])
+    test.assertTrue(e[free, box] and e[attached, free] and e[attached, attached])
+    test.assertTrue(e[attached, solver._plane_cids[0]] and e[free, solver._plane_cids[0]])
+    s0, s1 = model.state(), model.state()
+    for _ in range(100):
+        solver.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+    q, top = s0.particle_q.numpy(), s0.body_q.numpy()[0, :3] + (0.0, 0.0, 0.05)
+    np.testing.assert_allclose(q[0], top, rtol=0.0, atol=1.0e-4)
+    test.assertGreater(q[1, 2] - top[2], 1.0e-3)  # on the box: its radius, and the barrier's gap
+    test.assertLess(q[1, 2] - top[2], 1.0e-3 + 0.01)
+    replicated = newton.solvers.SolverIPC(_particles_on_a_box(device, worlds=2))
+    test.assertEqual(int(replicated._cids[0]), int(replicated._cids[2]))
+    test.assertNotEqual(int(replicated._cids[0]), int(replicated._cids[1]))
+
+
+@requires("uipc_warp")
+class TestSolverIPCAttachedContact(unittest.TestCase):
+    """A particle attached to a body does not collide with that body."""
+
+
+for name, func in (("test_attached_particle_skips_its_body", test_attached_particle_skips_its_body),):
+    add_function_test(TestSolverIPCAttachedContact, name, func, devices=devices)
 
 
 if __name__ == "__main__":

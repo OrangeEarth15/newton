@@ -80,6 +80,32 @@ def _filter_classes(world: np.ndarray, filters: np.ndarray, ns: int) -> np.ndarr
     return own
 
 
+def _attachment_keys(model: Model, by_world: bool) -> tuple[np.ndarray, np.ndarray, dict[int, tuple]]:
+    """For the particle-body attachments (:ref:`ipc-attachments`): which bodies particles are attached to, a key for
+    every body, and for every attached particle the sorted keys of its bodies. A key is the body's index, or with
+    ``by_world`` (several worlds, which subscenes keep apart) its offset in its world (a global body: ``-1 - index``),
+    so that the copies of a body in replicated worlds share it, as ``_filter_classes`` keys shapes."""
+    attached = np.zeros(model.body_count, bool)
+    body_key = np.zeros(model.body_count, np.int64)
+    if model.attachment_particle_body_count == 0:
+        return attached, body_key, {}
+    bodies = model.attachment_particle_body_body.numpy().astype(np.int64)
+    particles = model.attachment_particle_body_particle.numpy().astype(np.int64)
+    key = np.arange(model.body_count, dtype=np.int64)
+    if by_world:
+        world = model.body_world.numpy().astype(np.int64)
+        local = world >= 0
+        start = np.full(max(int(world.max(initial=-1)) + 1, 1), model.body_count, np.int64)
+        np.minimum.at(start, world[local], np.flatnonzero(local))
+        key = np.where(local, key - start[np.maximum(world, 0)], -1 - key)
+    attached[bodies] = True
+    body_key[bodies] = key[bodies]
+    of_particle: dict[int, set] = {}
+    for p, b in zip(particles.tolist(), bodies.tolist(), strict=True):
+        of_particle.setdefault(p, set()).add(int(key[b]))
+    return attached, body_key, {p: tuple(sorted(k)) for p, k in of_particle.items()}
+
+
 def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = False) -> _ContactElements:
     """The contact elements of a model's shapes and particles and the models of their pairs, checked against
     :attr:`Model.shape_contact_pairs`.
@@ -96,7 +122,12 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
     view with proxies (:ref:`ipc-coupling`) a shape's part joins the signature (``_proxy_roles``): the pairs of a shape
     on a proxy body with another such shape or with a static shape or one on a body of inverse mass 0 are disabled, and
     so are those of proxy particles, which take elements of their own (``Q_free``, ``Q_surf``), with those shapes and
-    among themselves; the set compared leaves those shape pairs out too. Raises ``NotImplementedError`` when the shape
+    among themselves; the set compared leaves those shape pairs out too. A particle attached to a body
+    (:ref:`ipc-attachments`) does not collide with that body: the shapes of a body that particles are attached to take
+    the body's key in their signature (``_attachment_keys``), and the attached particles take elements of their own, one
+    for each element they would have and set of bodies they are attached to, which collide with what that element
+    collides with but those bodies' shapes. libuipc lets a primitive collide only where every pair of its vertices'
+    elements does, so neither do the edges and triangles that hold such a particle. Raises ``NotImplementedError`` when the shape
     pairs the elements enable on different bodies are not exactly that set (a pair array assigned to the model; a
     coupled solver's view assigns it this set). Only the triangles and tetrahedra the solver simulates
     (``_own_elements``) make vertices of cloth and tetrahedra. The engine tests the elements' table and the subscenes'
@@ -105,6 +136,7 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
     ns, n_particles = model.shape_count, model.particle_count
     shape_element = np.full(ns, -1, np.int64)
     classes = 0
+    body_attached, body_key, attached_to = _attachment_keys(model, worlds is not None)
     proxy_particle = _proxy_particles(model)
     proxies = bool(proxy_particle.any() or _proxy_bodies(model).any())
     if ns:
@@ -143,6 +175,10 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
         if proxies:  # the shape's part in a coupled solver's proxy contact
             role = _proxy_roles(model, body)
             columns.append(role)
+        if attached_to:  # whether particles are attached to the shape's body, and the body's key
+            shape_attached = np.where(body >= 0, body_attached[np.maximum(body, 0)], False)
+            shape_key = np.where(shape_attached, body_key[np.maximum(body, 0)], 0)
+            columns += [shape_attached.astype(np.int64), shape_key]
         signature = np.stack(columns, axis=1)[colliding]
         _, first, inverse = np.unique(signature, axis=0, return_index=True, return_inverse=True)
         order = np.argsort(first)  # classes numbered in the order of their first shapes
@@ -228,6 +264,27 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
                 for other in (p_free, p_surf):
                     enabled[q, other] = enabled[other, q] = enabled[p, other]
                     mu[q, other] = mu[other, q] = model.particle_mu
+        if attached_to:
+            # an attached particle: an element for each element it would have and set of bodies it is attached to,
+            # which collides as that element does but with those bodies' shapes (a particle that collides with nothing
+            # keeps its element)
+            kinds: dict[tuple, int] = {}
+            base_of = []
+            for particle, keys in sorted(attached_to.items()):
+                base = int(particle_element[particle])
+                if not enabled[base].any():
+                    continue
+                if (base, keys) not in kinds:
+                    kinds[(base, keys)] = count + len(base_of)
+                    base_of.append(base)
+                particle_element[particle] = kinds[(base, keys)]
+            if base_of:
+                of = np.concatenate([np.arange(count), base_of])
+                enabled, mu = enabled[np.ix_(of, of)], mu[np.ix_(of, of)]
+                for (_, keys), element in kinds.items():
+                    if classes:
+                        held = 1 + np.flatnonzero(shape_attached[rep] & np.isin(shape_key[rep], keys))
+                        enabled[element, held] = enabled[held, element] = False
     return _ContactElements(shape_element, particle_element, on_mesh, enabled, mu)
 
 

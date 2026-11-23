@@ -571,9 +571,14 @@ are read at every step: a captured step takes new values at its next replay. A
 spring of rest length 0 is the same stitch between its two particles, with
 ``spring_stiffness``. Damping is rejected: libuipc's stitch has none, and an
 implicit damping cannot be folded into it the way the joint drives fold theirs.
-An attachment does not change which pairs collide: an attached particle collides
-with its body as with any other, so a particle attached on the body's surface
-starts in contact (see :ref:`ipc-start`); place it a gap away.
+An attached particle does not collide with the body it is attached to, whether
+the attachment is enabled or not, so it may be attached at a point of the
+body's surface, where the barrier would refuse a particle that starts in
+contact (see :ref:`ipc-start`). libuipc lets a primitive collide only where
+every pair of its vertices' contact elements does, so neither do the edges and
+triangles of cloth or a soft body that hold such a particle. With every other
+body and shape it collides as before. Newton's other solvers keep that contact,
+which is harmless to them.
 
 .. _ipc-rigid-bodies:
 
