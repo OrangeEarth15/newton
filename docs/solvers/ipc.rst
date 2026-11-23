@@ -102,10 +102,10 @@ Refused content
 ---------------
 
 Not supported, and rejected when the solver is constructed:
-:class:`NotImplementedError` for a damping coefficient that is not finite or is
-negative and a damped bending edge without a positive ``edge_rest_length`` (see
-:ref:`ipc-damping`), springs of a negative rest length or stiffness or that join
-a particle to itself, mimic constraints, enabled MuJoCo
+:class:`NotImplementedError` for a damping, drag or lift coefficient that is
+not finite, a negative damping or drag, and a damped bending edge without a
+positive ``edge_rest_length`` (see :ref:`ipc-damping`), springs of a negative
+rest length or stiffness or that join a particle to itself, mimic constraints, enabled MuJoCo
 equality rows that no loop joint holds (see :ref:`ipc-joints`), tendons, muscles, body variants (:meth:`~newton.ModelBuilder.add_body_variants`:
 the solver triangulates the shapes when it builds the solve and finds its own
 contacts, so it cannot follow a variant row's shape), non-zero triangle or
@@ -143,7 +143,7 @@ particles set one to other than Newton's default (its contact has one friction
 coefficient and no restitution, and MJCF's default friction holds Newton's
 default torsional and rolling coefficients), ``shape_gap`` (``d_hat`` is the
 solver's detection distance), the :attr:`~newton.Model.particle_radius` of cloth and tetrahedron
-vertices (see :ref:`ipc-contact`), ``spring_control``, drag, lift, the activations of a
+vertices (see :ref:`ipc-contact`), ``spring_control``, the activations of a
 :class:`~newton.Control` (an eager step refuses those other than 0, see
 :ref:`ipc-refused`), ``joint_target_mode``, ``joint_velocity_limit``, of
 which the solver warns once, with :class:`~newton.NewtonWarning` when it is
@@ -186,8 +186,8 @@ Newton's hinge energy is :math:`\tfrac{1}{2} k_e L_0 (\theta - \bar\theta)^2`
 :math:`\kappa L_0 (\theta - \bar\theta)^2 / \bar h` with
 :math:`\bar h = (A_1 + A_2) / (3 L_0)` from the two rest triangle areas, so each
 hinge gets :math:`\kappa = k_e \bar h / 2`. Particle masses are used as they
-are. The damping coefficients ``tri_kd`` and ``edge_kd`` act as :ref:`ipc-damping`
-describes; drag and lift are not read.
+are. The damping coefficients ``tri_kd`` and ``edge_kd``, drag and lift act as
+:ref:`ipc-damping` describes.
 
 Rest shapes are Newton's. A membrane triangle's rest edges are the inverse of
 its :attr:`~newton.Model.tri_poses` (the edges in the triangle's frame whose
@@ -283,9 +283,16 @@ its kind; :meth:`~newton.solvers.SolverIPC.notify_model_changed` builds the
 solve again for a changed spring, element or hinge damping (it compares those
 arrays) and for an attachment damping where the solve has none.
 
+Drag and lift, ``tri_materials[:, 3]`` (``tri_drag``) and ``[:, 4]``
+(``tri_lift``), are SemiImplicit's: explicit forces of every triangle from the
+positions and velocities of ``state_in``, which each of the triangle's free
+particles takes divided by its mass as an external acceleration of the step;
+fixed particles take none. Being explicit, the drag is stable while
+:math:`k_{drag} A |\bar v| \Delta t / m \lesssim 1`.
+
 A step with damping solves a slightly larger system and changes the rounding
-of its sums, also where every coefficient is 0; a model without damping steps
-as before.
+of its sums, also where every coefficient is 0; a model without damping, drag
+and lift steps as before.
 
 .. _ipc-contact:
 

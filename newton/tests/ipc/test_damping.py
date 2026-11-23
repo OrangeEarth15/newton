@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """SolverIPC's damping of springs, particle-body attachments, tetrahedra, triangles and bending edges, as Newton's VBD
-solver defines each coefficient (libuipc-warp's ``uipc_warp.ext.damping``; ``features/damping.py``).
+solver defines each coefficient (libuipc-warp's ``uipc_warp.ext.damping``), and its drag and lift, as SemiImplicit
+computes them (``features/damping.py``).
 
 Checked: two particles on a damped spring, a zero-length spring and an attachment to a static body against the
 recurrences of implicit Euler (and BDF2) with the model's coefficients; what the engine takes of a model with every kind
 (the terms, their inputs and coefficients, the hinges in libuipc's order, the elements left out where VBD evaluates no
 elasticity) and of one without damping (no group); coefficients read at every step, also between the replays of a
-captured step; the refusals.
+captured step; the refusals; drag and lift against SemiImplicit's at the same state.
 """
 
 import unittest
@@ -17,6 +18,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.semi_implicit.kernels_particle import eval_triangle
 from newton.tests.ipc._fixtures import _TIGHT
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
@@ -231,8 +233,8 @@ def test_coefficients_read_at_every_step(test, device):
 
 
 def test_refusals(test, device):
-    """A damping that is not finite or is negative raises NotImplementedError when the solver is built, naming the item;
-    so does a damped bending edge whose ``edge_rest_length`` is not positive."""
+    """A damping, drag or lift that is not finite, and a negative damping or drag, raise NotImplementedError when the
+    solver is built, naming the item; so does a damped bending edge whose ``edge_rest_length`` is not positive."""
 
     def refused(edit, message):
         model = _every_kind(device)
@@ -262,6 +264,9 @@ def test_refusals(test, device):
             "positive.")  # fmt: skip
     refused(column("tri_materials", 3, 2, -0.5), "SolverIPC: triangle 3 has the damping tri_kd -0.5; make it 0 or "
             "positive.")  # fmt: skip
+    refused(column("tri_materials", 0, 3, -2.0), "SolverIPC: triangle 0 has the drag tri_drag -2.0; make it 0 or "
+            "positive.")  # fmt: skip
+    refused(column("tri_materials", 0, 4, np.inf), "SolverIPC: triangle 0 has the lift tri_lift inf; make it finite.")
     edges = _every_kind(device).edge_indices.numpy().reshape(-1, 4)
     hinge = int(np.flatnonzero((edges[:, 0] >= 0) & (edges[:, 1] >= 0))[1])
     refused(column("edge_bending_properties", hinge, 1, -1.0),
@@ -271,9 +276,37 @@ def test_refusals(test, device):
             "a hinge scales with.")  # fmt: skip
 
 
+def test_drag_and_lift_as_semi_implicit(test, device):
+    """A free triangle of three particles with ``tri_drag`` 0.8 and ``tri_lift`` 0.6, moving at three velocities: the
+    external accelerations a step adds to its particles are SemiImplicit's ``-(f_drag + f_lift) / m`` at the step's
+    start, its ``eval_triangle`` with no elasticity; a fixed particle takes none."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    x = [(0.0, 0.0, 1.0), (0.1, 0.0, 1.0), (0.0, 0.1, 1.05)]
+    v = [(0.3, -0.2, -1.0), (0.1, 0.0, -1.2), (-0.2, 0.4, -0.8)]
+    for p, u, m in zip(x, v, (0.01, 0.02, 0.0), strict=True):
+        builder.add_particle(wp.vec3(*p), wp.vec3(*u), m, radius=0.001)
+    builder.add_triangle(0, 1, 2, tri_ke=0.0, tri_ka=0.0, tri_kd=0.0, tri_drag=0.8, tri_lift=0.6)
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model)
+    s0, s1 = model.state(), model.state()
+    solver.step(s0, s1, None, None, _DT)
+    acc = solver._forces.a.numpy()
+    f = wp.zeros(3, dtype=wp.vec3, device=device)
+    materials = wp.array(np.array([[0.0, 0.0, 0.0, 0.8, 0.6]], np.float32), dtype=float, device=device)
+    activation = wp.zeros(1, dtype=float, device=device)
+    indices = wp.array(np.array([[0, 1, 2]], np.int32), dtype=int, device=device)
+    wp.launch(eval_triangle, 1, [s0.particle_q, s0.particle_qd, indices, model.tri_poses, activation, materials], [f],
+              device=device)  # fmt: skip
+    f = f.numpy().astype(np.float64)
+    test.assertEqual(len(acc), 2)  # the fixed particle has no row
+    np.testing.assert_allclose(acc[0], f[0] / 0.01, rtol=1e-6)
+    np.testing.assert_allclose(acc[1], f[1] / 0.02, rtol=1e-6)
+    test.assertGreater(np.abs(f[:2]).max(), 1e-4)
+
+
 @requires("uipc_warp")
 class TestSolverIPCDamping(unittest.TestCase):
-    """The damping of springs, attachments and elements."""
+    """The damping of springs, attachments and elements, and drag and lift."""
 
 
 devices = get_cuda_test_devices()
@@ -283,6 +316,7 @@ for name, func in (
     ("test_what_the_engine_takes", test_what_the_engine_takes),
     ("test_coefficients_read_at_every_step", test_coefficients_read_at_every_step),
     ("test_refusals", test_refusals),
+    ("test_drag_and_lift_as_semi_implicit", test_drag_and_lift_as_semi_implicit),
 ):
     add_function_test(TestSolverIPCDamping, name, func, devices=devices)
 

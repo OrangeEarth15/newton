@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""The damping of springs, particle-body attachments, triangles, tetrahedra and bending edges.
+"""The damping of springs, particle-body attachments, triangles, tetrahedra and bending edges, and drag and lift.
 
 libuipc has no damping term; libuipc-warp's extension ``uipc_warp.ext.damping`` has one per rate that Newton's VBD
 solver damps, with VBD's coefficient (see :ref:`ipc-damping`):
@@ -15,7 +15,9 @@ solver damps, with VBD's coefficient (see :ref:`ipc-damping`):
 - ``tri_materials[:, 2]``: the rate of a cloth triangle's ``F^T F``, with its ``tri_poses`` and ``tri_areas``
   (``StrainRateDamping``), where ``tri_ke`` or ``tri_ka`` is positive;
 - ``edge_bending_properties[:, 1]``: the rate of a cloth hinge's dihedral angle, with its ``edge_rest_length``
-  (``HingeDamping``), where the hinge's stiffness and rest length are positive.
+  (``HingeDamping``), where the hinge's stiffness and rest length are positive;
+- ``tri_materials[:, 3]`` and ``[:, 4]``: drag and lift, which SolverIPC computes as SemiImplicit does, explicitly from
+  ``state_in``, and adds to the free particles' external accelerations.
 
 When the solve is built a kind of damping takes every term where its condition holds, if one of them has a coefficient
 above 0, and none otherwise. The coefficients are read on the device at every step. The hooks are those of
@@ -77,6 +79,50 @@ def _stitch_damping(
     out[r] = c
 
 
+@wp.kernel
+def _drag_and_lift(
+    x: wp.array[wp.vec3],
+    v: wp.array[wp.vec3],
+    tris: wp.array[wp.vec3i],
+    source: wp.array[wp.int32],
+    materials: wp.array2d[wp.float32],
+    force: wp.array[wp.vec3],
+):
+    """``f_drag + f_lift`` of every triangle at the state ``x``, ``v``, as SemiImplicit's ``eval_triangles`` computes
+    them: each of the triangle's vertices takes the negative."""
+    t = wp.tid()
+    tri = tris[t]
+    x0 = x[tri[0]]
+    n = wp.cross(x[tri[1]] - x0, x[tri[2]] - x0)
+    area = wp.length(n) * 0.5
+    n = wp.normalize(n)
+    vmid = (v[tri[0]] + v[tri[1]] + v[tri[2]]) * 0.3333
+    vdir = wp.normalize(vmid)
+    k_drag = materials[source[t], 3]
+    k_lift = materials[source[t], 4]
+    f_drag = vmid * (k_drag * area * wp.abs(wp.dot(n, vmid)))
+    f_lift = n * (k_lift * area * (wp.HALF_PI - wp.acos(wp.dot(n, vdir)))) * wp.dot(vmid, vmid)
+    force[t] = f_drag + f_lift
+
+
+@wp.kernel
+def _add_drag_and_lift(
+    first: wp.array[wp.int32],
+    tris: wp.array[wp.int32],
+    force: wp.array[wp.vec3],
+    particles: wp.array[wp.int32],
+    mass: wp.array[wp.float32],
+    acc: wp.array[wp.vec3d],
+):
+    """The acceleration of every free particle (row ``r`` of the external accelerations, particle ``particles[r]``) by
+    the drag and lift of its triangles ``tris[first[r] : first[r + 1]]``, summed in that order: ``-sum f / m``."""
+    r = wp.tid()
+    f = wp.vec3d()
+    for k in range(first[r], first[r + 1]):
+        f = f + wp.vec3d(force[tris[k]])
+    acc[r] = acc[r] - f / wp.float64(mass[particles[r]])
+
+
 # ---------------------------------------------------------------- the terms of a solve
 @dataclass
 class _Terms:
@@ -91,13 +137,15 @@ class _Terms:
 
 @dataclass
 class _Plan:
-    """The damping of a solve (``solver._damping``): the terms of every kind, None for a kind without."""
+    """The damping of a solve (``solver._damping``): the terms of every kind (None for a kind without), and the drag
+    and lift."""
 
     springs: _Terms | None = None  # SpringDamping, inputs (edges,)
     stitches: _Terms | None = None  # VectorDamping, inputs (pairs,); rows: SolverIPC's stitch sources
     tets: _Terms | None = None  # StrainRateDamping, inputs (tets, Dm_inv, volume)
     tris: _Terms | None = None  # StrainRateDamping, inputs (tris, Dm_inv, area)
     hinges: _Terms | None = None  # HingeDamping, inputs (hinges, rest_length)
+    drag: dict | None = None  # _plan_drag
 
 
 def _terms(rows: np.ndarray, device, *inputs) -> _Terms:
@@ -135,10 +183,10 @@ def _damped(rows: np.ndarray, eligible: np.ndarray, coefficients: np.ndarray) ->
 
 # ---------------------------------------------------------------- hooks
 def check(model: Model, options: FeatureOptions, at: str) -> None:
-    """``NotImplementedError`` for a damping coefficient that is not finite or is negative, which would make a step add
-    energy: the springs' at ``"springs"`` and the particle-body attachments' at ``"attachments"``, before their other
-    checks, and the elements' with the last checks of the model (``"shapes"``), where a damped hinge also needs a positive
-    ``edge_rest_length``."""
+    """``NotImplementedError`` for a damping, drag or lift coefficient that is not finite, and for a damping or drag
+    coefficient that is negative, which would make a step add energy: the springs' at ``"springs"`` and the particle-body
+    attachments' at ``"attachments"``, before their other checks, and the elements' with the last checks of the model
+    (``"shapes"``), where a damped hinge also needs a positive ``edge_rest_length``."""
     if at == "springs" and model.spring_count:
         _check_values(model.spring_damping.numpy(), _own_elements(model)[2], "spring {k} has spring_damping")
     elif at == "attachments" and model.attachment_particle_body_count:
@@ -149,7 +197,10 @@ def check(model: Model, options: FeatureOptions, at: str) -> None:
         if model.tet_count:
             _check_values(model.tet_materials.numpy()[:, 2], own_tets, "tetrahedron {k} has the damping k_damp")
         if model.tri_count:
-            _check_values(model.tri_materials.numpy()[:, 2], own_tris, "triangle {k} has the damping tri_kd")
+            materials = model.tri_materials.numpy()
+            _check_values(materials[:, 2], own_tris, "triangle {k} has the damping tri_kd")
+            _check_values(materials[:, 3], own_tris, "triangle {k} has the drag tri_drag")
+            _check_values(materials[:, 4], own_tris, "triangle {k} has the lift tri_lift", signed=True)
         if model.edge_count:
             properties = model.edge_bending_properties.numpy()
             hinge = np.zeros(model.edge_count, bool)
@@ -166,13 +217,14 @@ def check(model: Model, options: FeatureOptions, at: str) -> None:
                 )
 
 
-def _check_values(values: np.ndarray, mine: np.ndarray, what: str) -> None:
-    """``NotImplementedError`` for the first of ``values`` among ``mine`` that is not finite or is negative, named by
-    ``what`` (a format of ``k``, its index)."""
-    bad = np.flatnonzero(mine & ~(np.isfinite(values) & (values >= 0.0)))
+def _check_values(values: np.ndarray, mine: np.ndarray, what: str, signed: bool = False) -> None:
+    """``NotImplementedError`` for the first of ``values`` among ``mine`` that is not finite, or negative unless
+    ``signed``, named by ``what`` (a format of ``k``, its index)."""
+    bad = np.flatnonzero(mine & ~(np.isfinite(values) & (signed | (values >= 0.0))))
     if len(bad):
         k = int(bad[0])
-        raise NotImplementedError(f"SolverIPC: {what.format(k=k)} {float(values[k])!r}; make it 0 or positive.")
+        rule = "finite" if signed else "0 or positive"
+        raise NotImplementedError(f"SolverIPC: {what.format(k=k)} {float(values[k])!r}; make it {rule}.")
 
 
 def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
@@ -185,7 +237,7 @@ def build(solver: SolverIPC, scene) -> None:
     stitches, tetrahedra and cloth, whose groups ``engine_inputs`` makes for every engine."""
     model, device = solver.model, solver.model.device
     plan = _Plan()
-    _, own_tets, own_springs = _own_elements(model)
+    own_tris, own_tets, own_springs = _own_elements(model)
     if model.spring_count:
         rest = model.spring_rest_length.numpy()
         rows = _damped(np.arange(model.spring_count), own_springs & (rest > 0.0), model.spring_damping.numpy())
@@ -229,6 +281,7 @@ def build(solver: SolverIPC, scene) -> None:
             # Newton's bending edge (o0, o1, v1, v2) is libuipc's hinge (o0, v1, v2, o1)
             stencils = model.edge_indices.numpy().reshape(-1, 4).astype(np.int64)[rows][:, [0, 2, 3, 1]]
             plan.hinges = _terms(rows, device, stencils, model.edge_rest_length.numpy().astype(np.float64)[rows])
+    plan.drag = _plan_drag(solver, own_tris)
     solver._damping = plan
 
 
@@ -243,6 +296,35 @@ def _stitch_pairs(solver: SolverIPC, scene) -> np.ndarray:
     if len(solver._zero_springs):
         pairs.append(model.spring_indices.numpy().reshape(-1, 2).astype(np.int64)[solver._zero_springs])
     return np.concatenate(pairs).astype(np.int64)
+
+
+def _plan_drag(solver: SolverIPC, own_tris: np.ndarray) -> dict | None:
+    """The triangles with drag or lift among the solver's own, and the free particles' triangles among them, for the
+    rows of the external accelerations (one per free particle, in order): None where there are none."""
+    model = solver.model
+    if model.tri_count == 0:
+        return None
+    materials = model.tri_materials.numpy()
+    rows = np.flatnonzero(own_tris & ((materials[:, 3] != 0.0) | (materials[:, 4] != 0.0)))
+    free = np.flatnonzero(~solver._fixed_particle)  # the rows of SolverIPC's external accelerations
+    if not (len(rows) and len(free)):
+        return None
+    tris = model.tri_indices.numpy().reshape(-1, 3).astype(np.int64)[rows]
+    row_of = np.full(model.particle_count, -1, np.int64)
+    row_of[free] = np.arange(len(free))
+    corner = row_of[tris.ravel()]
+    owner, tri = corner[corner >= 0], np.repeat(np.arange(len(rows)), 3)[corner >= 0]
+    order = np.lexsort((tri, owner))
+    device = model.device
+    return {
+        "tris": wp.array(tris.astype(np.int32), dtype=wp.vec3i, device=device),
+        "source": wp.array(rows.astype(np.int32), dtype=wp.int32, device=device),
+        "force": wp.zeros(len(rows), dtype=wp.vec3, device=device),
+        "first": wp.array(
+            np.searchsorted(owner[order], np.arange(len(free) + 1)).astype(np.int32), dtype=wp.int32, device=device
+        ),
+        "of_particle": wp.array(tri[order].astype(np.int32), dtype=wp.int32, device=device),
+    }
 
 
 def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
@@ -295,9 +377,19 @@ def _write_coefficients(solver: SolverIPC) -> None:
 
 
 def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> None:
-    """The step's damping coefficients from the model."""
-    if getattr(solver, "_damping", None) is not None:
-        _write_coefficients(solver)
+    """The step's damping coefficients from the model, and the drag and lift of ``state_in`` added to the free
+    particles' external accelerations, which the solver wrote from ``particle_f`` before."""
+    plan = getattr(solver, "_damping", None)
+    if plan is None:
+        return
+    _write_coefficients(solver)
+    drag = plan.drag
+    if drag is not None:
+        model, device = solver.model, solver.model.device
+        inputs = [state_in.particle_q, state_in.particle_qd, drag["tris"], drag["source"], model.tri_materials]
+        wp.launch(_drag_and_lift, drag["force"].shape[0], inputs, [drag["force"]], device=device)
+        inputs = [drag["first"], drag["of_particle"], drag["force"], solver._free_particles, model.particle_mass]
+        wp.launch(_add_drag_and_lift, solver._n_free, inputs, [solver._forces.a], device=device)
 
 
 def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observables | None) -> None:
@@ -306,8 +398,8 @@ def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observab
 
 def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
     """Whether an attachment's damping appeared that the solve has no terms for (``CONSTRAINT_PROPERTIES``, which
-    builds the solve again only for new bodies, particles or points). A change of the springs' or the elements' damping
-    already builds the solve again: ``notify_model_changed`` compares their arrays."""
+    builds the solve again only for new bodies, particles or points). A change of the springs' or the elements' damping,
+    drag or lift already builds the solve again: ``notify_model_changed`` compares their arrays."""
     from newton import ModelFlags  # noqa: PLC0415
 
     model = solver.model

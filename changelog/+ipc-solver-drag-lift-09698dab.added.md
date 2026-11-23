@@ -1,0 +1,1 @@
+Apply ``tri_drag`` and ``tri_lift`` in ``SolverIPC`` as SemiImplicit computes them, explicitly from the positions and velocities at the start of the step; they were ignored before. A drag or lift that is not finite, or a negative drag, raises ``NotImplementedError``.
