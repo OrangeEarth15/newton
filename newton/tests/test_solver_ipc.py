@@ -4510,8 +4510,10 @@ def test_bdf2_drives(test, device):
 def test_al_ipc_rests_at_d_hat(test, device):
     """With contact_constitution="al-ipc" a box dropped onto the ground comes to rest with its gap at d_hat, the
     distance AL-IPC's constraint keeps, to 1%, and at rest; the barrier keeps it inside d_hat. (libuipc's AL-IPC does
-    not keep a stack of two such boxes: on its own CUDA backend, as here, the upper one slides off within two
-    seconds.) A free particle and a static box, which AL-IPC would not constrain, are refused."""
+    not keep a stack of two such boxes at this d_hat and dt: a pair that opens leaves the active set three outer
+    updates later and joins again at the surface, where its constraint pushes it out to d_hat; on libuipc's own CUDA
+    backend, as here, the upper box slides off within two seconds.) A free particle and a static box, which AL-IPC
+    would not constrain, are refused."""
     d_hat = 0.005
     for constitution in ("ipc", "al-ipc"):
         with test.subTest(contact_constitution=constitution):
@@ -4543,6 +4545,60 @@ def test_al_ipc_rests_at_d_hat(test, device):
     builder.add_shape_box(-1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.05), wp.quat_identity()), hx=0.1, hy=0.1, hz=0.05)
     with test.assertRaisesRegex(NotImplementedError, "static shapes"):
         newton.solvers.SolverIPC(builder.finalize(device=device), contact_constitution="al-ipc")
+
+
+def test_al_ipc_sweeps_kinematic_bodies(test, device):
+    """Under contact_constitution="al-ipc" a kinematic body moved between steps is swept from where the last step left
+    it to its state_in pose (AL-IPC's moving boundaries; libuipc's frame takes the written pose, and nothing the body
+    moves into collides with it): a box moved at 1.2 m/s pushes a free sphere it reaches, the two apart after every
+    step. The first step, and the step after reset(), place it at its pose instead: put across the sphere there, it
+    does not touch it, where the same move swept pushes the sphere away."""
+    dt, speed = 1.0 / 240.0, 1.2
+
+    def scene():
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        kinematic = builder.add_body(
+            xform=wp.transform(wp.vec3(-0.3, 0.0, 0.0), wp.quat_identity()), mass=1.0, is_kinematic=True
+        )
+        builder.add_shape_box(kinematic, hx=0.1, hy=0.1, hz=0.1)
+        probe = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()), mass=1.0)
+        builder.add_shape_sphere(probe, radius=0.05)
+        model = builder.finalize(device=device)
+        return model, newton.solvers.SolverIPC(model, contact_constitution="al-ipc"), kinematic, probe
+
+    def place(state, body, x, vx=0.0):
+        q, qd = state.body_q.numpy(), state.body_qd.numpy()
+        q[body, 0], qd[body, :3] = x, (vx, 0.0, 0.0)
+        state.body_q.assign(q)
+        state.body_qd.assign(qd)
+
+    model, solver, kinematic, probe = scene()
+    s0, s1 = model.state(), model.state()
+    gaps = []
+    for k in range(60):
+        place(s0, kinematic, -0.3 + speed * dt * (k + 1), speed)
+        solver.step(s0, s1, None, None, dt)
+        s0, s1 = s1, s0
+        q = s0.body_q.numpy()
+        gaps.append(q[probe, 0] - 0.05 - (q[kinematic, 0] + 0.1))
+    test.assertGreater(min(gaps), -1e-6)
+    test.assertGreater(float(s0.body_q.numpy()[probe, 0]), 0.1)
+    test.assertGreater(float(s0.body_qd.numpy()[probe, 0]), speed)
+    # placements: the first step, and the step after reset(); a move without one is swept
+    model, solver, kinematic, probe = scene()
+    s0, s1 = model.state(), model.state()
+    start = s0.body_q.numpy()[probe].copy()
+    for x, reset, swept in ((0.3, False, False), (-0.3, True, False), (0.3, False, True)):
+        if reset:
+            solver.reset(s0)
+        place(s0, kinematic, x)
+        solver.step(s0, s1, None, None, dt)
+        s0, s1 = s1, s0
+        moved = float(np.linalg.norm(s0.body_q.numpy()[probe, :3] - start[:3]))
+        if swept:
+            test.assertGreater(moved, 0.1)
+        else:
+            test.assertLess(moved, 1e-6)
 
 
 def test_al_ipc_status_and_new_masses(test, device):
@@ -7606,6 +7662,7 @@ for name, func in (
     ("test_bdf2_history_restarts_where_gravity_changes", test_bdf2_history_restarts_where_gravity_changes),
     ("test_bdf2_drives", test_bdf2_drives),
     ("test_al_ipc_rests_at_d_hat", test_al_ipc_rests_at_d_hat),
+    ("test_al_ipc_sweeps_kinematic_bodies", test_al_ipc_sweeps_kinematic_bodies),
     ("test_al_ipc_status_and_new_masses", test_al_ipc_status_and_new_masses),
     ("test_mas_matches_the_block_diagonal_preconditioner", test_mas_matches_the_block_diagonal_preconditioner),
 ):

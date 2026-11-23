@@ -285,6 +285,21 @@ def _store_bodies(
 
 
 @wp.kernel
+def _forget_kinematic_written(
+    kinematic: wp.array[wp.int32],
+    written_q: wp.array[wp.transform],
+    written_qd: wp.array[wp.spatial_vector],
+):
+    """AL-IPC's swept kinematic bodies: forget what the solver wrote for them, so that the next step loads their pose
+    from ``state_in`` again (one that contact held short of its pose goes on toward it)."""
+    b = wp.tid()
+    if kinematic[b] != 0:
+        nan = wp.nan
+        written_q[b] = wp.transform(wp.vec3(nan, nan, nan), wp.quat(nan, nan, nan, nan))
+        written_qd[b] = wp.spatial_vector(nan, nan, nan, nan, nan, nan)
+
+
+@wp.kernel
 def _aim_kinematic_bodies(
     bodies: wp.array[wp.int32],
     body_q: wp.array[wp.transform],
@@ -2958,7 +2973,9 @@ class SolverIPC(SolverBase, CouplingInterface):
     default body stiffness follows the rule of **Rigid bodies**.
 
     **AL-IPC contact.** ``contact_constitution="al-ipc"`` is libuipc's
-    augmented-Lagrangian contact (its ``contact/constitution``): each Newton
+    augmented-Lagrangian contact (its ``contact/constitution``; the method of
+    Zheng, Luo and Li, "Robust and Efficient Penetration-Free Elastodynamics
+    without Barriers"): each Newton
     iteration linearizes the constraint
     :math:`d \\ge \\hat d + \\text{thickness}` of the active contact pairs, with
     a penalty that follows the masses and multipliers that converge to the
@@ -2969,12 +2986,32 @@ class SolverIPC(SolverBase, CouplingInterface):
     smallest mass of its vertices: particles on no cloth or tetrahedron that
     collide are refused, and so are static mesh shapes, particles and bodies
     without mass that collide (Newton's static shapes have no mass; static
-    planes are taken). A pair joins the active set only when the motion of a
-    step sweeps into it: a kinematic body moved between steps pushes nothing,
-    and what moves into it collides with it. A fast impact runs past the
-    constraint and rebounds faster than it came, as in libuipc: a cube dropped
-    0.4 m onto the ground in steps of 1/1800 s leaves at 4.5 times its impact
-    speed. ``kappa`` is not used, and ``adaptive_kappa`` is refused. The step
+    planes are taken). A pair joins the active set only when a sweep finds its
+    two primitives touching, and the step that solves its constraint ends with
+    the gap at ``d_hat``: a body whose step began a gap :math:`g` from a
+    surface leaves it at about :math:`(\\hat d - g) / \\Delta t`, whatever its
+    speed of impact. This is the method's own (libuipc and the authors' code do
+    the same), and it gains energy where ``d_hat`` exceeds the distance a body
+    travels in a step: a cube dropped 0.4 m onto the ground in steps of
+    1/1800 s leaves at 4.4 times its impact speed of 2.8 m/s with ``d_hat``
+    1 cm, at 0.7 times with 1 mm, and in steps of 1/100 s at 0.34 times with
+    1 cm. libuipc's AL-IPC drops a pair from the active set three outer
+    updates after it opens (its default ``decay_factor`` 0.3), so a resting
+    contact that opens for a moment joins again at the surface and is pushed
+    out again: a stack of two 0.1 m boxes in steps of 1/100 s keeps rocking
+    with ``d_hat`` 5 mm or 2 mm, in most runs until its upper box falls off,
+    as on libuipc's own backend, where the paper's decay factor 0.9, which
+    this solver does not set, brought it to rest in most runs. Keep ``d_hat``
+    well below the distance a body moves in a step. A kinematic body moved
+    between steps is swept from where the last step left it to its pose in
+    ``state_in`` (the method's moving boundaries, which libuipc's frame lacks:
+    there nothing a kinematic body moves into collides with it): what it meets
+    joins the active set and is pushed, and one that contact holds back ends
+    the step short of its pose and goes on toward it in the next. The first
+    step after the solver is built, the step after a :meth:`reset` that
+    selects its world and the step after a failed one place it at its pose
+    instead, without a sweep.
+    ``kappa`` is not used, and ``adaptive_kappa`` is refused. The step
     ends on AL-IPC's own criterion, which has no Newton residual:
     ``SOLVER_RESIDUAL`` is not offered. A change of the bodies' masses
     (:meth:`notify_model_changed`) builds the solve again, since the penalty
@@ -3081,9 +3118,10 @@ class SolverIPC(SolverBase, CouplingInterface):
 
     **Kinematic bodies.** By default (``kinematic_motion="jump"``) a
     kinematic body is a fixed affine body whose pose the solver writes from
-    ``state_in`` before the step: the jump between two steps is not swept by
-    collision detection, so a jump larger than the room the barrier leaves
-    puts surfaces into each other, and friction never sees the motion (a
+    ``state_in`` before the step: under the barrier the jump between two steps
+    is not swept by collision detection, so a jump larger than the room the
+    barrier leaves puts surfaces into each other (under AL-IPC the step sweeps
+    it, see **AL-IPC contact**), and friction never sees the motion (a
     platform sliding under a box does not carry it). With
     ``kinematic_motion="aim"`` every kinematic body with colliding shapes is
     built as libuipc builds an animated body: an affine body that is an
@@ -3877,7 +3915,12 @@ class SolverIPC(SolverBase, CouplingInterface):
         )
         # a BDF2 history starts with an implicit Euler step: at the first step, and at every step from a state the
         # solver did not write (class docstring, **BDF2**)
-        self._options = uipc_warp.EngineOptions(bdf2_start="bdf1") if integrator == "bdf2" else None
+        # AL-IPC sweeps the moves of kinematic bodies from where the last step left them (class docstring, **AL-IPC**)
+        self._sweep = contact_constitution == "al-ipc"
+        options = {"bdf2_start": "bdf1"} if integrator == "bdf2" else {}
+        if self._sweep:
+            options["al_sweep_kinematic"] = True
+        self._options = uipc_warp.EngineOptions(**options) if options else None
         self._adaptive_kappa = bool(adaptive_kappa)
         self._thickness = float(thickness)
         self._cloth_strain_rate = float(cloth_strain_rate)
@@ -4001,7 +4044,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         # per subscene takes), the stitches (with the anchors and stitch_groups of the same release), the soft
         # transform constraint (with constraint_groups), the contact forces, the external accelerations, the bodies'
         # orthogonality stiffness, the redo of an overflowing step (with the documented engine members of the same
-        # release) and the frame start kept on the device for a coupler's restarts
+        # release), the frame start kept on the device for a coupler's restarts and AL-IPC's sweep of kinematic moves
         needed = (
             (uipc_warp.arrays, "write_frame_status"),
             (uipc_warp.arrays.ArrayScene, "contact_model"),
@@ -4020,11 +4063,13 @@ class SolverIPC(SolverBase, CouplingInterface):
             (uipc_warp.arrays, "orthogonality"),
             (uipc_warp.SimEngine, "redo_state"),
             (uipc_warp.SimEngine, "enable_frame_restart"),
+            (uipc_warp.SimEngine, "place_kinematic"),
         )
         # and the keywords of the newest calls: independent worlds, the scene's flag and the status of every world
         keywords = (
             ("ArrayScene(independent_subscenes=)", "independent_subscenes", uipc_warp.arrays.ArrayScene),
             ("write_frame_status(worlds=)", "worlds", uipc_warp.arrays.write_frame_status),
+            ("EngineOptions(al_sweep_kinematic=)", "al_sweep_kinematic", uipc_warp.EngineOptions),
         )
         missing = [f"{owner.__name__}.{name}" for owner, name in needed if not hasattr(owner, name)]
         missing += [call for call, keyword, owner in keywords if keyword not in inspect.signature(owner).parameters]
@@ -4732,6 +4777,8 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._body_q_written.assign(np.full((nb, 7), np.nan, np.float32))
             self._body_qd_written.assign(np.full((nb, 6), np.nan, np.float32))
             self._body_hold.zero_()  # the kinematic bodies moving toward their aims take state_in too
+            if self._sweep and self._engine is not None:  # and the swept ones are placed there, not swept
+                self._engine.place_kinematic()
         if self.model.joint_count:
             self._joint_q_written.fill_(np.nan)
 
@@ -6014,6 +6061,14 @@ class SolverIPC(SolverBase, CouplingInterface):
                 outputs=[body_q, body_qd, self._body_q_written, self._body_qd_written],
                 device=model.device,
             )
+            if self._sweep:
+                wp.launch(
+                    _forget_kinematic_written,
+                    model.body_count,
+                    inputs=[self._body_kinematic],
+                    outputs=[self._body_q_written, self._body_qd_written],
+                    device=model.device,
+                )
         if model.joint_count and state_out is not None and state_out.joint_q is not None:
             groups = self._joint_groups
             angle = self._no_joint_state if groups.revolute is None else groups.revolute.current
@@ -6514,6 +6569,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         if world_mask is None:
             self._engine.discard_friction()
             self._engine.restart_history()
+            if self._sweep:  # the next step places the kinematic bodies at their state_in poses, without a sweep
+                self._engine.place_kinematic()
             if self.model.body_count:
                 self._body_hold.zero_()
             return
@@ -6543,6 +6600,8 @@ class SolverIPC(SolverBase, CouplingInterface):
             )
         self._engine.discard_friction(where=self._selected)
         self._engine.restart_history(where=self._selected)
+        if self._sweep:
+            self._engine.place_kinematic(where=self._selected)
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
