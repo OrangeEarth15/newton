@@ -901,5 +901,81 @@ for name, func in (
     add_function_test(TestSolverIPCCoupling, name, func, devices=devices)
 
 
+def _thrown_proxy(device, proxy=True):
+    """A coupled solver's view built by hand: a 1 kg box (0.1 m), SolverIPC's proxy unless ``proxy`` is False, 2 mm
+    above a 32 kg box resting on the ground. Returns the view and the box."""
+    from newton.solvers.experimental.coupled import ModelView  # noqa: PLC0415
+
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    _box_body(builder, (0.0, 0.0, 0.1005), (0.2, 0.2, 0.1))
+    top = _box_body(builder, (0.02, 0.01, 0.2525), (0.05, 0.05, 0.05))
+    view = ModelView(builder.finalize(device=device), "ipc")
+    if proxy:
+        view.mark_proxy_bodies(wp.array([top], dtype=int, device=device))
+    return view, top
+
+
+def test_proxy_entry_takes_converged_steps(test, device):
+    """An entry with proxies takes converged steps unless told otherwise (newton_velocity_tol 5e-4 m/s,
+    newton_transrate_tol 1e-3 1/s, semi_implicit False), so that a proxy's feedback, the force of the step's contact
+    terms at its end, is the converged one: a proxy box thrown at 0.5 m/s onto a box, in steps of 1/60 s. From every
+    state of a converged run (newton_velocity_tol 1e-6) one step with the defaults gives the feedback of one converged
+    step within 1% of the impact's peak (2.5 times the converged force, the step of impact, under the defaults of an
+    entry without proxies). Without proxies the defaults are libuipc's, and given values are taken."""
+    view, top = _thrown_proxy(device)
+    dt, fields = 1.0 / 60.0, ("body_q", "body_qd")
+    reference = newton.solvers.SolverIPC(view, **_TIGHT)
+    s0, s1 = view.state(), view.state()
+    qd = s0.body_qd.numpy()
+    qd[top, 2] = -0.5
+    s0.body_qd.assign(qd)
+    states = []
+    for _ in range(10):
+        states.append([getattr(s0, f).numpy().copy() for f in fields])
+        reference.step(s0, s1, None, None, dt)
+        s0, s1 = s1, s0
+    proxy_of = wp.array([-1, 0], dtype=int, device=device)
+
+    def feedback(solver):
+        out, forces = wp.zeros(1, dtype=wp.spatial_vector, device=device), []
+        a, b = view.state(), view.state()
+        for snapshot in states:
+            for f, values in zip(fields, snapshot, strict=True):
+                getattr(a, f).assign(values)
+            solver.step(a, b, None, None, dt)
+            solver.coupling_harvest_proxy_wrenches(
+                proxy_of, out, body_qd_before=a.body_qd, state=a, state_out=b, contacts=None, dt=dt
+            )
+            forces.append(out.numpy()[0, :3].astype(np.float64))
+        return np.array(forces)
+
+    converged = feedback(newton.solvers.SolverIPC(view, **_TIGHT))
+    peak = np.linalg.norm(converged, axis=1).max()
+    test.assertGreater(peak, 5.0 * 9.81)  # an impact, several times the box's weight
+    solver = newton.solvers.SolverIPC(view)
+    np.testing.assert_allclose(feedback(solver), converged, rtol=0.0, atol=0.01 * peak)
+    config = solver._config
+    test.assertEqual(
+        (config.newton_velocity_tol, config.newton_transrate_tol, config.semi_implicit), (5e-4, 1e-3, False)
+    )
+    given = newton.solvers.SolverIPC(view, newton_velocity_tol=0.01, newton_transrate_tol=0.02, semi_implicit=True)
+    test.assertEqual(
+        (given._config.newton_velocity_tol, given._config.newton_transrate_tol, given._config.semi_implicit),
+        (0.01, 0.02, True),
+    )
+    plain = newton.solvers.SolverIPC(_thrown_proxy(device, proxy=False)[0])._config
+    test.assertEqual((plain.newton_velocity_tol, plain.newton_transrate_tol, plain.semi_implicit), (0.05, 0.1, True))
+
+
+@requires("uipc_warp")
+class TestSolverIPCProxyTolerances(unittest.TestCase):
+    """The Newton tolerances of an entry with proxies, whose feedback is as accurate as the step's convergence."""
+
+
+for name, func in (("test_proxy_entry_takes_converged_steps", test_proxy_entry_takes_converged_steps),):
+    add_function_test(TestSolverIPCProxyTolerances, name, func, devices=devices)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)

@@ -1046,11 +1046,19 @@ the end of the step, a wrench about its centre of mass for a body
 (``coupling_harvest_proxy_wrenches``,
 ``coupling_harvest_proxy_particle_forces``), as SolverVBD harvests it, rather
 than its change of momentum. The barrier's force is steep in the distance, so
-the feedback is as accurate as the step's convergence: give an entry with
-proxies converged steps (``semi_implicit=False`` and a ``newton_velocity_tol``
-of about 1e-4 m/s). At the default tolerances the step of an impact can end
-before the barrier has relaxed, with a force tens of times the change of
-momentum it caused. With ``SolverCoupledProxy``'s lagged transfer, the default,
+the feedback is as accurate as the step's convergence, and an entry with
+proxies takes converged steps unless told otherwise: ``newton_velocity_tol``
+5e-4 m/s, ``newton_transrate_tol`` 1e-3 1/s and ``semi_implicit=False``. These
+keep the feedback of an impact within 1% of the converged one, measured step by
+step in a box hitting a box and a cloth and a particle hitting a box, at 0.5 and
+2 m/s, in steps of 1/60 and 1/240 s. They take about twice the Newton
+iterations of the other defaults, under which (0.05 m/s with the semi-implicit
+exit) an impact step's feedback was up to 27 times the converged one; the
+semi-implicit exit alone left it up to 2.5 times the converged one at any
+tolerance. On cloth two converged solves of an impact can end in different
+nearby minima, whose feedback differs by up to 2.4% at one step whatever the
+tolerance. Pass the three arguments to take other values. With
+``SolverCoupledProxy``'s lagged transfer, the default,
 a proxy resting on this entry's content does not come to rest: the feedback of a
 contact this stiff reaches the source one step late and keeps the proxy
 bouncing, though its average holds the proxy up; the staggered transfer

@@ -129,6 +129,11 @@ _JOINT_STRENGTH_RATIO = 100.0
 # kinematic_strength_ratio
 _KAPPA = 1.0e9
 _KINEMATIC_STRENGTH_RATIO = 100.0
+# the Newton loop's defaults: libuipc's tolerances with its semi-implicit exit, and for an entry of a coupled solver
+# with proxies converged steps, at which the feedback of an impact stays within 1% of the converged one in the
+# measured scenes (docs/solvers/ipc.rst > "Coupling")
+_TOLERANCES = {"newton_velocity_tol": 0.05, "newton_transrate_tol": 0.1, "semi_implicit": True}
+_PROXY_TOLERANCES = {"newton_velocity_tol": 5.0e-4, "newton_transrate_tol": 1.0e-3, "semi_implicit": False}
 # AL-IPC's decay of the weight of a pair that has opened: the paper's 0.9 (Zheng, Luo and Li), under which a stack of
 # boxes comes to rest, where libuipc's default 0.3 drops the pair within three outer updates (docs/solvers/ipc.rst >
 # "AL-IPC contact")
@@ -364,13 +369,16 @@ class SolverIPC(SolverBase, CouplingInterface):
             [m]; free particles take their radius and shapes their margin
             (see :ref:`ipc-contact`).
         newton_max_iter: Maximum Newton iterations per step.
-        newton_velocity_tol: Newton convergence tolerance on ``max |dx| / dt`` [m/s].
+        newton_velocity_tol: Newton convergence tolerance on ``max |dx| / dt``
+            [m/s]. ``None`` takes 0.05, or 5e-4 for an entry of a coupled
+            solver with proxies (see :ref:`ipc-coupling`).
         newton_transrate_tol: Newton convergence tolerance on ``max |dA| / dt`` of
-            rigid bodies [1/s].
+            rigid bodies [1/s]. ``None`` takes 0.1, or 1e-3 with proxies.
         linear_tol_rate: Relative PCG tolerance on ``r^T M^-1 r``.
         line_search_max_iter: Maximum backtracking trials per Newton iteration.
         semi_implicit: Enable libuipc's semi-implicit early exit after
-            ``semi_implicit_k_min`` iterations of full feasible steps. Under
+            ``semi_implicit_k_min`` iterations of full feasible steps; ``None``
+            enables it but with proxies. Under
             ``contact_constitution="al-ipc"``, whose step has no Newton
             tolerance, it enables the delay of AL-IPC's progress weight
             instead: without contact a step takes ``semi_implicit_k_min``
@@ -529,11 +537,11 @@ class SolverIPC(SolverBase, CouplingInterface):
         d_hat: float | None = None,
         thickness: float = 0.0,
         newton_max_iter: int = 1024,
-        newton_velocity_tol: float = 0.05,
-        newton_transrate_tol: float = 0.1,
+        newton_velocity_tol: float | None = None,
+        newton_transrate_tol: float | None = None,
         linear_tol_rate: float = 1.0e-3,
         line_search_max_iter: int = 8,
-        semi_implicit: bool = True,
+        semi_implicit: bool | None = None,
         semi_implicit_k_min: int = 6,
         eps_velocity: float = 0.01,
         cloth_strain_rate: float = 100.0,
@@ -621,6 +629,15 @@ class SolverIPC(SolverBase, CouplingInterface):
         if body_kappa is not None and not (np.isfinite(body_kappa) and body_kappa > 0.0):
             raise ValueError(f"SolverIPC: body_kappa must be a finite positive stiffness, got {body_kappa}.")
         uipc_warp = self._import_uipc_warp()
+        # an entry of a coupled solver with proxies takes converged steps unless told otherwise: a proxy's feedback is
+        # the force of the step's contact terms at its end (docs/solvers/ipc.rst > "Coupling")
+        tolerances = _PROXY_TOLERANCES if _proxy_bodies(model).any() or _proxy_particles(model).any() else _TOLERANCES
+        if newton_velocity_tol is None:
+            newton_velocity_tol = tolerances["newton_velocity_tol"]
+        if newton_transrate_tol is None:
+            newton_transrate_tol = tolerances["newton_transrate_tol"]
+        if semi_implicit is None:
+            semi_implicit = tolerances["semi_implicit"]
         self._d_hat_given = d_hat is not None
         al = {"al_decay_factor": _AL_DECAY_FACTOR} if contact_constitution == "al-ipc" else {}
         self._config = uipc_warp.SimConfig(
