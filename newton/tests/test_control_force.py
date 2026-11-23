@@ -423,8 +423,9 @@ for device in devices:
             continue
         if solver_name == "ipc" and device.is_cpu:
             continue
-        # SolverIPC (an expected failure): the drives of the D6 joint of three angular axes are refused. libuipc's
-        # driving term acts on one hinge angle or one distance and cannot drive three angular axes
+        # SolverIPC (an expected failure): the drives of its D6 joint of three angular axes are refused, since SolverIPC
+        # drives a ball joint's rotation vector and not a D6 joint's angles about its axes ("Ball joints" in
+        # docs/solvers/ipc.rst)
         d6_target = test_d6_angular_target_is_equilibrium
         if solver_name == "ipc":
             d6_target = unittest.expectedFailure(functools.partial(test_d6_angular_target_is_equilibrium))

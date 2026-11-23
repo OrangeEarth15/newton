@@ -674,7 +674,8 @@ for device in devices:
             target_kd=500.0,
         )
 
-        if solver_name == "mujoco_cpu" or solver_name == "mujoco_warp":
+        # SolverIPC drives a ball joint's rotation vector toward that of the target quaternion, as SolverMuJoCo does
+        if solver_name in ("mujoco_cpu", "mujoco_warp", "ipc"):
             # The target quaternion must be converted to axis-angle before
             # being fed to MuJoCo position actuators on a ball joint.
             for axis_name, axis_angle, quat in (

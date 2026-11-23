@@ -204,11 +204,8 @@ def test_featherstone_ball_joint_damping_decays_velocity(test: TestJointDamping,
     test.assertLess(damped_final, damped_initial * 0.85)
 
 
-def test_steel_ball_joint_damping_matches_featherstone(test: TestJointDamping, device):
-    """Decay Steel ball-joint speed with joint damping, as SolverFeatherstone does."""
-
-    def solver_fn(model):
-        return newton.solvers.SolverSteel(model)
+def test_ball_joint_damping_matches_featherstone(test: TestJointDamping, device, solver_fn):
+    """Decay ball-joint speed with joint damping, as SolverFeatherstone does."""
 
     def featherstone_fn(model):
         return newton.solvers.SolverFeatherstone(model, angular_damping=0.0)
@@ -282,8 +279,9 @@ for device in devices:
     add_function_test(
         TestJointDamping,
         "test_steel_ball_joint_damping_matches_featherstone",
-        test_steel_ball_joint_damping_matches_featherstone,
+        test_ball_joint_damping_matches_featherstone,
         devices=[device],
+        solver_fn=newton.solvers.SolverSteel,
     )
     add_function_test(
         TestJointDamping,
@@ -300,6 +298,13 @@ for device in get_cuda_test_devices():
         devices=[device],
         solver_fn=requires("uipc_warp")(newton.solvers.SolverIPC),
         sync_joint_qd=False,
+    )
+    add_function_test(
+        TestJointDamping,
+        "test_ball_joint_damping_matches_featherstone_ipc",
+        test_ball_joint_damping_matches_featherstone,
+        devices=[device],
+        solver_fn=requires("uipc_warp")(newton.solvers.SolverIPC),
     )
     add_function_test(
         TestJointDamping,
