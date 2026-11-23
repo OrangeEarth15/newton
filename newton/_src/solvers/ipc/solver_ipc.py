@@ -316,11 +316,9 @@ class SolverIPC(SolverBase, CouplingInterface):
     - contact between all of these, with friction, between the pairs that
       Newton's collision groups, worlds, collide flags and filter pairs let
       collide (:ref:`ipc-contact`);
-    - kinematic particles, which take the positions of ``state_in`` before
-      the step, and kinematic bodies, which move inside the step toward the
-      pose it prescribes or, without mass or with
-      ``kinematic_motion="jump"``, take it before the step too
-      (:ref:`ipc-kinematic-bodies`);
+    - kinematic bodies, which move inside the step toward the pose that
+      ``state_in`` prescribes, and kinematic particles, which jump to it
+      before the step (:ref:`ipc-kinematic-bodies`);
     - revolute, prismatic, fixed and ball joints with drives, springs,
       damping, limits, armature and :attr:`~newton.Control.joint_f`, D6 joints
       that lock what one of them locks, and distance joints of one length
@@ -373,15 +371,15 @@ class SolverIPC(SolverBase, CouplingInterface):
             (see :ref:`ipc-contact`).
         newton_max_iter: Maximum Newton iterations per step.
         newton_velocity_tol: Newton convergence tolerance on ``max |dx| / dt``
-            [m/s]. ``None`` takes 0.05, or 5e-4 for an entry of a coupled
+            [m/s]. Default (``None``): 0.05, or 5e-4 for an entry of a coupled
             solver with proxies (see :ref:`ipc-coupling`).
         newton_transrate_tol: Newton convergence tolerance on ``max |dA| / dt`` of
-            rigid bodies [1/s]. ``None`` takes 0.1, or 1e-3 with proxies.
+            rigid bodies [1/s]. Default (``None``): 0.1, or 1e-3 with proxies.
         linear_tol_rate: Relative PCG tolerance on ``r^T M^-1 r``.
         line_search_max_iter: Maximum backtracking trials per Newton iteration.
         semi_implicit: Enable libuipc's semi-implicit early exit after
-            ``semi_implicit_k_min`` iterations of full feasible steps; ``None``
-            enables it but with proxies. Under
+            ``semi_implicit_k_min`` iterations of full feasible steps. Default
+            (``None``): on, but off for an entry with proxies. Under
             ``contact_constitution="al-ipc"``, whose step has no Newton
             tolerance, it enables the delay of AL-IPC's progress weight
             instead: without contact a step takes ``semi_implicit_k_min``
@@ -415,10 +413,11 @@ class SolverIPC(SolverBase, CouplingInterface):
             :ref:`ipc-al-ipc`).
         fem_preconditioner: ``"diag"`` (block diagonal) or ``"mas"`` for
             particles, cloth and tetrahedra (see :ref:`ipc-mas`).
-        kinematic_motion: ``"aim"`` (a kinematic body with mass and colliding
-            shapes moves inside the step toward the pose prescribed for its
-            end) or ``"jump"`` (it takes the pose of ``state_in`` before the
-            step, and a jump that meets a surface fails the step); see
+        kinematic_motion: How a kinematic body with mass and colliding shapes
+            follows ``state_in``. ``"aim"`` (the default) moves it inside the
+            step toward the prescribed pose, so that contact and friction act
+            on its motion. ``"jump"`` writes the pose before the step, and a
+            jump that meets a surface fails the step. See
             :ref:`ipc-kinematic-bodies`.
         kinematic_strength_ratio: The strength ratio of the aims of
             ``kinematic_motion="aim"`` (libuipc's soft transform constraint);
@@ -495,9 +494,9 @@ class SolverIPC(SolverBase, CouplingInterface):
 
         INVALID_CCD_STEP = 1 << 4
         """Continuous collision detection admitted no step (a fraction that is not positive), as for a vertex
-        that starts at or inside its contact thickness from a plane; or the sweep of a move written since the last
-        step (a kinematic body's or particle's jump, a coupled solver's proxy's new pose) met a surface, and the step
-        did not run (:ref:`ipc-kinematic-bodies`)."""
+        that starts at or inside its contact thickness from a plane. Also set when a move written since the last
+        step, a kinematic jump or a coupled solver's new proxy pose, meets a surface; the step then does not run
+        (:ref:`ipc-kinematic-bodies`)."""
 
         THICKNESS_VIOLATED = 1 << 5
         """A contact pair started at or inside its contact thickness (surfaces in touching contact or
@@ -1374,11 +1373,12 @@ class SolverIPC(SolverBase, CouplingInterface):
         )
 
     def _drop_residual_twists(self, became: np.ndarray, written: np.ndarray | None) -> None:
-        """``kinematic_motion="aim"``, after a notification that made the bodies ``became`` kinematic and built the
-        solve again: such a body moving toward its aims does not take the twist the solver wrote for it as a dynamic
-        body (``written``, the ``_body_qd_written`` of the old solve), which ``state_in`` still holds until the caller
-        writes another; its aims take a zero twist until then (``_aim_kinematic_bodies``), as Newton's other solvers
-        leave a body that becomes kinematic where it is."""
+        """Make the aims of the bodies ``became``, which a notification made kinematic, ignore the twist the solver
+        wrote for them while they were dynamic (``written``, the ``_body_qd_written`` of the old solve).
+
+        ``state_in`` holds that twist until the caller writes another; until then the aims take a zero twist
+        (``_aim_kinematic_bodies``), and the body stays where it is, as in Newton's other solvers. Only with
+        ``kinematic_motion="aim"``, after the solve was built again."""
         if written is None or not len(self._aim_bodies):
             return
         rows = np.flatnonzero(became[self._aim_bodies])

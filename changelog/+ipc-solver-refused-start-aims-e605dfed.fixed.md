@@ -1,1 +1,1 @@
-Fix ``SolverIPC``'s ``kinematic_motion="aim"`` keeping a kinematic body at the pose of a first step that the start check refused: the step again, from a state where the body is clear, took the refused pose and failed again. Nothing of the refused step remains now, and the next step takes its ``state_in``.
+Fix ``SolverIPC`` with ``kinematic_motion="aim"`` failing again on every first step after the start check refused one: the kinematic body kept the pose of the refused ``state_in``. The next step now reads its ``state_in`` again.

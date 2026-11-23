@@ -73,13 +73,13 @@ The solver simulates:
   :ref:`ipc-d-hat`). A rigid body does not collide with itself.
 - kinematic particles (zero mass or not :attr:`~newton.ParticleFlags.ACTIVE`)
   and kinematic bodies (:attr:`~newton.BodyFlags.KINEMATIC`, zero mass or zero
-  inverse mass, see :ref:`ipc-coupling`). By default a kinematic body moves
-  inside the step toward the pose that ``state_in`` prescribes for its end,
-  swept like every other motion; a kinematic particle, a body without mass or
-  colliding shapes, and with ``kinematic_motion="jump"`` every kinematic body
-  jump to the pose written to ``state_in`` before the step, and a jump that
-  meets a surface fails the step (see :ref:`ipc-kinematic-bodies`). A particle that is not
-  active and on no cloth or tetrahedron collides with nothing, as in Newton.
+  inverse mass, see :ref:`ipc-coupling`). A kinematic body with mass and
+  colliding shapes moves inside the step toward the pose that ``state_in``
+  prescribes. Kinematic particles, kinematic bodies without mass or colliding
+  shapes, and with ``kinematic_motion="jump"`` every kinematic body jump to
+  their ``state_in`` pose before the step; a jump that meets a surface fails
+  the step (see :ref:`ipc-kinematic-bodies`). A particle that is not active and
+  on no cloth or tetrahedron collides with nothing, as in Newton.
 - revolute, prismatic, fixed and ball joints between bodies or to the world,
   with drives, passive springs and damping, limits, armature and
   :attr:`~newton.Control.joint_f` (see :ref:`ipc-joints`); ``joint_q`` and
@@ -460,16 +460,16 @@ with ``kappa=None``, a given ``kappa`` clamped into its own range, at every
 step's ``dt``; :meth:`~newton.solvers.SolverIPC.contact_stiffness` gives every
 world's.
 
-The global entities do not move: a free particle (mass and
-:attr:`~newton.ParticleFlags.ACTIVE`), a dynamic body or a coupled solver's
-proxy of world -1, and a global kinematic body with mass and colliding shapes,
-which aims make an unknown, would be an unknown that every world pushes, and are
-refused with :class:`NotImplementedError` (pass ``kinematic_motion="jump"`` for
-the kinematic body), as Newton's implicit MPM refuses global colliders backed by
-dynamic bodies with ``separate_worlds``; so is a triangle, tetrahedron or spring
-that joins two worlds. Global static shapes and planes, kinematic particles and
-the kinematic bodies that jump (see :ref:`ipc-kinematic-bodies`) act in every
-world. Not offered with independent worlds yet, where two worlds or
+Global entities (world -1) must not move, because every world would push them
+and so join the worlds. The solver refuses with :class:`NotImplementedError` a
+global free particle (one with mass that is
+:attr:`~newton.ParticleFlags.ACTIVE`), a global dynamic body, a global proxy of
+a coupled solver, and a global kinematic body that moves toward an aim (one with
+mass and colliding shapes; pass ``kinematic_motion="jump"`` to make it a fixed
+body). Newton's implicit MPM refuses global colliders backed by dynamic bodies
+with ``separate_worlds`` in the same way. A triangle, tetrahedron or spring that
+joins two worlds is refused too. Global static shapes and planes, kinematic
+particles and kinematic bodies that jump act in every world. Not offered with independent worlds yet, where two worlds or
 more move, and refused naming what to use instead:
 ``contact_constitution="al-ipc"`` and ``fem_preconditioner="mas"`` (its clusters
 may join two worlds). The engine's Newton exit check, which independent worlds
@@ -503,65 +503,73 @@ no pair of parts of two worlds.
 Kinematic bodies
 ----------------
 
-By default (``kinematic_motion="aim"``) every kinematic body with colliding
-shapes and a mass is built as libuipc builds an animated body: an affine body
-that is an unknown of the step, with no gravity and no external force, pulled by
-libuipc's soft transform constraint (constitution 16) toward its aim, the pose
-of ``state_in`` advanced by its twist over the step (the centre of mass by
-:math:`v \Delta t`, the rotation by the exponential of :math:`\omega \Delta t`).
-Its velocity is set so that the step's prediction is the aim, so its motion is
-part of the Newton direction: the CCD sweeps it, the line search keeps every
-surface apart, friction sees it (a platform sliding under a box carries it), and
-a body that contact blocks stops short of its aim. The aim is soft, with the
-strength ratio :math:`\eta` = ``kinematic_strength_ratio`` (libuipc's motors'
-100) for translation and rotation alike: under a load :math:`F` a body of mass
-:math:`m` lags its aim by about :math:`F \Delta t^2 / ((1 + \eta) m)`, 2.8e-5 m
-for 10 N on 1 kg at 1/60 s. A caller who writes consistent ``body_q`` and
-``body_qd`` every step gets the next pose as the aim, one who writes poses only
-the written pose, one who writes nothing motion at constant twist. A body that a
-notification makes kinematic (``notify_model_changed`` with ``BODY_PROPERTIES``)
-does not take the twist the solver wrote for it as a dynamic body, which
-``state_in`` holds until the caller writes another: it stays where it is, as
-Newton's other solvers leave such a body, until the caller writes a twist. The
-step starts from the pose the body reached, so the motion from there to the aim
-is swept, a jump included; the first step after the solver is built and the step
-after a :meth:`~newton.solvers.SolverIPC.reset` that selects the body's world
-take ``state_in`` instead, which is how a caller moves such a body without
-sweeping; a first step that the start check refuses (see :ref:`ipc-start`)
-leaves the next step the first. ``state_out`` holds the pose the body reached
-and the twist of ``state_in``, which the step passes through, as Newton's
-solvers pass a kinematic body's twist: the twist stays the caller's, 0 unless it
-wrote one, and never becomes the one the body reached. Pairs of two shapes that
-are each kinematic or static do not collide, in either mode, as Newton's
-collision pipeline can filter them (``include_static_kinematic_pairs=False``);
-the solver checks its pairs against :attr:`~newton.Model.shape_contact_pairs`
-less those pairs. Aims are refused, naming the body, with
-``contact_constitution="al-ipc"``, whose frame tests animated aims with a check
-of its own that the solver does not run (see :ref:`ipc-al-ipc`), and with
-independent worlds for a body of the global world, which every world would push
-(see :ref:`ipc-worlds`); pass ``kinematic_motion="jump"`` there.
+A kinematic body (:attr:`~newton.BodyFlags.KINEMATIC`) follows the poses that
+the caller writes into ``state_in``; forces and contacts do not change its
+motion. The solver moves it in one of two ways, chosen by ``kinematic_motion``.
 
-A kinematic body of mass 0, such as a link of density 0 that anchors joints,
-one without colliding shapes, every kinematic particle (a soft aim would make a
-pinned vertex sag) and, with ``kinematic_motion="jump"``, every kinematic body
-take a jump instead: a fixed vertex or affine body whose pose the solver writes
-from ``state_in`` before the step. The step starts by sweeping these jumps with
-continuous collision detection, from where the last step left them
-(libuipc-warp's ``EngineOptions(sweep_kinematic=True)``): a jump that meets a
-surface fails the step with
-:attr:`~newton.solvers.SolverIPC.StatusBits.INVALID_CCD_STEP` before its solve
-runs (an eager step raises, a captured one sets the bit), where it would have
-put surfaces into each other without a word (a box resting on a platform that
-rises at 0.5 m/s, 120 steps per second, fell through it). A jump that leaves the
-surfaces apart is taken, but it is no motion of the step: the barrier has the
-step to push away what the jump brought close, which it does for jumps well
-under the room it leaves, and friction never sees the motion (a platform sliding
-under a box does not carry it). The first step after the solver is built, the
-step after a :meth:`~newton.solvers.SolverIPC.reset` that selects the body's
-world and the step after a failed one take the poses as placements, without a
-sweep. Under AL-IPC the step's collision-free sweeps carry the jump instead and
-push what it meets (see :ref:`ipc-al-ipc`). Newton's suite gives the same 78
-outcomes with either mode, its four kinematic cases passing.
+With the default, ``kinematic_motion="aim"``, a kinematic body with mass and
+colliding shapes moves during the step. Its aim is the pose of ``state_in``
+advanced over the step by the twist (``body_qd``) of ``state_in``. The step
+pulls the body toward its aim with libuipc's soft transform constraint
+(constitution 16), an elastic pull whose strength ratio :math:`\eta` is
+``kinematic_strength_ratio`` (default 100, the value libuipc's motors use).
+Because the motion is part of the step, collision detection sweeps it, surfaces
+stay apart, and friction acts on it: a platform sliding under a box carries the
+box. A body that contact blocks stops short of its aim. Under a load :math:`F` a
+body of mass :math:`m` lags its aim by about
+:math:`F \Delta t^2 / ((1 + \eta) m)`, for example 2.8e-5 m for 10 N on 1 kg at
+1/60 s. What the caller writes sets the aim:
+
+- ``body_q`` and ``body_qd`` at every step: the aim is the next pose of that
+  motion.
+- ``body_q`` only: the aim is the written pose.
+- nothing: the body moves on at its twist.
+
+``state_out`` holds the pose the body reached and the twist of ``state_in``,
+which the step passes through unchanged, as Newton's other solvers do for
+kinematic bodies. Each step starts from the pose the body reached in the step
+before, so the move from there to the aim is swept, even when the caller writes
+a pose far away. The first step after the solver is built, and the first step
+after a :meth:`~newton.solvers.SolverIPC.reset` that selects the body's world,
+take the pose of ``state_in`` without sweeping; use them to place a body
+elsewhere. A first step that the start check refuses (see :ref:`ipc-start`)
+does not count, and the next step is the first again. A body that
+``notify_model_changed`` (with ``BODY_PROPERTIES``) makes kinematic ignores the
+twist the solver wrote for it while it was dynamic: it stays where it is, as in
+Newton's other solvers, until the caller writes a twist. Two shapes that are
+each kinematic or static never collide, as Newton's collision pipeline can
+filter such pairs (``include_static_kinematic_pairs=False``); the solver checks
+its pairs against :attr:`~newton.Model.shape_contact_pairs` without them.
+
+The solver refuses aims, naming the body, in two cases; pass
+``kinematic_motion="jump"`` there:
+
+- with ``contact_constitution="al-ipc"``, because libuipc's AL-IPC frame checks
+  animated aims with a test of its own that the solver does not run (see
+  :ref:`ipc-al-ipc`);
+- with independent worlds, for a body of the global world, which every world
+  would push (see :ref:`ipc-worlds`).
+
+With ``kinematic_motion="jump"`` a kinematic body jumps: before the step the
+solver writes the pose of ``state_in`` into a fixed body. Kinematic particles
+always jump, because a soft aim would let a pinned vertex sag. So do kinematic
+bodies without colliding shapes, and those of mass 0, such as a link of density
+0 that anchors joints, because the aim has no mass to pull. Before the step the
+solver sweeps every jump with continuous collision detection, from where the
+last step left the body to its new pose (libuipc-warp's
+``EngineOptions(sweep_kinematic=True)``). A jump that meets a surface fails the
+step with :attr:`~newton.solvers.SolverIPC.StatusBits.INVALID_CCD_STEP` before
+the solve runs: an eager step raises, and a captured step sets the bit. Without
+this sweep, a box resting on a platform that rose at 0.5 m/s, 120 steps per
+second, fell through it. A jump that meets no surface is taken, but it is not
+part of the step's motion: the barrier has one step to push away what the jump
+brought close, and friction does not act on the jump (a platform sliding under
+a box does not carry it). The first step after the solver is built, the step
+after a :meth:`~newton.solvers.SolverIPC.reset` that selects the body's world,
+and the step after a failed step take the new poses without a sweep. Under
+AL-IPC the step's collision-free sweeps carry the jump and push what it meets
+(see :ref:`ipc-al-ipc`). Newton's test suite gives the same results with either
+mode.
 
 .. _ipc-attachments:
 
@@ -590,13 +598,13 @@ spring of rest length 0 is the same stitch between its two particles, with
 ``spring_stiffness``. Damping is rejected: libuipc's stitch has none, and an
 implicit damping cannot be folded into it the way the joint drives fold theirs.
 An attached particle does not collide with the body it is attached to, whether
-the attachment is enabled or not, so it may be attached at a point of the
-body's surface, where the barrier would refuse a particle that starts in
-contact (see :ref:`ipc-start`). libuipc lets a primitive collide only where
-every pair of its vertices' contact elements does, so neither do the edges and
-triangles of cloth or a soft body that hold such a particle. With every other
-body and shape it collides as before. Newton's other solvers keep that contact,
-which is harmless to them.
+or not the attachment is enabled. So a particle may be attached at a point on
+the body's surface, where the start check would otherwise refuse it for
+starting in contact (see :ref:`ipc-start`). The edges and triangles of cloth or
+a soft body that hold such a particle do not collide with that body either,
+because libuipc lets a primitive collide only where each of its vertices may.
+The particle collides with every other body and shape as before. Newton's other
+solvers keep this contact, which does them no harm.
 
 .. _ipc-rigid-bodies:
 
@@ -1057,27 +1065,27 @@ of those pairs (the solver reads no :class:`~newton.Contacts`, and returns them
 as they are). The coupler writes a proxy's pose and twist at every step; unlike
 any other new state, that write keeps the friction of the step's contacts, where
 libuipc discards friction after any write of a state: a proxy would otherwise
-never have friction. A proxy's new pose is swept from where the last step left
-it, as a kinematic body's jump: a source solver that moves a proxy into this
-entry's content fails the step with
-:attr:`~newton.solvers.SolverIPC.StatusBits.INVALID_CCD_STEP` (IPC does not take
-an intersecting state). A proxy's feedback is the force of the step's contact terms on it at
+never have friction. The solver sweeps a proxy's new pose from where the last
+step left it, as it sweeps a kinematic body's jump. A source solver that moves a
+proxy into this entry's content fails the step with
+:attr:`~newton.solvers.SolverIPC.StatusBits.INVALID_CCD_STEP`, because IPC does
+not take a state in which surfaces cross. A proxy's feedback is the force of the step's contact terms on it at
 the end of the step, a wrench about its centre of mass for a body
 (``coupling_harvest_proxy_wrenches``,
 ``coupling_harvest_proxy_particle_forces``), as SolverVBD harvests it, rather
-than its change of momentum. The barrier's force is steep in the distance, so
-the feedback is as accurate as the step's convergence, and an entry with
-proxies takes converged steps unless told otherwise: ``newton_velocity_tol``
-5e-4 m/s, ``newton_transrate_tol`` 1e-3 1/s and ``semi_implicit=False``. These
-keep the feedback of an impact within 1% of the converged one, measured step by
-step in a box hitting a box and a cloth and a particle hitting a box, at 0.5 and
-2 m/s, in steps of 1/60 and 1/240 s. They take about twice the Newton
-iterations of the other defaults, under which (0.05 m/s with the semi-implicit
-exit) an impact step's feedback was up to 27 times the converged one; the
-semi-implicit exit alone left it up to 2.5 times the converged one at any
-tolerance. On cloth two converged solves of an impact can end in different
-nearby minima, whose feedback differs by up to 2.4% at one step whatever the
-tolerance. Pass the three arguments to take other values. With
+than its change of momentum. The barrier's force rises steeply as surfaces
+approach, so the feedback is only as accurate as the step's convergence. An
+entry with proxies therefore takes converged steps by default:
+``newton_velocity_tol`` 5e-4 m/s, ``newton_transrate_tol`` 1e-3 1/s and
+``semi_implicit=False``. These keep an impact's feedback within 1% of the
+converged feedback, measured step by step for a box and a particle hitting a
+box at 0.5 and 2 m/s, with steps of 1/60 and 1/240 s. They take about twice the
+Newton iterations of the defaults without proxies (0.05 m/s with the
+semi-implicit exit), under which an impact's feedback was up to 27 times the
+converged one. The semi-implicit exit alone leaves it up to 2.5 times the
+converged one at any tolerance. On cloth, two converged solves of an impact can
+end in nearby minima whose feedback differs by up to 2.4%, whatever the
+tolerance. Pass the three arguments to choose other values. With
 ``SolverCoupledProxy``'s lagged transfer, the default,
 a proxy resting on this entry's content does not come to rest: the feedback of a
 contact this stiff reaches the source one step late and keeps the proxy
@@ -1147,8 +1155,8 @@ contact lists reserve, which a captured step reports as
 :attr:`~newton.solvers.SolverIPC.StatusBits.OVERFLOW`; one as long as the edges
 of a cloth or soft body puts its non-adjacent primitives inside ``d_hat`` at
 rest, and the barrier stretches it. A smaller ``d_hat`` also leaves less room
-for the jump of a kinematic body, which the step takes only where it meets no
-surface (see :ref:`ipc-kinematic-bodies`).
+for a kinematic jump, which fails the step when it meets a surface (see
+:ref:`ipc-kinematic-bodies`).
 
 .. _ipc-start:
 
@@ -1176,13 +1184,14 @@ do not collide may overlap; the inside of a body is not checked. A gap inside
 surfaces apart in the first steps. The check compares the bodies whose bounding
 boxes come that close, every primitive of one against every primitive of the
 other, and skips a pair of bodies with more than ``2**31 - 1`` primitive pairs
-with a warning. A state written after the first step is not checked as the start is. The
-jumps of kinematic bodies and particles and the new poses of a coupled solver's
-proxies are swept at the step's start (see :ref:`ipc-kinematic-bodies`); a
-step that starts with a pair at or inside its contact thickness fails
+with a warning. The solver does not run this check on states written after
+the first step. Instead, each step sweeps the jumps of kinematic bodies and
+particles and the new poses of a coupled solver's proxies (see
+:ref:`ipc-kinematic-bodies`), and a step that starts with a pair at or inside
+its contact thickness fails
 (:attr:`~newton.solvers.SolverIPC.StatusBits.THICKNESS_VIOLATED` or
-:attr:`~newton.solvers.SolverIPC.StatusBits.INVALID_CCD_STEP`). Any other
-state written into ``state_in`` (a dynamic body or particle put elsewhere) is a
-placement: a crossing deeper than the contact thickness sets neither bit, and
-the barrier, which acts on the unsigned distance, pushes the surfaces further
-into each other.
+:attr:`~newton.solvers.SolverIPC.StatusBits.INVALID_CCD_STEP`). Any other state
+written into ``state_in``, such as a dynamic body or particle put elsewhere, is
+taken as it is. If it puts two surfaces through each other by more than their
+contact thickness, neither bit is set, and the barrier, which acts on the
+unsigned distance, pushes them further in.
