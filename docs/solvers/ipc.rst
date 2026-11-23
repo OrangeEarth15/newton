@@ -94,7 +94,9 @@ The solver simulates:
 - gravity per world: a particle or body falls with the
   :attr:`~newton.Model.gravity` of its world, a global one with the global
   world's (the last entry).
-- lagged friction on every contact.
+- lagged friction on every contact, and collision meshes whose surface moves
+  along itself, such as a conveyor belt (``Mesh.enable_surface_velocity``, see
+  :ref:`ipc-contact`).
 
 .. _ipc-refused:
 
@@ -115,10 +117,8 @@ and properties that :ref:`ipc-joints` rejects, gradients
 refuses (an unknown of the global world, an element that joins two worlds, and
 the options they do not take yet), a :attr:`~newton.Model.shape_contact_pairs`
 array assigned to the model, more contact elements than the engine takes (see
-:ref:`ipc-contact`), collision meshes with a surface velocity
-(``Mesh.enable_surface_velocity``, which the solver's own contacts would
-ignore), a ``contact_damping`` other than ``None`` (see :ref:`ipc-contact`),
-and a CPU device. Gaussian shapes and planes attached to bodies raise
+:ref:`ipc-contact`), a ``contact_damping`` other than ``None`` (see
+:ref:`ipc-contact`), and a CPU device. Gaussian shapes and planes attached to bodies raise
 when the shapes are triangulated. A step that is not captured raises
 :class:`NotImplementedError` when its :class:`~newton.Control` holds a triangle
 or tetrahedron activation other than 0 (a captured step cannot raise, and does
@@ -368,6 +368,26 @@ Newton's penalty-based solvers apply, is not read (see :ref:`ipc-not-read`).
 The ``contact_damping`` argument takes only ``None``, its default, which adds
 no damping; any other value raises :class:`NotImplementedError`.
 
+A collision mesh with ``Mesh.enable_surface_velocity`` is a surface whose
+material moves along it, such as a conveyor belt or a tank tread. The velocity
+of the material at a vertex [m/s] is that vertex's entry of the mesh's
+finalized Warp mesh, ``mesh.mesh.velocities``, in the mesh's coordinates,
+which the caller may write on the device before any step, also between the
+replays of a captured graph. As Newton's collision pipeline takes it, the
+solver scales it by the shape's scale and turns it into the world by the
+shape's pose at the step's start, ``body_q * shape_transform``, and keeps it
+through the step. Friction then measures each contact's slip from where the
+material was a step before: a box set on a static belt mesh whose velocities
+are (1, 0, 0) slides at :math:`\mu g` until it rides along at 1 m/s, and a
+tread on a body drives the body. Only the part along the contact's tangent
+plane acts, as in Newton's other solvers: a part along the contact normal
+changes nothing (to move a surface along its normal, move the mesh). The
+solver welds coincident mesh vertices into one vertex of its triangulated
+mesh, which takes the velocity of the mesh vertex that the first triangle at
+its place uses. The velocity enters each contact through the closest point's
+weights, where Newton's contacts sample it at their contact point; both
+interpolate it linearly over the mesh's triangles.
+
 .. _ipc-bdf2:
 
 BDF2
@@ -460,7 +480,8 @@ toward it in the next. The first step after the solver is built, the step after
 a :meth:`~newton.solvers.SolverIPC.reset` that selects its world and the step
 after a failed one place it at its pose instead, without a sweep. ``kappa`` is
 not used: a ``kappa`` other than the default and ``adaptive_kappa`` are
-refused. The step ends on AL-IPC's own
+refused, and so is a collision mesh with ``Mesh.enable_surface_velocity``
+(libuipc-warp's AL-IPC friction takes no surface velocity). The step ends on AL-IPC's own
 criterion, the paper's progress weight, which has no Newton residual:
 ``SOLVER_RESIDUAL`` is not offered, and without contact a step takes
 ``semi_implicit_k_min`` Newton iterations (the paper's ``K_min``), and one with
@@ -1099,7 +1120,8 @@ tangential. The margins are the shapes' ``shape_margin``, their contact
 thickness, and the offsets the normal times each margin toward the other side,
 as Newton's collision pipeline writes them. ``rigid_contact_surface_velocity``
 (when allocated) and ``soft_contact_body_vel`` are zero, and
-``soft_contact_rigid_indices`` is ``-1``: the solver has no surface velocity,
+``soft_contact_rigid_indices`` is ``-1``: the solver's friction takes a mesh's
+surface velocity at its vertices and does not evaluate it at the rows' points,
 and it triangulates and welds the shapes' meshes. The counts are true counts:
 rows past the buffer's capacity are dropped, as Newton's collision pipeline
 drops them, and a ``rigid_contact_count`` or ``soft_contact_count`` above the

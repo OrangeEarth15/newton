@@ -464,28 +464,6 @@ def test_warns_of_velocity_limits(test, device):
         test.assertEqual(warned(lambda: first.notify_model_changed(flags))[1], messages)
 
 
-def _belt(device, enable_surface_velocity):
-    """A box above a static two-triangle mesh, a conveyor belt when the mesh has a surface velocity."""
-    vertices = np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]], np.float32)
-    belt = newton.Mesh(
-        vertices,
-        np.array([0, 1, 2, 0, 2, 3], np.int32),
-        compute_inertia=False,
-        enable_surface_velocity=enable_surface_velocity,
-    )
-    builder = newton.ModelBuilder()
-    builder.add_shape_mesh(body=-1, mesh=belt)
-    _box_body(builder, (0.0, 0.0, 0.205), (0.2, 0.2, 0.2))
-    return builder.finalize(device=device)
-
-
-def test_rejects_surface_velocity(test, device):
-    """Reject a collision mesh with a surface velocity, which the solver's own contacts would ignore."""
-    with test.assertRaisesRegex(NotImplementedError, "surface velocit"):
-        newton.solvers.SolverIPC(_belt(device, True))
-    newton.solvers.SolverIPC(_belt(device, False))
-
-
 def _open_plane(builder, z=0.0):
     """A static square of two triangles, 2 m wide, at height ``z``: an open mesh."""
     vertices = np.array([[-1.0, -1.0, z], [1.0, -1.0, z], [1.0, 1.0, z], [-1.0, 1.0, z]], np.float32)
@@ -1271,7 +1249,6 @@ for name, func in (
     ("test_rejects_arguments_the_options_do_not_read", test_rejects_arguments_the_options_do_not_read),
     ("test_rejects_gradients", test_rejects_gradients),
     ("test_warns_of_velocity_limits", test_warns_of_velocity_limits),
-    ("test_rejects_surface_velocity", test_rejects_surface_velocity),
     ("test_rejects_intersecting_start", test_rejects_intersecting_start),
     ("test_rejects_start_in_contact", test_rejects_start_in_contact),
     (

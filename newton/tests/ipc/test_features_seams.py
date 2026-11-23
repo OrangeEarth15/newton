@@ -159,17 +159,6 @@ def _attachment(damping=0.0, stiffness=None):
     return content
 
 
-def _belt(builder, x):
-    """A static mesh with a surface velocity, a conveyor belt."""
-    vertices = np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]])
-    vertices += np.array([x, -3.0, 0.0])
-    belt = newton.Mesh(
-        vertices.astype(np.float32), np.array([0, 1, 2, 0, 2, 3], np.int32), compute_inertia=False,
-        enable_surface_velocity=True,
-    )  # fmt: skip
-    builder.add_shape_mesh(body=-1, mesh=belt)
-
-
 def _model(device, *contents):
     """A model of ``contents`` (functions of the builder and an x position), in this order."""
     builder = newton.ModelBuilder()
@@ -277,12 +266,6 @@ _MOVED = (
         (_attachment(), _attachment(damping=-2.0)),
         "SolverIPC: particle-body attachment 1 has damping -2.0; make it 0 or positive.",
     ),
-    (
-        "a surface velocity (surface_velocity)",
-        (_belt,),
-        "SolverIPC: shape 0 is a mesh with enable_surface_velocity=True; turn the surface velocity off. SolverIPC "
-        "finds its own contacts, which do not apply surface velocities.",
-    ),
 )
 
 
@@ -290,9 +273,8 @@ def test_moved_refusals_keep_their_messages(test, device):
     """Every refusal a feature module holds raises NotImplementedError with the message it had before the modules
     held it, when the solver is built: tendons, mimic constraints and the friction of revolute and free joints
     (joint_terms), D6 joints of no libuipc joint and distance joints with a range (universal), the friction,
-    armature, drives, damping, target mode and limits of ball and free joints (ball), springs and attachments with a
-    negative damping (damping) and a mesh with a surface velocity (surface_velocity). (contact_damping's is in
-    test_contact_damping_takes_none_only.)"""
+    armature, drives, damping, target mode and limits of ball and free joints (ball) and springs and attachments with a
+    negative damping (damping). (contact_damping's is in test_contact_damping_takes_none_only.)"""
     for name, contents, message in _MOVED:
         with test.subTest(name):
             test.assertEqual(_refusal(test, _model(device, *contents)), message)
@@ -383,8 +365,7 @@ _ORDER = (
         {},
         "particle-body attachment 1 has damping -2.0;",
     ),
-    ("attachments before surface velocities", (_belt, _attachment(damping=-2.0)), {}, "particle-body attachment 0 has"),
-    ("the model before contact_damping", (_belt,), {"contact_damping": 1.0}, "shape 0 is a mesh with"),
+    ("the model before contact_damping", (_rod(),), {"contact_damping": 1.0}, "joint 0 is a ROD joint;"),
 )
 
 
