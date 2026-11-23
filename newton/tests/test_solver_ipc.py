@@ -881,6 +881,116 @@ def test_rejects_start_in_contact(test, device):
     build(ground, two_shapes)
 
 
+def _kinematic_root_pendulum(device):
+    """Newton's test_kinematic_links scene of a kinematic revolute root, without gravity: a kinematic link that turns
+    about y with a box 0.6 m out along x, a pendulum link hinged to it 0.45 m out with a sphere, and a free probe sphere
+    at x = 0.72 m. The links are added without a pose: the model holds them at the identity, where the probe crosses
+    the root's box (and, built where forward kinematics puts it, the pendulum's sphere)."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    root = builder.add_link(mass=1.0, is_kinematic=True, label="kinematic_root")
+    pendulum = builder.add_link(mass=1.0, label="pendulum")
+    joints = [
+        builder.add_joint_revolute(parent=-1, child=root, axis=newton.Axis.Y),
+        builder.add_joint_revolute(
+            parent=root,
+            child=pendulum,
+            axis=newton.Axis.Y,
+            parent_xform=wp.transform(wp.vec3(0.45, 0.0, 0.0), wp.quat_identity()),
+        ),
+    ]
+    builder.add_articulation(joints)
+    builder.add_shape_box(
+        root, xform=wp.transform(wp.vec3(0.6, 0.0, 0.0), wp.quat_identity()), hx=0.15, hy=0.08, hz=0.08
+    )
+    builder.add_shape_sphere(pendulum, xform=wp.transform(wp.vec3(0.3, 0.0, 0.0), wp.quat_identity()), radius=0.1)
+    probe = builder.add_body(xform=wp.transform(wp.vec3(0.72, 0.0, 0.0), wp.quat_identity()), mass=0.6, label="probe")
+    builder.add_shape_sphere(probe, radius=0.1)
+    return builder.finalize(device=device), root, probe
+
+
+def test_start_of_posed_bodies_is_checked_on_the_first_step(test, device):
+    """The start of a pair with a kinematic body, whose pose the caller writes, is checked on the first step's
+    state_in, not on the model's state. Newton's kinematic-root pendulum, whose probe sphere crosses the root's box in
+    the model and is 0.43 m clear of it once the caller turns the root to -1 rad for the first step, runs, and the
+    turning box pushes the probe without crossing it. A kinematic box that the first step's state_in puts through a
+    body is refused by that step, by name, before it runs. One that crosses the body in the model is refused also
+    when the first step is captured, which cannot read its state_in: the capture raises before anything is captured,
+    and a first step outside capture from a clear state then runs, and the steps captured after it."""
+
+    def clearance(q):
+        """The probe sphere's distance from the root's box less its radius, from the bodies' poses ``q``."""
+        root_pose = wp.transform(wp.vec3(*q[root, :3]), wp.quat(*q[root, 3:]))
+        local = np.array(wp.transform_point(wp.transform_inverse(root_pose), wp.vec3(*q[probe, :3])))
+        d = np.abs(local - (0.6, 0.0, 0.0)) - (0.15, 0.08, 0.08)
+        return float(np.linalg.norm(np.maximum(d, 0.0)) + min(d.max(), 0.0)) - 0.1
+
+    model, root, probe = _kinematic_root_pendulum(device)
+    test.assertLess(clearance(model.body_q.numpy()), -0.1)
+    solver = newton.solvers.SolverIPC(model)  # refused before: the probe crosses the root's box in the model
+    dt, omega = 1.0 / 240.0, 2.0
+    s0, s1 = model.state(), model.state()
+    start = s0.body_q.numpy()[probe, :3].copy()
+    speed, closest = 0.0, np.inf
+    for k in range(120):  # the test's prescribed motion: the root turns from -1 rad at 2 rad/s
+        q, qd = s0.body_q.numpy(), s0.body_qd.numpy()
+        q[root] = [0.0, 0.0, 0.0, *wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), -1.0 + omega * k * dt)]
+        qd[root] = [0.0, 0.0, 0.0, 0.0, omega, 0.0]
+        s0.body_q.assign(q)
+        s0.body_qd.assign(qd)
+        if k == 0:
+            test.assertGreater(clearance(q), 0.4)
+        solver.step(s0, s1, None, None, dt)
+        s0, s1 = s1, s0
+        speed = max(speed, float(np.linalg.norm(s0.body_qd.numpy()[probe, :3])))
+        closest = min(closest, clearance(s0.body_q.numpy()))
+    test.assertGreater(speed, 2e-2)
+    test.assertGreater(float(np.linalg.norm(s0.body_q.numpy()[probe, :3] - start)), 1e-2)
+    # the box reaches the probe and stays out of it, up to the sagitta of the triangulated sphere (8.6e-4 m)
+    test.assertLess(closest, 0.01)
+    test.assertGreater(closest, -1e-3)
+
+    def boxes(x):
+        """A box body at the origin and a kinematic box ('pusher') of its size at ``x`` along x."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
+        kinematic = builder.add_body(
+            xform=wp.transform(wp.vec3(x, 0.0, 1.0), wp.quat_identity()), is_kinematic=True, label="pusher"
+        )
+        builder.add_shape_box(kinematic, hx=0.1, hy=0.1, hz=0.1)
+        return builder.finalize(device=device), kinematic
+
+    def placed(model, kinematic, x):
+        state = model.state()
+        q = state.body_q.numpy()
+        q[kinematic, 0] = x
+        state.body_q.assign(q)
+        return state
+
+    # clear in the model, through the body in the first step's state_in
+    model, kinematic = boxes(1.0)
+    solver = newton.solvers.SolverIPC(model)
+    with test.assertRaisesRegex(ValueError, r"body 0 and body 1 \('pusher'\) intersect in the state of the first step"):
+        solver.step(placed(model, kinematic, 0.05), model.state(), None, None, 0.01)
+    test.assertEqual(solver._engine.frames, 0)
+    solver.step(model.state(), model.state(), None, None, 0.01)  # the first step again, from the model's clear state
+    test.assertEqual(solver._engine.frames, 1)
+    # through the body in the model: not refused at construction, since the caller writes the pusher's pose
+    model, kinematic = boxes(0.05)
+    solver = newton.solvers.SolverIPC(model)
+    s0, s1 = placed(model, kinematic, 1.0), model.state()
+    with test.assertRaisesRegex(ValueError, r"intersect in the model's state.*The first step is captured"):
+        with wp.ScopedCapture(device=device):
+            solver.step(s0, s1, None, None, 0.01)
+    test.assertEqual(solver._engine.frames, 0)
+    with test.assertRaisesRegex(ValueError, r"intersect in the state of the first step"):
+        solver.step(model.state(), s1, None, None, 0.01)
+    solver.step(s0, s1, None, None, 0.01)
+    with wp.ScopedCapture(device=device) as capture:
+        solver.step(s1, s0, None, None, 0.01)
+    wp.capture_launch(capture.graph)
+    test.assertEqual(solver._engine.frames, 2)
+
+
 # ---------------------------------------------------------------------------- forces
 
 
@@ -3468,9 +3578,10 @@ def _drive_recurrence(
 def test_unplaced_links_start_at_forward_kinematics(test, device):
     """A double pendulum built as Newton's basic_pendulum example builds it: links added without a pose, so that the
     model holds both at the origin, through the ground plane, and the forward kinematics written into the state only
-    after the solver is built. The solver is built at, and checks, the poses newton.eval_fk computes from the model's
-    joint coordinates, and steps captured from that state run as those of a solver built from a model that holds the
-    poses. A link that the joint coordinates put into the ground is refused at construction, by name."""
+    after the solver is built. The solver is built at the poses newton.eval_fk computes from the model's joint
+    coordinates, and steps captured from that state run as those of a solver built from a model that holds the poses.
+    A link that the joint coordinates put into the ground is refused by name: by the first step from that state, and
+    when the first step is captured, by the capture, from the model's state."""
 
     def pendulum(height=5.0, angle=0.0, posed=False):
         builder = newton.ModelBuilder()
@@ -3519,9 +3630,18 @@ def test_unplaced_links_start_at_forward_kinematics(test, device):
     reference = captured(posed, newton.solvers.SolverIPC(posed), state)
     test.assertLess(float(swung[1, 2]), 5.0 - 1e-3)  # the pendulum swings down
     np.testing.assert_allclose(swung, reference, atol=1e-6)
-    # turned down from a pivot 3 m up, the outer link reaches 1 m into the ground
-    with test.assertRaisesRegex(ValueError, "body 1 \\('link_1'\\) and plane shape 2 start"):
-        newton.solvers.SolverIPC(pendulum(height=3.0, angle=0.5 * np.pi))
+    # turned down from a pivot 3 m up, the outer link reaches 1 m into the ground: the caller places such links, so the
+    # first step refuses the start it takes from them, by name, and a captured first step the model's
+    low = pendulum(height=3.0, angle=0.5 * np.pi)
+    state = low.state()
+    newton.eval_fk(low, low.joint_q, low.joint_qd, state)
+    pattern = "body 1 \\('link_1'\\) and plane shape 2 start .* in the {}"
+    with test.assertRaisesRegex(ValueError, pattern.format("state of the first step")):
+        newton.solvers.SolverIPC(low).step(state, low.state(), None, None, 0.001)
+    solver = newton.solvers.SolverIPC(low)
+    with test.assertRaisesRegex(ValueError, pattern.format("model's state.*The first step is captured")):
+        with wp.ScopedCapture(device=device):
+            solver.step(state, low.state(), None, None, 0.001)
 
 
 def test_pendulum_is_implicit_euler(test, device):
@@ -7268,6 +7388,10 @@ for name, func in (
     ("test_rejects_surface_velocity", test_rejects_surface_velocity),
     ("test_rejects_intersecting_start", test_rejects_intersecting_start),
     ("test_rejects_start_in_contact", test_rejects_start_in_contact),
+    (
+        "test_start_of_posed_bodies_is_checked_on_the_first_step",
+        test_start_of_posed_bodies_is_checked_on_the_first_step,
+    ),
     ("test_external_forces_match_closed_form", test_external_forces_match_closed_form),
     ("test_free_joint_force_pushes_the_parent", test_free_joint_force_pushes_the_parent),
 ):
