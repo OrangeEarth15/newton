@@ -1,0 +1,1 @@
+Run SolverIPC in the two D6 tests of Newton that its universal joints let it pass: the state of a D6 joint of two angular axes against eval_fk, and the joint_f of D6 joints against Featherstone.

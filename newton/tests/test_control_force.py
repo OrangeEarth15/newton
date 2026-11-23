@@ -423,13 +423,11 @@ for device in devices:
             continue
         if solver_name == "ipc" and device.is_cpu:
             continue
-        # SolverIPC (expected failures): the angular D6 joints of these tests are refused. libuipc's driving term acts
-        # on one hinge angle or one distance and cannot drive three angular axes, and a D6 joint of two angular axes
-        # is a universal joint, which no libuipc joint is
-        d6_target, d6_joint_f = test_d6_angular_target_is_equilibrium, test_d6_angular_joint_f_matches_featherstone
+        # SolverIPC (an expected failure): the drives of the D6 joint of three angular axes are refused. libuipc's
+        # driving term acts on one hinge angle or one distance and cannot drive three angular axes
+        d6_target = test_d6_angular_target_is_equilibrium
         if solver_name == "ipc":
             d6_target = unittest.expectedFailure(functools.partial(test_d6_angular_target_is_equilibrium))
-            d6_joint_f = unittest.expectedFailure(functools.partial(test_d6_angular_joint_f_matches_featherstone))
         add_function_test(
             TestControlForce,
             f"test_d6_angular_target_is_equilibrium_{solver_name}",
@@ -441,7 +439,7 @@ for device in devices:
             add_function_test(
                 TestControlForce,
                 f"test_d6_angular_joint_f_matches_featherstone_{solver_name}",
-                d6_joint_f,
+                test_d6_angular_joint_f_matches_featherstone,
                 devices=[device],
                 solver_fn=solver_fn,
             )

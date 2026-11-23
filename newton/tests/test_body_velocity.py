@@ -21,7 +21,6 @@ Note on tolerances:
   precision depending on solver and tolerance settings.
 """
 
-import functools
 import unittest
 
 import numpy as np
@@ -745,15 +744,10 @@ for device in devices:
         if device.is_cpu and solver_name == "ipc":
             continue
 
-        # SolverIPC (an expected failure): the test's second half is a D6 joint of two angular axes, a universal
-        # joint, which no libuipc joint is: refused
-        d6_fk = test_d6_angular_state_matches_fk
-        if solver_name == "ipc":
-            d6_fk = unittest.expectedFailure(functools.partial(test_d6_angular_state_matches_fk))
         add_function_test(
             TestBodyVelocity,
             f"test_d6_angular_state_matches_fk_{solver_name}",
-            d6_fk,
+            test_d6_angular_state_matches_fk,
             devices=[device],
             solver_fn=solver_fn,
         )
