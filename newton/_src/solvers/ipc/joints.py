@@ -24,7 +24,6 @@ from .kernels import (
     _EFFORT_LIMIT,
     _adopt_joint_angles,
     _enable_anchor_joints,
-    _joint_option_terms,
     _joint_rates,
     _joint_terms,
 )
@@ -36,10 +35,6 @@ if TYPE_CHECKING:
 
 # why libuipc has no joint for a joint type SolverIPC refuses
 _UNMAPPED_JOINTS = {
-    JointType.DISTANCE: "libuipc has no distance joint; its affine-body joints are revolute, prismatic, fixed and ball "
-    "joints",
-    JointType.D6: "libuipc has no D6 joint (constitution 28 is only registered); its affine-body joints are revolute, "
-    "prismatic, fixed and ball joints",
     JointType.ROD: "libuipc has no constitution of stretch, shear, bend and twist between two affine bodies; its rods "
     "are finite elements (Kirchhoff rod bending, constitution 15) and codimensional affine bodies",
 }
@@ -47,27 +42,12 @@ _UNMAPPED_JOINTS = {
 
 @dataclass(frozen=True)
 class _JointOptions:
-    """The joints SolverIPC maps beyond revolute, prismatic, fixed, ball and free joints, on request
-    (:ref:`ipc-joints`): ``d6``, D6 joints that lock what one of libuipc's joints locks; ``distance``, distance joints
-    of one length or none; ``limit_damping``, ``joint_limit_kd`` past a limit; ``armature``, ``joint_armature`` as the
-    inertia of a revolute or prismatic joint's coordinate; ``effort_limit``, ``joint_effort_limit`` as a bound of the
-    drive's force decided at the step's start."""
+    """The terms SolverIPC adds to libuipc's joints that a caller may switch off (:ref:`ipc-joints`), both on by
+    default: ``limit_damping``, ``joint_limit_kd`` past a limit; ``effort_limit``, ``joint_effort_limit`` as a bound of
+    the drive's force decided at the step's start."""
 
-    d6: bool = False
-    distance: bool = False
-    limit_damping: bool = False
-    armature: bool = False
-    effort_limit: bool = False
-
-    @property
-    def drive_terms(self) -> bool:
-        """Whether the driving terms take a term beyond ``_joint_terms``' (``_joint_option_terms``)."""
-        return self.limit_damping or self.armature or self.effort_limit
-
-    @property
-    def rates(self) -> bool:
-        """Whether those terms need the joints' rates at the step's start (``_joint_rates``)."""
-        return self.armature or self.effort_limit
+    limit_damping: bool = True
+    effort_limit: bool = True
 
 
 @dataclass(frozen=True)
@@ -104,34 +84,20 @@ def _orthonormal(axes: np.ndarray) -> bool:
     return bool(np.abs(axes @ axes.T - np.eye(len(axes))).max() < 1.0e-5)
 
 
-def _map_joints(model: Model, options: _JointOptions) -> _JointMap:
+def _map_joints(model: Model) -> _JointMap:
     """How every joint maps onto libuipc (``_JointMap``), or ``NotImplementedError`` for the first joint that does
-    not: a joint type libuipc has no joint for (``_UNMAPPED_JOINTS``), and without ``options.d6`` every D6 joint; with
-    it a D6 joint that locks other degrees of freedom than one of libuipc's joints does, or that takes Newton's
-    coordinates of three axes that are not orthonormal; without ``options.distance`` every distance joint, with it one
-    whose distance is bounded to a range or on one side."""
+    not: a joint type libuipc has no joint for (``_UNMAPPED_JOINTS``), a D6 joint that locks other degrees of freedom
+    than one of libuipc's joints does, or that takes Newton's coordinates of three axes that are not orthonormal, and a
+    distance joint whose distance is bounded to a range or on one side."""
     joint_type = model.joint_type.numpy().astype(np.int32)
     kind, store = joint_type.copy(), joint_type.copy()
     supported = [int(t) for t in (JointType.FREE, JointType.REVOLUTE, JointType.PRISMATIC, JointType.FIXED)]
-    supported.append(int(JointType.BALL))
-    if options.d6:
-        supported.append(int(JointType.D6))
-    if options.distance:
-        supported.append(int(JointType.DISTANCE))
+    supported += [int(JointType.BALL), int(JointType.D6), int(JointType.DISTANCE)]
     other = np.flatnonzero(~np.isin(joint_type, supported))
     if len(other):
         j = int(other[0])
         t = JointType(int(joint_type[j]))
         why = _UNMAPPED_JOINTS.get(t, "libuipc's affine-body joints are revolute, prismatic, fixed and ball joints")
-        if t == JointType.D6:
-            why += (
-                "; with enable_d6_joints=True SolverIPC takes a D6 joint that locks what one of them locks, or nothing"
-            )
-        elif t == JointType.DISTANCE:
-            why += (
-                "; with enable_distance_joints=True SolverIPC takes a distance joint of one length, as libuipc's soft "
-                "vertex stitch of that rest length, and one of no length"
-            )
         raise NotImplementedError(f"SolverIPC does not simulate {t.name} joints (joint {j}): {why}.")
     d6 = np.flatnonzero(joint_type == int(JointType.D6))
     if len(d6):
@@ -178,16 +144,15 @@ def _map_joints(model: Model, options: _JointOptions) -> _JointMap:
 
 
 def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
-    """Joints that libuipc's affine-body joints represent (:ref:`ipc-joints`): revolute, prismatic, fixed, ball and free
-    joints, and with ``options`` the joints ``_map_joints`` maps; drives, passive springs, damping and limits on
-    revolute and prismatic joints only; no armature (with ``options.armature``, none on ball and free joints), no joint
-    friction, and no effort limit on a driven degree of freedom (with ``options.effort_limit``, none that is
-    negative)."""
+    """Joints that libuipc's affine-body joints represent (:ref:`ipc-joints`): the joints ``_map_joints`` maps; drives,
+    passive springs, damping, limits and armature on revolute and prismatic joints only; no negative armature, no
+    joint friction, and no negative effort limit on a driven degree of freedom (without ``options.effort_limit``, none
+    below Newton's default)."""
     if model.joint_count == 0:
         return
     joint_type = model.joint_type.numpy()
     options = options or _JointOptions()
-    kind = _map_joints(model, options).kind
+    kind = _map_joints(model).kind
     if model.joint_dof_count == 0:
         return
     qd_start = model.joint_qd_start.numpy()
@@ -224,27 +189,18 @@ def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
     limited[qd_start[:-1][joint_type == int(JointType.DISTANCE)]] = False  # a distance joint's bounds
     other = np.isin(dof_type, [int(JointType.BALL), int(JointType.FREE)])
     armature = per_dof("joint_armature")
-    if options.armature:
-        refuse(
-            np.flatnonzero(~(armature >= 0.0)),
-            lambda d: f"joint_armature {float(armature[d])!r}",
-            "takes no negative joint armature",
-        )
-        refuse(
-            np.flatnonzero((armature != 0.0) & other),
-            lambda d: f"joint_armature {float(armature[d])!r}",
-            "gives the armature of revolute and prismatic joints only: libuipc's driving term, which holds it, is a "
-            "quadratic potential of one hinge angle or one distance, and the armature of a ball or a free joint is an "
-            "inertia about three axes, or a mass without weight",
-        )
-    else:
-        refuse(
-            np.flatnonzero(armature != 0.0),
-            lambda d: f"joint_armature {float(armature[d])!r}",
-            "does not simulate joint armature: libuipc's joints have no inertia of their own; with "
-            "enable_joint_armature=True SolverIPC gives a revolute or prismatic joint's to its coordinate, through "
-            "libuipc's driving term",
-        )
+    refuse(
+        np.flatnonzero(~(armature >= 0.0)),
+        lambda d: f"joint_armature {float(armature[d])!r}",
+        "takes no negative joint armature",
+    )
+    refuse(
+        np.flatnonzero((armature != 0.0) & other),
+        lambda d: f"joint_armature {float(armature[d])!r}",
+        "gives the armature of revolute and prismatic joints only: libuipc's driving term, which holds it, is a "
+        "quadratic potential of one hinge angle or one distance, and the armature of a ball or a free joint is an "
+        "inertia about three axes, or a mass without weight",
+    )
 
     def drive(d: int) -> str:
         if actuated[d]:
@@ -288,16 +244,16 @@ def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
 
 
 def _plan_distance_joints(solver: SolverIPC) -> None:
-    """The anchors of the distance joints of one length (``enable_distance_joints``, :ref:`ipc-distance-joints`): one on
-    either side at the origin of its joint frame, ``joint_X_p`` in the parent's frame, the fixed body that stands for
-    the world for a parent of -1, and ``joint_X_c`` in the child's, after the anchors of the attachments; for every such
-    joint the body and the anchor of its two sides."""
+    """The anchors of the distance joints of one length (:ref:`ipc-distance-joints`): one on either side at the origin
+    of its joint frame, ``joint_X_p`` in the parent's frame, the fixed body that stands for the world for a parent of
+    -1, and ``joint_X_c`` in the child's, after the anchors of the attachments; for every such joint the body and the
+    anchor of its two sides."""
     model = solver.model
     solver._distance_joints = np.zeros(0, np.int32)
     solver._distance_anchor = np.zeros((0, 2, 2), np.int64)  # joint, side (parent, child), (body, anchor)
-    if model.joint_count == 0 or not solver._joint_options.distance:
+    if model.joint_count == 0:
         return
-    joints = _map_joints(model, solver._joint_options).distance
+    joints = _map_joints(model).distance
     parent, child = model.joint_parent.numpy()[joints], model.joint_child.numpy()[joints]
     X_p, X_c = model.joint_X_p.numpy().astype(np.float64), model.joint_X_c.numpy().astype(np.float64)
     anchor = np.zeros((len(joints), 2, 2), np.int64)
@@ -333,9 +289,9 @@ def _joint_inputs_now(solver: SolverIPC) -> tuple:
 
 
 def _add_joints(solver: SolverIPC, scene) -> None:
-    """Newton's revolute, prismatic, fixed and ball joints as libuipc's (:ref:`ipc-joints`), and with
-    ``enable_d6_joints`` the D6 joints that lock what one of them locks (``_map_joints``), joint frames taken as the
-    reference rotations, a fixed affine body without mass standing for the world. Sets up what the per-step kernels
+    """Newton's revolute, prismatic, fixed and ball joints as libuipc's (:ref:`ipc-joints`), and the D6 joints that lock
+    what one of them locks (``_map_joints``), joint frames taken as the reference rotations, a fixed affine body without
+    mass standing for the world. Sets up what the per-step kernels
     read: per kind the joint of every group row and the row's penalty (``_joint_strength``, 0 without a dynamic body),
     per joint its row (``_joint_element``), and the free and ball joints, whose ``joint_f`` acts through the bodies'
     wrenches."""
@@ -345,9 +301,9 @@ def _add_joints(solver: SolverIPC, scene) -> None:
     solver._joint_bodies = {}
     if model.joint_count == 0:
         return
-    # the libuipc joint of every joint: its own type, but for a D6 joint (enable_d6_joints) that of the joint
-    # that locks what it locks; the type the kernels that write the coordinates and joint_f take it for
-    mapping = _map_joints(model, solver._joint_options)
+    # the libuipc joint of every joint: its own type, but for a D6 joint that of the joint that locks what it locks;
+    # the type the kernels that write the coordinates and joint_f take it for
+    mapping = _map_joints(model)
     joint_type = mapping.kind
     solver._joint_store_type = model.joint_type
     if mapping.relabeled:
@@ -411,8 +367,8 @@ def _add_joints(solver: SolverIPC, scene) -> None:
             # the coordinate at the start of this step, of the step before (BDF2's drives), and the one before
             # that step's, which grow() takes back when it solves that step again
             solver._joint_history[kind] = tuple(wp.zeros(len(rows), dtype=wp.float64, device=device) for _ in range(3))
-            if solver._joint_options.rates:  # their rates likewise (_joint_rates)
-                solver._joint_rate[kind] = tuple(wp.zeros(len(rows), dtype=wp.float64, device=device) for _ in range(3))
+            # their rates likewise, for the armature and the effort limit (_joint_rates)
+            solver._joint_rate[kind] = tuple(wp.zeros(len(rows), dtype=wp.float64, device=device) for _ in range(3))
     solver._joint_element = wp.array(element, dtype=wp.int32, device=device)
     solver._joint_q_written = wp.full(model.joint_coord_count, np.nan, dtype=wp.float32, device=device)
 
@@ -434,8 +390,7 @@ def _joint_strengths(solver: SolverIPC, kind: str, mass: np.ndarray) -> tuple[np
 
 def _shift_joint_history(solver: SolverIPC) -> None:
     """BDF2: the joint coordinates at the start of this step become those of the step before, whose own are kept
-    for grow() (on the device, also inside a captured graph); and so do their rates, where the joint options need
-    them (``_joint_rates``)."""
+    for grow() (on the device, also inside a captured graph); and so do their rates (``_joint_rates``)."""
     if solver._config.integrator != "bdf2":
         return
     for q_start, q_prev, q_kept in (*solver._joint_history.values(), *solver._joint_rate.values()):
@@ -446,8 +401,8 @@ def _shift_joint_history(solver: SolverIPC) -> None:
 def _load_joints(solver: SolverIPC, state_in: State) -> None:
     """The joints' angles and distances at the step's start, from the bodies' state just loaded. A revolute joint
     unwraps its angle against the one it had, or against ``state_in.joint_q`` where that is not what the solver wrote,
-    so that a caller who wrote the angle picks its turn (:ref:`ipc-joints`). Where the joint options need them, the
-    rates of the coordinates from the bodies' twists (``_joint_rates``)."""
+    so that a caller who wrote the angle picks its turn (:ref:`ipc-joints`); and the rates of the coordinates from the
+    bodies' twists (``_joint_rates``)."""
     groups, x = solver._joint_groups, solver._engine.vm.x
     if groups.revolute is not None:
         if state_in.joint_q is not None:
@@ -490,8 +445,7 @@ def _load_joints(solver: SolverIPC, state_in: State) -> None:
 
 
 def _write_joint_controls(solver: SolverIPC, control: Control, dt: float) -> None:
-    """The joints' terms of the step from the model and ``control``, on the device (``_joint_terms``), and with the
-    joint options that add to the driving term their terms (``_joint_option_terms``)."""
+    """The joints' terms of the step from the model and ``control``, on the device (``_joint_terms``)."""
     model, groups = solver.model, solver._joint_groups
     if solver._engine is None or model.joint_count == 0:
         return
@@ -500,10 +454,12 @@ def _write_joint_controls(solver: SolverIPC, control: Control, dt: float) -> Non
     restart = solver._engine.bdf1_frame[0:1] if bdf2 else None
     # with several worlds a reset or a new state restarts the rows of its worlds only (reset, _load)
     rows = solver._engine.restart_rows if bdf2 else None
+    options = solver._joint_options
     for kind, group, scale in (("revolute", groups.revolute, 1.0), ("prismatic", groups.prismatic, 0.5)):
         if group is None:
             continue
         q_start, q_prev, _ = solver._joint_history[kind]
+        rate_start, rate_prev, _ = solver._joint_rate[kind]
         force_on, force = (group.tq_on, group.tq) if kind == "revolute" else (group.f_on, group.f)
         wp.launch(
             _joint_terms,
@@ -521,6 +477,13 @@ def _write_joint_controls(solver: SolverIPC, control: Control, dt: float) -> Non
                 model.joint_limit_lower,
                 model.joint_limit_upper,
                 model.joint_limit_ke,
+                model.joint_limit_kd,
+                int(options.limit_damping),
+                model.joint_armature,
+                rate_start,
+                rate_prev,
+                model.joint_effort_limit,
+                int(options.effort_limit),
                 target_q,
                 target_qd,
                 joint_f,
@@ -552,48 +515,6 @@ def _write_joint_controls(solver: SolverIPC, control: Control, dt: float) -> Non
             ],
             device=model.device,
         )
-        if solver._joint_options.drive_terms:
-            wp.launch(
-                _joint_option_terms,
-                group.n,
-                inputs=[
-                    solver._joint_rows[kind],
-                    model.joint_q_start,
-                    model.joint_qd_start,
-                    model.joint_enabled,
-                    model.joint_target_ke,
-                    model.joint_target_kd,
-                    model.joint_stiffness,
-                    model.joint_rest_q,
-                    model.joint_damping,
-                    model.joint_limit_lower,
-                    model.joint_limit_upper,
-                    model.joint_limit_ke,
-                    model.joint_limit_kd,
-                    int(solver._joint_options.limit_damping),
-                    model.joint_armature,
-                    int(solver._joint_options.armature),
-                    *(solver._joint_rate[kind][:2] if solver._joint_options.rates else (None, None)),
-                    model.joint_effort_limit,
-                    int(solver._joint_options.effort_limit),
-                    joint_f,
-                    target_q,
-                    target_qd,
-                    group.mass_sum,
-                    group.current,
-                    q_prev,
-                    int(bdf2),
-                    restart,
-                    rows,
-                    model.joint_parent,
-                    model.joint_child,
-                    solver._body_base,
-                    wp.float64(dt),
-                    wp.float64(scale),
-                ],
-                outputs=[group.drv_on, group.drv_ratio, group.drv_aim, force_on, force],
-                device=model.device,
-            )
     for kind, group in (("fixed", groups.fixed), ("spherical", groups.spherical)):
         if group is not None:
             wp.launch(

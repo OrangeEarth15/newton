@@ -372,13 +372,11 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
 
 | :sup:`1` DISTANCE joints are treated as FREE (no distance constraint enforcement).
 | :sup:`2` See :ref:`kamino-rod-joints` for the supported rod joint properties.
-| :sup:`17` With ``enable_d6_joints=True``, SolverIPC takes a D6 joint that locks what one of libuipc's joints
-  locks: no axis (fixed), one angular axis (revolute), one linear axis (prismatic), three orthonormal angular axes
-  (ball), or three orthonormal linear and three orthonormal angular axes (no joint). Other D6 joints raise
-  ``NotImplementedError``.
-| :sup:`18` With ``enable_distance_joints=True``, SolverIPC holds a distance joint of one length (equal bounds) as
-  libuipc's soft vertex stitch of that rest length, and one with both bounds negative as a free joint; a range or a
-  single bound raises ``NotImplementedError``.
+| :sup:`17` SolverIPC takes a D6 joint that locks what one of libuipc's joints locks: no axis (fixed), one angular
+  axis (revolute), one linear axis (prismatic), three orthonormal angular axes (ball), or three orthonormal linear and
+  three orthonormal angular axes (no joint). Other D6 joints raise ``NotImplementedError``.
+| :sup:`18` SolverIPC holds a distance joint of one length (equal bounds) as libuipc's soft vertex stitch of that rest
+  length, and one with both bounds negative as a free joint; a range or a single bound raises ``NotImplementedError``.
 
 **Joint properties**
 
@@ -449,7 +447,7 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
      - |yes|
      - |yes| :sup:`7`
      - |no|
-     - ``joint_limit_ke`` only :sup:`16`
+     - |yes| :sup:`16`
    * - :attr:`~newton.Model.joint_effort_limit`
      - |no|
      - |yes| :sup:`11`
@@ -470,15 +468,15 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
      - |no|
 
 | :sup:`2` Not enforced for BALL joints in SemiImplicit.
-| :sup:`15` SolverIPC raises ``NotImplementedError`` instead of ignoring the property: for non-zero armature, but
-  with ``enable_joint_armature=True`` on a revolute or prismatic joint, whose armature is then the inertia of its
-  coordinate; for non-zero friction; and for an effort limit below 1e6 on a degree of freedom with a drive, but with
-  ``enable_joint_effort_limit=True``, which bounds the drive's force as decided at the start of every step (where
-  MuJoCo clamps it), so that a step that crosses the bound takes it one step late.
+| :sup:`15` SolverIPC takes the armature of a revolute or prismatic joint as the inertia of its coordinate, and
+  bounds the force of a drive by an effort limit below 1e6 as decided at the start of every step (where MuJoCo clamps
+  it), so that a step that crosses the bound takes it one step late. It raises ``NotImplementedError`` instead of
+  ignoring the property for armature on a ball or free joint, for non-zero friction, and, with
+  ``enable_joint_effort_limit=False``, for an effort limit below 1e6 on a degree of freedom with a drive.
 | :sup:`16` SolverIPC enforces a limit as libuipc's cubic penalty, set to push back with ``joint_limit_ke`` times
-  the overshoot at an overshoot of 1e-3 rad or m, more steeply beyond; ``joint_limit_kd`` is not read unless
-  ``enable_joint_limit_damping=True``, which damps a joint that starts a step past a limit by ``joint_limit_kd``, as
-  Featherstone and SemiImplicit do.
+  the overshoot at an overshoot of 1e-3 rad or m, more steeply beyond, and damps a joint that starts a step past a
+  limit by ``joint_limit_kd``, as Featherstone and SemiImplicit do; with ``enable_joint_limit_damping=False``
+  ``joint_limit_kd`` is not read.
 
 SemiImplicit angular springs use principal coordinates in [-pi, pi). Crossing
 that boundary produces a force jump of ``2*pi*stiffness`` and can destabilize

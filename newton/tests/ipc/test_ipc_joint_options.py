@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""SolverIPC's joints on request: D6 and distance joints, limit damping, armature, effort limits."""
+"""SolverIPC's joints beyond libuipc's own: D6 and distance joints, armature, limit damping and effort limits."""
 
 import unittest
 
@@ -95,18 +95,15 @@ def _d6_twins(device, d6):
 
 
 def test_d6_joints_take_libuipcs_joints(test, device):
-    """With enable_d6_joints=True a D6 joint of one angular axis is libuipc's revolute joint about it, of one linear
-    axis its prismatic joint along it, of no axis its fixed joint and of three orthonormal angular axes its ball joint,
-    with their drives, limits and joint_f: a chain of the four built with D6 joints gives the engine the joints of the
-    same chain built with Newton's revolute, fixed, ball and prismatic joints (libuipc-warp's ArrayScene calls, argument
-    by argument, bit for bit), and steps as it does, the revolute and prismatic coordinates included. Without the
-    option the D6 joints are refused."""
-    with test.assertRaisesRegex(NotImplementedError, "D6 joints \\(joint 0\\).*enable_d6_joints=True"):
-        newton.solvers.SolverIPC(_d6_twins(device, True)[0])
+    """A D6 joint of one angular axis is libuipc's revolute joint about it, of one linear axis its prismatic joint along
+    it, of no axis its fixed joint and of three orthonormal angular axes its ball joint, with their drives, limits and
+    joint_f: a chain of the four built with D6 joints gives the engine the joints of the same chain built with Newton's
+    revolute, fixed, ball and prismatic joints (libuipc-warp's ArrayScene calls, argument by argument, bit for bit), and
+    steps as it does, the revolute and prismatic coordinates included."""
     runs = []
     for d6 in (False, True):
         model, state = _d6_twins(device, d6)
-        solver, groups = _joint_inputs(model, enable_d6_joints=d6)
+        solver, groups = _joint_inputs(model)
         control = model.control()
         f = np.zeros(model.joint_dof_count, np.float32)
         f[0], f[-1] = 0.3, -2.0  # the arm's torque and the slider's force, the first and the last DOF either way
@@ -157,7 +154,7 @@ def test_d6_coordinates_are_newtons(test, device):
             q = ([0.1, -0.2, 0.05] if lin else []) + [0.5, -0.4, 0.7]
             qd = ([0.3, 0.0, -0.1] if lin else []) + [0.9, -0.6, 0.3]
             model, state, _ = _d6_body(device, lin, axes, q, qd, gravity=10.0)
-            solver = newton.solvers.SolverIPC(model, enable_d6_joints=True)
+            solver = newton.solvers.SolverIPC(model)
             s0, s1 = state, model.state()
             moved = 0.0
             for _ in range(40):
@@ -187,7 +184,7 @@ def test_d6_joint_f_is_featherstones(test, device):
             rates = []
             for make in (
                 lambda m: newton.solvers.SolverFeatherstone(m, angular_damping=0.0),
-                lambda m: newton.solvers.SolverIPC(m, enable_d6_joints=True),
+                newton.solvers.SolverIPC,
             ):
                 model, state, _ = _d6_body(device, lin, axes, q0, [0.0] * len(q0))
                 control = model.control()
@@ -205,7 +202,7 @@ def test_d6_joint_f_is_featherstones(test, device):
     model, state, _ = _d6_body(device, True, "XYZ", [0.0] * 6, [0.0] * 6, offset=0.0)
     control = model.control()
     control.joint_f.assign(np.array([0.0, 2.0, 0.0, 0.0, 0.0, 0.3], np.float32))
-    solver = newton.solvers.SolverIPC(model, enable_d6_joints=True, **_CONVERGED)
+    solver = newton.solvers.SolverIPC(model, **_CONVERGED)
     q, _ = _steps(model, solver, state, steps, h, control)
     n = np.arange(1, steps + 1)
     # implicit Euler from rest under a constant acceleration a: q_n = a h^2 n (n + 1) / 2; the angle to the float32
@@ -231,16 +228,13 @@ def _distance_pendulum(device, length, theta, lower, upper, gravity=10.0):
 
 
 def test_distance_joint_swings_as_a_pendulum(test, device):
-    """With enable_distance_joints=True a distance joint of one length L is libuipc's soft vertex stitch of rest length
-    L between its joint frames' origins: a sphere hanging 1 m from the world on it at its centre swings 0.02 rad as
-    implicit Euler integrates the linearized point-mass pendulum, step by step to 1e-3 of its amplitude, and stays at
-    L within the ball joint's penalty. Without the option the joint is refused, and a distance joint with a range or a
-    single bound is refused with it."""
+    """A distance joint of one length L is libuipc's soft vertex stitch of rest length L between its joint frames'
+    origins: a sphere hanging 1 m from the world on it at its centre swings 0.02 rad as implicit Euler integrates the
+    linearized point-mass pendulum, step by step to 1e-3 of its amplitude, and stays at L within the ball joint's
+    penalty. A distance joint with a range or a single bound is refused."""
     L, theta0, g, h = 1.0, 0.02, 10.0, 1.0e-3
     model = _distance_pendulum(device, L, theta0, L, L, gravity=g)
-    with test.assertRaisesRegex(NotImplementedError, "DISTANCE joints \\(joint 0\\).*enable_distance_joints=True"):
-        newton.solvers.SolverIPC(model)
-    solver = newton.solvers.SolverIPC(model, enable_distance_joints=True, **_CONVERGED)
+    solver = newton.solvers.SolverIPC(model, **_CONVERGED)
     test.assertEqual(len(solver._distance_rows), 1)
     m = float(model.body_mass.numpy()[0])
     steps = 700  # beyond half a period, 2 pi sqrt(L / g) = 1.99 s
@@ -255,7 +249,7 @@ def test_distance_joint_swings_as_a_pendulum(test, device):
     for lower, upper in ((0.5, 1.0), (-1.0, 1.0), (0.5, -1.0)):
         with test.subTest(bounds=(lower, upper)):
             with test.assertRaisesRegex(NotImplementedError, "a range or a single bound is an inequality"):
-                newton.solvers.SolverIPC(_distance_pendulum(device, L, 0.0, lower, upper), enable_distance_joints=True)
+                newton.solvers.SolverIPC(_distance_pendulum(device, L, 0.0, lower, upper))
 
 
 def test_distance_joint_between_bodies(test, device):
@@ -284,7 +278,7 @@ def test_distance_joint_between_bodies(test, device):
 
     h, steps = 0.005, 200
     model, state = pair(0.5, 0.5)
-    solver = newton.solvers.SolverIPC(model, enable_distance_joints=True, **_CONVERGED)
+    solver = newton.solvers.SolverIPC(model, **_CONVERGED)
     s0, s1 = state, model.state()
     m = model.body_mass.numpy().astype(np.float64)
     for _ in range(steps):
@@ -303,7 +297,7 @@ def test_distance_joint_between_bodies(test, device):
     for lower, upper, enabled in ((-1.0, -1.0, True), (0.5, 0.5, False)):
         with test.subTest(bounds=(lower, upper), enabled=enabled):
             model, state = pair(lower, upper, enabled)
-            solver = newton.solvers.SolverIPC(model, enable_distance_joints=True)
+            solver = newton.solvers.SolverIPC(model)
             _, s0 = _steps(model, solver, state, 20, h)
             x = s0.body_q.numpy()[:, :3]
             np.testing.assert_allclose(x[:, 1], [-20 * h, 20 * h], rtol=0.0, atol=1e-5)
@@ -334,12 +328,12 @@ def _limit_recurrence(m, h, steps, g, lower, limit_ke, damping=0.0, at_start=Tru
 
 
 def test_limit_damping_is_implicit_euler(test, device):
-    """With enable_joint_limit_damping=True a slider that falls under gravity onto its lower limit takes the damping
-    -joint_limit_kd qd of Featherstone and SemiImplicit in the steps that start past the limit, at the step's end
-    velocity: it follows the implicit-Euler recurrence of the cubic limit with that damping step by step to 1e-4 m,
-    and stays at the limit where the undamped slider (the option off, kd ignored as before) bounces 5 cm off it,
-    which follows the recurrence without damping. A recurrence that switches the damping on in the steps that end
-    past the limit is farther off."""
+    """By default (enable_joint_limit_damping=True) a slider that falls under gravity onto its lower limit takes the
+    damping -joint_limit_kd qd of Featherstone and SemiImplicit in the steps that start past the limit, at the step's
+    end velocity: it follows the implicit-Euler recurrence of the cubic limit with that damping step by step to 1e-4
+    m, and stays at the limit where the undamped slider (enable_joint_limit_damping=False, kd not read) bounces 5 cm
+    off it, which follows the recurrence without damping. A recurrence that switches the damping on in the steps that
+    end past the limit is farther off."""
     g, lower, limit_ke, kd, h, steps = 10.0, -0.1, 1.0e3, 200.0, 2.0e-3, 300
     runs = {}
     for option in (False, True):
@@ -362,11 +356,11 @@ def test_limit_damping_is_implicit_euler(test, device):
 
 
 def test_armature_is_implicit_euler(test, device):
-    """With enable_joint_armature=True a revolute and a prismatic joint driven from rest by target gains, a passive
-    spring, passive damping and joint_f take their joint_armature as the inertia of their coordinate: they follow the
-    recurrence of (I + a) q'' = ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd + f step by step to 1e-4 of
-    their motion, under implicit Euler and, from an implicit Euler step, under BDF2, where the recurrence of I alone
-    is farther off. A ball joint's armature is refused with the option, every armature without it."""
+    """A revolute and a prismatic joint driven from rest by target gains, a passive spring, passive damping and joint_f
+    take their joint_armature as the inertia of their coordinate: they follow the recurrence of
+    (I + a) q'' = ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd + f step by step to 1e-4 of their motion, under
+    implicit Euler and, from an implicit Euler step, under BDF2, where the recurrence of I alone is farther off. A ball
+    joint's armature is refused."""
     for integrator, recurrence in (("bdf1", _drive_recurrence), ("bdf2", _drive_recurrence_bdf2)):
         for kind, length, scale, armature in (("revolute", 0.1, 1.0, 20.0), ("prismatic", 1.0, 10.0, 200.0)):
             with test.subTest(integrator=integrator, kind=kind):
@@ -376,12 +370,7 @@ def test_armature_is_implicit_euler(test, device):
                 model, state, _ = _hinged(
                     device, kind, axis=newton.Axis.X, radius=0.5, armature=armature, **targets, **gains
                 )
-                if integrator == "bdf1":
-                    with test.assertRaisesRegex(NotImplementedError, "joint armature.*enable_joint_armature=True"):
-                        newton.solvers.SolverIPC(model)
-                solver = newton.solvers.SolverIPC(
-                    model, integrator=integrator, enable_joint_armature=True, **_CONVERGED
-                )
+                solver = newton.solvers.SolverIPC(model, integrator=integrator, **_CONVERGED)
                 control = model.control()
                 control.joint_f.assign(np.array([0.2 * scale * length], np.float32))
                 m = float(model.body_mass.numpy()[0])
@@ -403,7 +392,7 @@ def test_armature_is_implicit_euler(test, device):
     builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1)
     builder.add_articulation([builder.add_joint_ball(-1, link, armature=0.01)])
     with test.assertRaisesRegex(NotImplementedError, "armature of revolute and prismatic joints only"):
-        newton.solvers.SolverIPC(builder.finalize(device=device), enable_joint_armature=True)
+        newton.solvers.SolverIPC(builder.finalize(device=device))
 
 
 def _bounded_drive_recurrence(inertia, h, steps, ke, kd, q_target, bound, forces=None):
@@ -426,25 +415,25 @@ def _bounded_drive_recurrence(inertia, h, steps, ke, kd, q_target, bound, forces
 
 
 def test_effort_limit_bounds_the_drive(test, device):
-    """With enable_joint_effort_limit=True a hinge driven through a step of its target by gains whose force exceeds
-    its joint_effort_limit takes the bound as a constant torque in the steps that start above it, and the drive in the
-    others: it follows that recurrence step by step to 1e-4 of its motion (through the bound, the drive, and the bound
-    again as it brakes), where the unbounded drive's recurrence is far off; under BDF2 its saturated steps from rest
-    follow BDF2's recurrence of the constant torque. Without the option the limit is refused, and a negative one with
-    it."""
+    """By default (enable_joint_effort_limit=True) a hinge driven through a step of its target by gains whose force
+    exceeds its joint_effort_limit takes the bound as a constant torque in the steps that start above it, and the drive
+    in the others: it follows that recurrence step by step to 1e-4 of its motion (through the bound, the drive, and the
+    bound again as it brakes), where the unbounded drive's recurrence is far off; under BDF2 its saturated steps from
+    rest follow BDF2's recurrence of the constant torque. With enable_joint_effort_limit=False the limit is refused,
+    and a negative one always."""
     ke, kd, q_target, bound, h, steps = 400.0, 100.0, 0.05, 2.0, 0.01, 300
     model, state, _ = _hinged(
         device, axis=newton.Axis.X, radius=0.5, target_ke=ke, target_kd=kd, target_q=q_target, effort_limit=bound
     )
     with test.assertRaisesRegex(NotImplementedError, "enable_joint_effort_limit=True.*joint_effort_limit 2.0"):
-        newton.solvers.SolverIPC(model)
+        newton.solvers.SolverIPC(model, enable_joint_effort_limit=False)
     inertia = float(model.body_inertia.numpy()[0][0, 0])
     forces = []
     expected = _bounded_drive_recurrence(inertia, h, steps, ke, kd, q_target, bound, forces)
     saturated = np.abs(np.array(forces)) > bound
     test.assertTrue(saturated[0] and not saturated.all())  # the bound, the drive, and the bound again
     test.assertGreater(np.count_nonzero(np.diff(saturated.astype(int))), 1)
-    solver = newton.solvers.SolverIPC(model, enable_joint_effort_limit=True, **_CONVERGED)
+    solver = newton.solvers.SolverIPC(model, **_CONVERGED)
     q, _ = _steps(model, solver, state, steps, h, model.control())
     motion = np.abs(expected).max()
     np.testing.assert_allclose(q[:, 0], expected, rtol=0.0, atol=1e-4 * motion)
@@ -454,7 +443,7 @@ def test_effort_limit_bounds_the_drive(test, device):
     model, state, _ = _hinged(
         device, axis=newton.Axis.X, radius=0.5, target_ke=ke, target_kd=kd, target_q=q_target, effort_limit=bound
     )
-    solver = newton.solvers.SolverIPC(model, integrator="bdf2", enable_joint_effort_limit=True, **_CONVERGED)
+    solver = newton.solvers.SolverIPC(model, integrator="bdf2", **_CONVERGED)
     first = int(np.argmin(saturated))  # the steps from rest that start above the bound
     q, _ = _steps(model, solver, state, first, h, model.control())
     torque = _drive_recurrence_bdf2(inertia, h, first, f=bound)
@@ -462,13 +451,14 @@ def test_effort_limit_bounds_the_drive(test, device):
 
     model, _, _ = _hinged(device, axis=newton.Axis.X, target_ke=ke, effort_limit=-1.0)
     with test.assertRaisesRegex(NotImplementedError, "takes no negative effort limit"):
-        newton.solvers.SolverIPC(model, enable_joint_effort_limit=True)
+        newton.solvers.SolverIPC(model)
 
 
 def test_joint_options_change_nothing_unused(test, device):
-    """The enable_* options leave a model that does not use them as it is: a revolute and a prismatic joint driven
-    within their limits, with joint_limit_kd that never acts, no armature and Newton's default effort limit, step bit
-    for bit as without the options."""
+    """The terms beyond libuipc's driving term leave a joint that does not use them as it is: a revolute and a
+    prismatic joint driven within their limits, with joint_limit_kd that never acts, no armature and Newton's default
+    effort limit, step bit for bit with enable_joint_limit_damping and enable_joint_effort_limit on (the default) and
+    off."""
     runs = []
     for option in (False, True):
         steps = []
@@ -479,12 +469,11 @@ def test_joint_options_change_nothing_unused(test, device):
                 limit_kd=10.0,
             )  # fmt: skip
             solver = newton.solvers.SolverIPC(
-                model,
-                enable_joint_limit_damping=option,
-                enable_joint_armature=option,
-                enable_joint_effort_limit=option,
+                model, enable_joint_limit_damping=option, enable_joint_effort_limit=option
             )
-            test.assertEqual(solver._joint_options.drive_terms, option)
+            test.assertEqual(
+                (solver._joint_options.limit_damping, solver._joint_options.effort_limit), (option, option)
+            )
             steps.append(_steps(model, solver, state, 50, 0.01, None, lambda s: s.body_q.numpy().copy())[0])
         runs.append(steps)
     for before, after in zip(*runs, strict=True):
@@ -493,8 +482,7 @@ def test_joint_options_change_nothing_unused(test, device):
 
 
 def test_rejects_d6_joints_libuipc_lacks(test, device):
-    """With enable_d6_joints=True the D6 joints that lock what no libuipc joint locks are refused, naming what they
-    lock: two angular axes, three linear axes, one linear and one angular; and three angular axes that are not
+    """The D6 joints that lock what no libuipc joint locks are refused, naming what they lock: two angular axes, three linear axes, one linear and one angular; and three angular axes that are not
     orthonormal, and drives and limits on the D6 joints that become a ball joint or no joint."""
     D = newton.ModelBuilder.JointDofConfig
 
@@ -518,13 +506,13 @@ def test_rejects_d6_joints_libuipc_lacks(test, device):
     ):
         with test.subTest(name):
             with test.assertRaisesRegex(NotImplementedError, pattern):
-                newton.solvers.SolverIPC(m, enable_d6_joints=True)
+                newton.solvers.SolverIPC(m)
 
 
 @requires("uipc_warp")
 class TestSolverIPCJointOptions(unittest.TestCase):
-    """Joints on request (enable_d6_joints and the other enable_* options): Newton's joints that map onto libuipc's
-    own constitutions beyond the revolute, prismatic, fixed, ball and free joints."""
+    """Newton's joints and joint terms beyond libuipc's revolute, prismatic, fixed, ball and free joints: D6 and
+    distance joints that map onto libuipc's own constitutions, armature, limit damping and effort limits."""
 
 
 devices = get_cuda_test_devices()

@@ -524,110 +524,6 @@ def _drive_load_bdf2(
 
 
 @wp.kernel
-def _joint_terms(
-    joints: wp.array[wp.int32],
-    joint_q_start: wp.array[wp.int32],
-    joint_qd_start: wp.array[wp.int32],
-    joint_enabled: wp.array[wp.bool],
-    target_ke: wp.array[wp.float32],
-    target_kd: wp.array[wp.float32],
-    stiffness: wp.array[wp.float32],
-    rest_q: wp.array[wp.float32],
-    damping: wp.array[wp.float32],
-    limit_lower: wp.array[wp.float32],
-    limit_upper: wp.array[wp.float32],
-    limit_ke: wp.array[wp.float32],
-    target_q: wp.array[wp.float32],
-    target_qd: wp.array[wp.float32],
-    joint_f: wp.array[wp.float32],
-    strength: wp.array[wp.float64],
-    mass_sum: wp.array[wp.float64],
-    current: wp.array[wp.float64],
-    q_prev: wp.array[wp.float64],
-    bdf2: int,
-    restart: wp.array[wp.int32],
-    restart_rows: wp.array[wp.int32],
-    joint_parent: wp.array[wp.int32],
-    joint_child: wp.array[wp.int32],
-    body_base: wp.array[wp.int32],
-    dt: wp.float64,
-    drive_scale: wp.float64,
-    q_start: wp.array[wp.float64],
-    ratio: wp.array[wp.float64],
-    drv_on: wp.array[wp.int32],
-    drv_ratio: wp.array[wp.float64],
-    drv_aim: wp.array[wp.float64],
-    lim_on: wp.array[wp.int32],
-    lim_lower: wp.array[wp.float64],
-    lim_upper: wp.array[wp.float64],
-    lim_strength: wp.array[wp.float64],
-    force_on: wp.array[wp.int32],
-    force: wp.array[wp.float64],
-):
-    """The terms of a revolute or prismatic joint for the next step, from Newton's model and control
-    (:ref:`ipc-joints`): the strength ratio of its penalty ``strength`` (0 when disabled) for the engine's ``mass_sum``,
-    the masses the joint was built with; the drive, passive spring and passive damping as one quadratic potential of the
-    step (libuipc's driving term, ``drive_scale`` 1 for a revolute joint, 1/2 for a prismatic one, whose driving energy
-    counts its distance twice), with the velocity at the step's end of the step's integrator: BDF1, or with ``bdf2``
-    BDF2 from the coordinate ``q_prev`` at the start of the step before, unless the engine's frame starts the history of
-    the joint's bodies with an implicit Euler step: that of every row (``restart[0]``), or that of the rows of a reset
-    or a new state of their world (``restart_rows``, at the base row of the child or of the parent); the limit as
-    libuipc's cubic penalty with Newton's limit stiffness at ``_LIMIT_OVERSHOOT``; ``joint_f`` as libuipc's
-    external torque or force. ``q_start`` takes the coordinate at the step's start."""
-    e = wp.tid()
-    j = joints[e]
-    d = joint_qd_start[j]
-    i = joint_q_start[j]
-    on = joint_enabled[j]
-    zero = wp.float64(0.0)
-    m = mass_sum[e]
-    r = zero
-    if on and m > zero:
-        r = strength[e] / m
-    ratio[e] = r
-    ke, kd, ks, c, q_rest, q_target, qd_target = _drive_inputs(
-        d, i, target_ke, target_kd, stiffness, rest_q, damping, target_q, target_qd
-    )
-    q_n = current[e]
-    q_start[e] = q_n
-    # the drive, passive spring and passive damping as one quadratic potential of the step, K/2 (q - q_aim)^2
-    K = _drive_stiffness_bdf1(ke, kd, ks, c, dt)
-    q_aim = zero
-    restarted = _joint_restarted(j, restart, restart_rows, joint_parent, joint_child, body_base)
-    if bdf2 != 0 and not restarted:
-        w = wp.float64(1.5) / dt
-        K = _drive_stiffness_bdf2(ke, kd, ks, c, w)
-        q_bar = (wp.float64(4.0) * q_n - q_prev[e]) / wp.float64(3.0)
-        if K > zero:
-            q_aim = _drive_load_bdf2(ke, kd, ks, c, q_rest, q_target, qd_target, q_bar, w) / K
-    elif K > zero:
-        q_aim = _drive_load_bdf1(ke, kd, ks, c, q_rest, q_target, qd_target, q_n, dt) / K
-    drive = on and K > zero and m > zero
-    drv_on[e] = wp.where(drive, 1, 0)
-    if drive:
-        drv_aim[e] = q_aim
-        drv_ratio[e] = drive_scale * K * dt * dt / m
-    lo = limit_lower[d]
-    hi = limit_upper[d]
-    limit_k = wp.float64(limit_ke[d])
-    limited = on and limit_k > zero and (lo > -_MAXVAL or hi < _MAXVAL)
-    lim_on[e] = wp.where(limited, 1, 0)
-    if limited:
-        # libuipc's penalty s ((x - u) / (u - l))^3 is, at an overshoot delta, the energy
-        # dt^2 limit_k delta^3 / (3 delta_r)
-        w = wp.float64(hi) - wp.float64(lo)
-        w3 = wp.where(w > zero, w * w * w, wp.float64(1.0))
-        lim_lower[e] = wp.float64(lo)
-        lim_upper[e] = wp.float64(hi)
-        lim_strength[e] = dt * dt * limit_k * w3 / (wp.float64(3.0) * _LIMIT_OVERSHOOT)
-    value = zero
-    if joint_f:
-        value = wp.float64(joint_f[d])
-    force_on[e] = wp.where(on and value != zero, 1, 0)
-    force[e] = value
-
-
-@wp.kernel
 def _joint_rates(
     joints: wp.array[wp.int32],
     prismatic: int,
@@ -666,7 +562,7 @@ def _joint_rates(
 
 
 @wp.kernel
-def _joint_option_terms(
+def _joint_terms(
     joints: wp.array[wp.int32],
     joint_q_start: wp.array[wp.int32],
     joint_qd_start: wp.array[wp.int32],
@@ -682,14 +578,14 @@ def _joint_option_terms(
     limit_kd: wp.array[wp.float32],
     limit_damping: int,
     joint_armature: wp.array[wp.float32],
-    armature: int,
     rate_start: wp.array[wp.float64],
     rate_prev: wp.array[wp.float64],
     effort_limit: wp.array[wp.float32],
     effort: int,
-    joint_f: wp.array[wp.float32],
     target_q: wp.array[wp.float32],
     target_qd: wp.array[wp.float32],
+    joint_f: wp.array[wp.float32],
+    strength: wp.array[wp.float64],
     mass_sum: wp.array[wp.float64],
     current: wp.array[wp.float64],
     q_prev: wp.array[wp.float64],
@@ -701,25 +597,37 @@ def _joint_option_terms(
     body_base: wp.array[wp.int32],
     dt: wp.float64,
     drive_scale: wp.float64,
+    q_start: wp.array[wp.float64],
+    ratio: wp.array[wp.float64],
     drv_on: wp.array[wp.int32],
     drv_ratio: wp.array[wp.float64],
     drv_aim: wp.array[wp.float64],
+    lim_on: wp.array[wp.int32],
+    lim_lower: wp.array[wp.float64],
+    lim_upper: wp.array[wp.float64],
+    lim_strength: wp.array[wp.float64],
     force_on: wp.array[wp.int32],
     force: wp.array[wp.float64],
 ):
-    """The driving term of a revolute or prismatic joint with the terms SolverIPC adds on request (:ref:`ipc-joints`),
-    launched after ``_joint_terms`` and in place of its driving term: the drive, passive spring and passive damping as
-    ``_joint_terms`` computes them (the same functions, so that terms of 0 leave its values bit for bit), and with
-    ``limit_damping`` the damping ``-joint_limit_kd qd`` of a joint whose coordinate is past one of its limits at the
-    step's start, a passive damping of the step's velocity (BDF1 or BDF2, as ``_joint_terms`` takes it) folded into the
-    same quadratic potential; with ``armature`` the inertia of the coordinate, the step's kinetic term ``a/2 |q - q~|^2
-    / dt^2`` (BDF2: 9/4 of it) of ``joint_armature`` a with the integrator's prediction q~ from the coordinate and its
-    rate ``rate_start`` at the step's start (``_joint_rates``; BDF2 also the step before's, ``q_prev`` and
-    ``rate_prev``), as libuipc writes the inertia of every degree of freedom; with ``effort`` the bound
-    ``joint_effort_limit`` L (below Newton's default 1e6) of the drive's force, decided at the step's start: where ``ke
-    (q* - q_n) + kd (qd* - qd_n)`` exceeds L in magnitude, the step takes the constant force of that sign and magnitude
-    L as libuipc's joint torque or force (``force``, with ``joint_f``) in place of the drive's quadratic, whose passive
-    spring and damping remain."""
+    """The terms of a revolute or prismatic joint for the next step, from Newton's model and control
+    (:ref:`ipc-joints`): the strength ratio of its penalty ``strength`` (0 when disabled) for the engine's ``mass_sum``,
+    the masses the joint was built with; the drive, passive spring and passive damping as one quadratic potential of the
+    step (libuipc's driving term, ``drive_scale`` 1 for a revolute joint, 1/2 for a prismatic one, whose driving energy
+    counts its distance twice), with the velocity at the step's end of the step's integrator: BDF1, or with ``bdf2``
+    BDF2 from the coordinate ``q_prev`` at the start of the step before, unless the engine's frame starts the history of
+    the joint's bodies with an implicit Euler step: that of every row (``restart[0]``), or that of the rows of a reset
+    or a new state of their world (``restart_rows``, at the base row of the child or of the parent); in the same
+    potential the inertia of the coordinate, the step's kinetic term ``a/2 |q - q~|^2 / dt^2`` (BDF2: 9/4 of it) of
+    ``joint_armature`` a with the integrator's prediction q~ from the coordinate and its rate ``rate_start`` at the
+    step's start (``_joint_rates``; BDF2 also the step before's, ``q_prev`` and ``rate_prev``), as libuipc writes the
+    inertia of every degree of freedom, and with ``limit_damping`` the damping ``-joint_limit_kd qd`` of a joint whose
+    coordinate is past one of its limits at the step's start, a passive damping of the step's velocity; with ``effort``
+    the bound ``joint_effort_limit`` L (below Newton's default 1e6) of the drive's force, decided at the step's start:
+    where ``ke (q* - q_n) + kd (qd* - qd_n)`` exceeds L in magnitude, the step takes the constant force of that sign and
+    magnitude L as libuipc's joint torque or force (``force``, with ``joint_f``) in place of the drive's quadratic,
+    whose passive spring and damping remain; the limit as libuipc's cubic penalty with Newton's limit stiffness at
+    ``_LIMIT_OVERSHOOT``; ``joint_f`` as libuipc's external torque or force. ``q_start`` takes the coordinate at the
+    step's start. Terms of 0 leave the potential of the drive, spring and damping bit for bit."""
     e = wp.tid()
     j = joints[e]
     d = joint_qd_start[j]
@@ -727,13 +635,18 @@ def _joint_option_terms(
     on = joint_enabled[j]
     zero = wp.float64(0.0)
     m = mass_sum[e]
+    r = zero
+    if on and m > zero:
+        r = strength[e] / m
+    ratio[e] = r
     ke, kd, ks, c, q_rest, q_target, qd_target = _drive_inputs(
         d, i, target_ke, target_kd, stiffness, rest_q, damping, target_q, target_qd
     )
     q_n = current[e]
+    q_start[e] = q_n
     restarted = _joint_restarted(j, restart, restart_rows, joint_parent, joint_child, body_base)
     second = bdf2 != 0 and not restarted
-    # _joint_terms' potential K/2 (q - N/K)^2
+    # the drive, passive spring and passive damping as one quadratic potential of the step, K/2 (q - N/K)^2
     K = _drive_stiffness_bdf1(ke, kd, ks, c, dt)
     N = zero
     w = wp.float64(1.5) / dt
@@ -763,13 +676,13 @@ def _joint_option_terms(
                     N = ks * q_rest + (c / dt) * q_n
     K_add = zero
     N_add = zero
+    lo = limit_lower[d]
+    hi = limit_upper[d]
+    limit_k = wp.float64(limit_ke[d])
+    limited = on and limit_k > zero and (lo > -_MAXVAL or hi < _MAXVAL)
     if limit_damping != 0:
         # Featherstone's and SemiImplicit's -limit_kd qd while the coordinate is past a limit, decided at the step's
         # start, at the step's velocity: BDF1 (q - q_n) / dt, BDF2 w (q - q_bar)
-        lo = limit_lower[d]
-        hi = limit_upper[d]
-        limit_k = wp.float64(limit_ke[d])
-        limited = on and limit_k > zero and (lo > -_MAXVAL or hi < _MAXVAL)
         if limited and (q_n < wp.float64(lo) or q_n > wp.float64(hi)):
             kl = wp.float64(limit_kd[d])
             if second:
@@ -778,32 +691,41 @@ def _joint_option_terms(
             else:
                 K_add += kl / dt
                 N_add += (kl / dt) * q_n
-    if armature != 0:
-        a = wp.float64(joint_armature[d])
-        if a > zero:
-            # implicit Euler: q~ = q_n + dt qd_n; BDF2: q~ = q_bar + 2/9 dt (4 qd_n - qd_(n-1)), weighed 9/4
-            if second:
-                ka = wp.float64(2.25) * a / (dt * dt)
-                K_add += ka
-                N_add += ka * (
-                    q_bar + wp.float64(2.0) * dt / wp.float64(9.0) * (wp.float64(4.0) * rate_start[e] - rate_prev[e])
-                )
-            else:
-                ka = a / (dt * dt)
-                K_add += ka
-                N_add += ka * (q_n + dt * rate_start[e])
+    a = wp.float64(joint_armature[d])
+    if a > zero:
+        # implicit Euler: q~ = q_n + dt qd_n; BDF2: q~ = q_bar + 2/9 dt (4 qd_n - qd_(n-1)), weighed 9/4
+        if second:
+            ka = wp.float64(2.25) * a / (dt * dt)
+            K_add += ka
+            N_add += ka * (
+                q_bar + wp.float64(2.0) * dt / wp.float64(9.0) * (wp.float64(4.0) * rate_start[e] - rate_prev[e])
+            )
+        else:
+            ka = a / (dt * dt)
+            K_add += ka
+            N_add += ka * (q_n + dt * rate_start[e])
     K = K + K_add
     drive = on and K > zero and m > zero
     drv_on[e] = wp.where(drive, 1, 0)
     if drive:
         drv_aim[e] = (N + N_add) / K
         drv_ratio[e] = drive_scale * K * dt * dt / m
+    lim_on[e] = wp.where(limited, 1, 0)
+    if limited:
+        # libuipc's penalty s ((x - u) / (u - l))^3 is, at an overshoot delta, the energy
+        # dt^2 limit_k delta^3 / (3 delta_r)
+        width = wp.float64(hi) - wp.float64(lo)
+        w3 = wp.where(width > zero, width * width * width, wp.float64(1.0))
+        lim_lower[e] = wp.float64(lo)
+        lim_upper[e] = wp.float64(hi)
+        lim_strength[e] = dt * dt * limit_k * w3 / (wp.float64(3.0) * _LIMIT_OVERSHOOT)
+    value = zero
+    if joint_f:
+        value = wp.float64(joint_f[d])
     if saturated:
-        value = bound
-        if joint_f:
-            value += wp.float64(joint_f[d])
-        force_on[e] = wp.where(on and value != zero, 1, 0)
-        force[e] = value
+        value = bound + value
+    force_on[e] = wp.where(on and value != zero, 1, 0)
+    force[e] = value
 
 
 @wp.kernel

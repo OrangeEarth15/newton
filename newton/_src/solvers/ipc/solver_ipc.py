@@ -231,8 +231,9 @@ class SolverIPC(SolverBase, CouplingInterface):
       ``kinematic_motion="aim"`` move inside the step toward the pose it
       prescribes (:ref:`ipc-kinematic-bodies`);
     - revolute, prismatic, fixed and ball joints with drives, springs,
-      damping, limits and :attr:`~newton.Control.joint_f`, and on request D6
-      and distance joints (:ref:`ipc-joints`);
+      damping, limits, armature and :attr:`~newton.Control.joint_f`, D6 joints
+      that lock what one of them locks, and distance joints of one length
+      (:ref:`ipc-joints`);
     - external forces (:attr:`~newton.State.particle_f`,
       :attr:`~newton.State.body_f`) and gravity per world;
     - content in several worlds, every world stepping as it would alone, or
@@ -324,23 +325,13 @@ class SolverIPC(SolverBase, CouplingInterface):
             step toward the pose prescribed for its end; see :ref:`ipc-kinematic-bodies`).
         kinematic_strength_ratio: The strength ratio of the aims of
             ``kinematic_motion="aim"`` (libuipc's soft transform constraint).
-        enable_d6_joints: Simulate the D6 joints that lock what one of
-            libuipc's joints locks, as that joint (see :ref:`ipc-d6-joints`); without
-            it every D6 joint is rejected.
-        enable_distance_joints: Simulate distance joints of one length, as
-            libuipc's soft vertex stitch of that rest length, and those of
-            none (see :ref:`ipc-distance-joints`); without it every distance joint is
-            rejected.
         enable_joint_limit_damping: Damp a revolute or prismatic joint that
             starts a step past one of its limits with ``joint_limit_kd``, as
-            Featherstone and SemiImplicit do (see :ref:`ipc-joints`); without it
+            Featherstone and SemiImplicit do (see :ref:`ipc-joints`); with False
             ``joint_limit_kd`` is not read.
-        enable_joint_armature: Give a revolute or prismatic joint's
-            ``joint_armature`` to its coordinate as an inertia (see
-            :ref:`ipc-joints`); without it an armature other than 0 is rejected.
         enable_joint_effort_limit: Bound a drive's force by its
             ``joint_effort_limit`` as decided at the start of every step (see
-            :ref:`ipc-joints`); without it a limit below 1e6 on a driven degree of
+            :ref:`ipc-joints`); with False a limit below 1e6 on a driven degree of
             freedom is rejected.
 
     Note:
@@ -471,22 +462,15 @@ class SolverIPC(SolverBase, CouplingInterface):
         fem_preconditioner: str = "diag",
         kinematic_motion: str = "jump",
         kinematic_strength_ratio: float = 100.0,
-        enable_d6_joints: bool = False,
-        enable_distance_joints: bool = False,
-        enable_joint_limit_damping: bool = False,
-        enable_joint_armature: bool = False,
-        enable_joint_effort_limit: bool = False,
+        enable_joint_limit_damping: bool = True,
+        enable_joint_effort_limit: bool = True,
     ):
         if not model.device.is_cuda:
             raise NotImplementedError(f"SolverIPC runs on CUDA devices only; the model is on {model.device}.")
         super().__init__(model)
         self._coupled_worlds = bool(coupled_worlds)
         self._joint_options = _JointOptions(
-            d6=bool(enable_d6_joints),
-            distance=bool(enable_distance_joints),
-            limit_damping=bool(enable_joint_limit_damping),
-            armature=bool(enable_joint_armature),
-            effort_limit=bool(enable_joint_effort_limit),
+            limit_damping=bool(enable_joint_limit_damping), effort_limit=bool(enable_joint_effort_limit)
         )
         _check_supported(model, self._joint_options)
         _check_choice("integrator", integrator, ("bdf1", "bdf2"))
@@ -1820,8 +1804,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         )
         if flags & dof_flags:
             _check_joints(model, self._joint_options)  # the other joint data are read at every step
-            if self._joint_options.distance and model.joint_count:  # a distance joint gains or loses its length
-                rebuild |= not np.array_equal(_map_joints(model, self._joint_options).distance, self._distance_joints)
+            if model.joint_count:  # a distance joint gains or loses its length
+                rebuild |= not np.array_equal(_map_joints(model).distance, self._distance_joints)
         if flags & ModelFlags.CONSTRAINT_PROPERTIES and model.attachment_particle_body_count:
             _check_attachments(model)  # their stiffness and enabled flags are read at every step
             body, particle, point = self._attachment_inputs or (None, None, None)

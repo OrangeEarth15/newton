@@ -142,9 +142,8 @@ def test_rejects_activations(test, device):
 
 
 def test_rejects_unsupported_joints(test, device):
-    """Reject the joints SolverIPC does not simulate, naming what libuipc lacks: D6, distance and rod joints, drives,
-    passive springs and limits on ball and free joints, joint armature and friction, and an effort limit on a driven
-    joint."""
+    """Reject the joints SolverIPC does not simulate, naming what libuipc lacks: rod joints, drives, passive springs,
+    limits and armature on ball and free joints, joint friction, and a negative effort limit on a driven joint."""
 
     def hinged(add, **dof):
         builder = newton.ModelBuilder()
@@ -161,12 +160,6 @@ def test_rejects_unsupported_joints(test, device):
     def ball(builder, link):
         return builder.add_joint_ball(-1, link, parent_xform=wp.transform((0.0, 0.0, 1.2), wp.quat_identity()))
 
-    def d6(builder, link):
-        return builder.add_joint_d6(-1, link, angular_axes=[newton.ModelBuilder.JointDofConfig(axis=newton.Axis.X)])
-
-    def distance(builder, link):
-        return builder.add_joint_distance(-1, link)
-
     def rod(builder, link):
         return builder.add_joint_rod(-1, link)
 
@@ -174,15 +167,13 @@ def test_rejects_unsupported_joints(test, device):
     _box_body(free, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
     free.joint_target_mode[0] = int(newton.JointTargetMode.POSITION)
     for name, builder, pattern in (
-        ("d6", hinged(d6), "D6 joints \\(joint 0\\): libuipc has no D6 joint"),
-        ("distance", hinged(distance), "DISTANCE joints \\(joint 0\\): libuipc has no distance joint"),
         ("rod", hinged(rod), "ROD joints \\(joint 0\\): libuipc has no constitution of stretch, shear, bend"),
         ("free drive", free, "FREE joint 0 has the target mode POSITION"),
         ("ball drive", hinged(ball, target_ke=10.0), "its ball joint has none .* BALL joint 0 has target_ke 10.0"),
         ("ball limit", hinged(ball, limit_lower=-0.5), "limits revolute and prismatic joints only"),
-        ("armature", hinged(revolute, armature=0.01), "joint armature: libuipc's joints have no inertia"),
+        ("ball armature", hinged(ball, armature=0.01), "armature of revolute and prismatic joints only"),
         ("friction", hinged(revolute, friction=0.5), "joint friction: libuipc's joints have none"),
-        ("effort limit", hinged(revolute, target_ke=100.0, effort_limit=5.0), "joint_effort_limit 5.0"),
+        ("effort limit", hinged(revolute, target_ke=100.0, effort_limit=-5.0), "joint_effort_limit -5.0"),
     ):
         with test.subTest(name):
             _rejects(test, builder, pattern, device)

@@ -80,11 +80,10 @@ The solver simulates:
   every other motion (see :ref:`ipc-kinematic-bodies`). A particle that is not
   active and on no cloth or tetrahedron collides with nothing, as in Newton.
 - revolute, prismatic, fixed and ball joints between bodies or to the world,
-  with drives, passive springs and damping, limits and
+  with drives, passive springs and damping, limits, armature and
   :attr:`~newton.Control.joint_f` (see :ref:`ipc-joints`); ``joint_q`` and
-  ``joint_qd`` are written at every step. With ``enable_d6_joints``, D6 joints
-  that lock what one of these locks, or nothing; with
-  ``enable_distance_joints``, distance joints of one length or none.
+  ``joint_qd`` are written at every step. D6 joints that lock what one of these
+  locks, or nothing, and distance joints of one length or none.
 - external forces: :attr:`~newton.State.particle_f`,
   :attr:`~newton.State.body_f` and :attr:`~newton.Control.joint_f`, held
   constant over the step as libuipc holds its external forces (a constant
@@ -132,7 +131,7 @@ distance), the :attr:`~newton.Model.particle_radius` of cloth and tetrahedron
 vertices (see :ref:`ipc-contact`), damping coefficients, ``spring_control``,
 drag, lift, ``edge_rest_length`` (see :ref:`ipc-cloth`), the activations of a
 :class:`~newton.Control`, ``joint_target_mode``, ``joint_velocity_limit``,
-``joint_limit_kd`` (but with ``enable_joint_limit_damping``) and ``joint_act``.
+``joint_limit_kd`` with ``enable_joint_limit_damping=False`` and ``joint_act``.
 
 .. _ipc-cloth:
 
@@ -672,9 +671,9 @@ quadratic potential in :math:`q`, which the solver gives libuipc's driving term
 every step. The gains act whatever ``joint_target_mode`` says, as in the other
 maximal-coordinate solvers.
 
-With ``enable_joint_armature=True`` a revolute or prismatic joint's
-``joint_armature`` :math:`a`, which Featherstone and MuJoCo add to the joint's
-inertia, is the kinetic term of its coordinate in the same potential:
+A revolute or prismatic joint's ``joint_armature`` :math:`a`, which
+Featherstone and MuJoCo add to the joint's inertia, is the kinetic term of its
+coordinate in the same potential:
 :math:`\tfrac{a}{2 \Delta t^2} (q - \tilde q)^2` with
 :math:`\tilde q = q_n + \Delta t \dot q_n` (BDF2: 9/4 of it, with
 :math:`\tilde q = \tfrac{4 q_n - q_{n-1}}{3} + \tfrac{2 \Delta t}{9} (4 \dot q_n - \dot q_{n-1})`),
@@ -684,9 +683,8 @@ written). The armature of a ball or free joint, an inertia about three axes or a
 mass without weight, has no such potential and is rejected.
 
 The drive's force cannot be bounded inside libuipc's driving term, a quadratic
-potential. With ``enable_joint_effort_limit=True`` a ``joint_effort_limit``
-:math:`L` below Newton's default 1e6 bounds the force of the gains as decided at
-the start of every step: where
+potential. A ``joint_effort_limit`` :math:`L` below Newton's default 1e6 bounds
+the force of the gains as decided at the start of every step: where
 :math:`|k_e (q^* - q_n) + k_d (\dot q^* - \dot q_n)| > L`, the step takes the
 constant force :math:`\pm L` (libuipc's joint torque or force, with ``joint_f``)
 in place of the gains' part of the potential; the passive spring and damping
@@ -694,7 +692,8 @@ remain. The bound holds at the start of every step, which is where MuJoCo clamps
 its actuators' force; a step that starts below it and ends above it, or the
 reverse, takes the bound one step late, which a drive clamped at the end of the
 step would not (by 1.6e-4 of the motion for a hinge driven through a step of its
-target).
+target). With ``enable_joint_effort_limit=False`` such a limit on a driven
+degree of freedom is rejected instead.
 
 Limits are libuipc's cubic penalty outside
 ``[joint_limit_lower, joint_limit_upper]``, not Newton's linear spring: at an
@@ -702,17 +701,18 @@ overshoot :math:`\delta` it stores :math:`k_l \delta^3 / (3 \delta_r)` with
 :math:`k_l` = ``joint_limit_ke`` and :math:`\delta_r` = 1e-3 (rad or m), so that
 it pushes back with the spring's :math:`k_l \delta_r` at :math:`\delta_r` and
 harder beyond it; a load :math:`F` rests at :math:`\sqrt{F \delta_r / k_l}` past
-the limit. ``joint_limit_kd`` is not read (libuipc's limit has no damping), a
-``joint_limit_ke`` of 0 holds nothing, and a bound at :data:`newton.MAXVAL` is
-no bound. With ``enable_joint_limit_damping=True`` a joint whose coordinate is
-past one of its limits at the start of a step takes the damping
+the limit. A ``joint_limit_ke`` of 0 holds nothing, and a bound at
+:data:`newton.MAXVAL` is no bound. libuipc's limit has no damping; a joint
+whose coordinate is past one of its limits at the start of a step takes the
+damping
 :math:`-k_{ld} \dot q` of Featherstone and SemiImplicit, :math:`k_{ld}` =
 ``joint_limit_kd``, in the same quadratic potential as ``joint_damping``: exact
 for the step's integrator, with the velocity at the end of the step, and decided
 at its start, as those solvers decide it (they also switch the drive off past a
 limit, which SolverIPC does not, as MuJoCo does not). A joint that reaches its
 limit within a step is damped from the next step on; a limit of
-``joint_limit_ke`` 0 damps nothing.
+``joint_limit_ke`` 0 damps nothing. With ``enable_joint_limit_damping=False``
+``joint_limit_kd`` is not read.
 
 :attr:`~newton.Control.joint_f` of a revolute or prismatic joint is libuipc's
 joint torque or force between the two bodies; of a ball joint a torque in the
@@ -736,9 +736,9 @@ the bodies' angle (the pose decides the angle modulo :math:`2\pi`).
 D6 joints
 ~~~~~~~~~
 
-libuipc has no D6 joint (its constitution 28 is only registered). With
-``enable_d6_joints=True`` a D6 joint whose free axes leave locked what one of
-libuipc's joints locks is that joint, exactly: no axis is a fixed joint, one
+libuipc has no D6 joint (its constitution 28 is only registered). A D6 joint
+whose free axes leave locked what one of libuipc's joints locks is that joint,
+exactly: no axis is a fixed joint, one
 angular axis a revolute joint about it, one linear axis a prismatic joint along
 it, with their drives, springs, damping, limits and ``joint_f``; three
 orthonormal angular axes are a ball joint, and three orthonormal linear and
@@ -761,8 +761,8 @@ on the D6 joints that become a ball or no joint.
 Distance joints
 ~~~~~~~~~~~~~~~
 
-libuipc has no distance joint. With ``enable_distance_joints=True`` one whose
-distance has a single value ``L`` (the two bounds of its first degree of freedom
+libuipc has no distance joint. A distance joint whose distance has a single
+value ``L`` (the two bounds of its first degree of freedom
 equal and not negative) holds the origins of its joint frames ``L`` apart as
 libuipc's soft vertex stitch (constitution 22) of rest length ``L`` between two
 anchors of the bodies there (the world's fixed body for a parent of -1): the
@@ -785,12 +785,13 @@ have, and rod joints, which no libuipc constitution between two affine bodies
 represents; drives, springs, damping and limits on ball and free joints, since
 libuipc's driving term and limits act on one hinge angle or one distance and its
 ball joint has neither (its ball driving term, constitution 27, is only
-registered); ``joint_armature`` other than 0 but with ``enable_joint_armature``
-on a revolute or prismatic joint, since libuipc's joints have no inertia of
-their own; ``joint_friction`` other than 0, since they have no friction and dry
-friction, a bounded force, is no quadratic potential; a ``joint_effort_limit``
-below Newton's default 1e6 on a driven degree of freedom but with
-``enable_joint_effort_limit``, since the quadratic drive cannot bound its force.
+registered); a negative ``joint_armature``, and one other than 0 on a ball or
+free joint, an inertia about three axes or a mass without weight, which
+libuipc's driving term of one coordinate cannot hold; ``joint_friction`` other
+than 0, since libuipc's joints have no friction and dry friction, a bounded
+force, is no quadratic potential; a negative ``joint_effort_limit`` on a driven
+degree of freedom, and with ``enable_joint_effort_limit=False`` one below
+Newton's default 1e6, since the quadratic drive cannot bound its force.
 
 .. _ipc-state:
 
