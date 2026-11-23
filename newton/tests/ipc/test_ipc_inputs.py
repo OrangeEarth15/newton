@@ -8,6 +8,7 @@ import importlib
 import importlib.util
 import pathlib
 import unittest
+import warnings
 from unittest import mock
 
 import numpy as np
@@ -185,6 +186,50 @@ def test_rejects_gradients(test, device):
     model = builder.finalize(device=device, requires_grad=True)
     with test.assertRaisesRegex(NotImplementedError, "gradients"):
         newton.solvers.SolverIPC(model)
+
+
+def test_warns_of_velocity_limits(test, device):
+    """SolverIPC does not limit joint velocities, so it warns of a joint velocity limit below Newton's default, once
+    per solver: when it is built, or at the first notification of the joints' DOFs that brings one, naming how many
+    DOFs have one and the first of them. Newton's default draws no warning."""
+    builder = newton.ModelBuilder()
+    for x, add in ((0.0, builder.add_joint_revolute), (1.0, builder.add_joint_ball)):  # DOF 0; DOFs 1 to 3
+        link = builder.add_link(xform=wp.transform((x, 0.0, 1.0), wp.quat_identity()))
+        builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1)
+        builder.add_articulation([add(-1, link, parent_xform=wp.transform((x, 0.0, 1.0), wp.quat_identity()))])
+    model = builder.finalize(device=device)
+    default = model.joint_velocity_limit.numpy()
+    flags = newton.ModelFlags.JOINT_DOF_PROPERTIES
+
+    def limit(dofs, value):
+        limits = default.copy()
+        limits[dofs] = value
+        model.joint_velocity_limit.assign(limits)
+
+    def warned(call):
+        """What ``call()`` returns, and the messages of the NewtonWarnings it gives."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = call()
+        return result, [str(w.message) for w in caught if issubclass(w.category, newton.NewtonWarning)]
+
+    def message(dofs, first):
+        return (
+            f"SolverIPC does not limit joint velocities: {dofs} a joint_velocity_limit below Newton's default 1e+06, "
+            f"the first DOF {first}."
+        )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        first = newton.solvers.SolverIPC(model)
+        first.notify_model_changed(flags)
+    limit([1, 2, 3], 3.0)
+    second, at_build = warned(lambda: newton.solvers.SolverIPC(model))
+    test.assertEqual(at_build, [message("3 joint DOFs have", "1 of the BALL joint 1 (3.0)")])
+    test.assertEqual(warned(lambda: second.notify_model_changed(flags))[1], [])
+    limit([0], 2.5)  # the first solver, built at the default, warns at its next notification and only then
+    for messages in ([message("1 joint DOF has", "0 of the REVOLUTE joint 0 (2.5)")], []):
+        test.assertEqual(warned(lambda: first.notify_model_changed(flags))[1], messages)
 
 
 def _belt(device, enable_surface_velocity):
@@ -594,6 +639,12 @@ class TestSolverIPCInputs(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "CUDA"):
             newton.solvers.SolverIPC(model)
 
+    def test_velocity_limit_bound_is_newtons_default(self):
+        """The velocity limit below which SolverIPC warns of one, which it does not read, is Newton's default."""
+        from newton._src.solvers.ipc.joints import _VELOCITY_LIMIT  # noqa: PLC0415
+
+        self.assertEqual(_VELOCITY_LIMIT, newton.ModelBuilder.JointDofConfig().velocity_limit)
+
     def test_imports_only_public_newton_names(self):
         """SolverIPC's modules import Newton through its public modules only: no import of theirs resolves under
         newton._src outside SolverIPC's own package."""
@@ -967,6 +1018,7 @@ for name, func in (
     ("test_rejects_activations", test_rejects_activations),
     ("test_rejects_unsupported_joints", test_rejects_unsupported_joints),
     ("test_rejects_gradients", test_rejects_gradients),
+    ("test_warns_of_velocity_limits", test_warns_of_velocity_limits),
     ("test_rejects_surface_velocity", test_rejects_surface_velocity),
     ("test_rejects_intersecting_start", test_rejects_intersecting_start),
     ("test_rejects_start_in_contact", test_rejects_start_in_contact),

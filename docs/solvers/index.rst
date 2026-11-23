@@ -465,14 +465,15 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
      - |no|
      - |no|
      - |no|
-     - |no|
+     - |no| :sup:`15`
 
 | :sup:`2` Not enforced for BALL joints in SemiImplicit.
 | :sup:`15` SolverIPC takes the armature of a revolute or prismatic joint as the inertia of its coordinate, and
   bounds the force of a drive by an effort limit below 1e6 as decided at the start of every step (where MuJoCo clamps
-  it), so that a step that crosses the bound takes it one step late. It raises ``NotImplementedError`` instead of
-  ignoring the property for armature on a ball or free joint, for non-zero friction, and, with
-  ``enable_joint_effort_limit=False``, for an effort limit below 1e6 on a degree of freedom with a drive.
+  it), so that a step that crosses the bound takes it one step late. It warns of a velocity limit below 1e6, which
+  it does not enforce, and raises ``NotImplementedError`` instead of ignoring the property for armature on a ball or
+  free joint, for non-zero friction, and, with ``enable_joint_effort_limit=False``, for an effort limit below 1e6 on a
+  degree of freedom with a drive.
 | :sup:`16` SolverIPC enforces a limit as libuipc's cubic penalty, set to push back with ``joint_limit_ke`` times
   the overshoot at an overshoot of 1e-3 rad or m, more steeply beyond, and damps a joint that starts a step past a
   limit by ``joint_limit_kd``, as Featherstone and SemiImplicit do; with ``enable_joint_limit_damping=False``

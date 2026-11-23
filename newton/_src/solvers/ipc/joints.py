@@ -11,6 +11,7 @@ joints' work at every step: their angles and distances at the step's start, the 
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -18,7 +19,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import warp as wp
 
-from newton import MAXVAL, Control, JointTargetMode, JointType, Model, State
+from newton import MAXVAL, Control, JointTargetMode, JointType, Model, NewtonWarning, State
 
 from .kernels import (
     _EFFORT_LIMIT,
@@ -33,6 +34,9 @@ if TYPE_CHECKING:
     from .solver_ipc import SolverIPC
 
 
+# Newton's default joint_velocity_limit (ModelBuilder.JointDofConfig's), which bounds nothing; SolverIPC warns of one
+# below it (_warn_of_velocity_limits)
+_VELOCITY_LIMIT = 1.0e6
 # what to do with a joint of a type SolverIPC refuses, and why libuipc has no joint for it
 _UNMAPPED_JOINTS = {
     JointType.ROD: "use SolverVBD or SolverKamino for rods. libuipc's rods are finite elements, not joints between two "
@@ -238,6 +242,30 @@ def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
             f"raise it to {_EFFORT_LIMIT:g}, Newton's default, or pass enable_joint_effort_limit=True for a bound "
             "decided at the start of every step. libuipc's quadratic drive cannot bound its force",
         )
+
+
+def _warn_of_velocity_limits(solver: SolverIPC, stacklevel: int) -> None:
+    """Warn once per solver, with ``NewtonWarning``, of the joint velocity limits below Newton's default, which
+    SolverIPC does not read (:ref:`ipc-not-read`): how many degrees of freedom have one, and the first of them.
+    ``stacklevel`` is ``warnings.warn``'s."""
+    model = solver.model
+    if solver._velocity_limits_warned or model.joint_dof_count == 0:
+        return
+    velocity = model.joint_velocity_limit.numpy()
+    dofs = np.flatnonzero(~(velocity >= _VELOCITY_LIMIT))
+    if not len(dofs):
+        return
+    d = int(dofs[0])
+    j = int(np.searchsorted(model.joint_qd_start.numpy(), d, side="right")) - 1
+    many = "DOFs have" if len(dofs) > 1 else "DOF has"
+    warnings.warn(
+        f"SolverIPC does not limit joint velocities: {len(dofs)} joint {many} a joint_velocity_limit below Newton's "
+        f"default {_VELOCITY_LIMIT:g}, the first DOF {d} of the {JointType(int(model.joint_type.numpy()[j])).name} "
+        f"joint {j} ({float(velocity[d])!r}).",
+        NewtonWarning,
+        stacklevel=stacklevel,
+    )
+    solver._velocity_limits_warned = True
 
 
 def _plan_distance_joints(solver: SolverIPC) -> None:

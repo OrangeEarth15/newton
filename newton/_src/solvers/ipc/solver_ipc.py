@@ -39,6 +39,7 @@ from .joints import (
     _map_joints,
     _plan_distance_joints,
     _shift_joint_history,
+    _warn_of_velocity_limits,
     _write_joint_controls,
 )
 from .kernels import (
@@ -488,6 +489,8 @@ class SolverIPC(SolverBase, CouplingInterface):
             limit_damping=bool(enable_joint_limit_damping), effort_limit=bool(enable_joint_effort_limit)
         )
         _check_supported(model, self._joint_options)
+        self._velocity_limits_warned = False
+        _warn_of_velocity_limits(self, stacklevel=3)
         _check_choice("integrator", integrator, ("bdf1", "bdf2"))
         # the rigid flight under implicit Euler, libuipc's step under BDF2 (docs/solvers/ipc.rst > "Rigid bodies")
         if body_rotation is None:
@@ -1787,7 +1790,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         joints' types, bodies, frames or axes (``JOINT_PROPERTIES``) or of which bodies are kinematic
         (``BODY_PROPERTIES``, ``BODY_INERTIAL_PROPERTIES``) builds the solve again: the next step reads ``state_in`` in
         full, and graphs that hold :meth:`step` must be captured again. The joints' other data are read at every step;
-        the joint flags only check them again against what :ref:`ipc-joints` rejects. So are the stiffness and the
+        the joint flags only check them again against what :ref:`ipc-joints` rejects and, once per solver, warn of
+        velocity limits below Newton's default (:ref:`ipc-not-read`). So are the stiffness and the
         enabled flags of the particle-body attachments (``CONSTRAINT_PROPERTIES``), which that flag checks again against
         what :ref:`ipc-attachments` rejects; a new body, particle or point of an attachment builds the solve again. With
         ``kinematic_motion="aim"`` a change of a kinematic body's mass properties builds the solve again too, since its
@@ -1819,6 +1823,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         )
         if flags & dof_flags:
             _check_joints(model, self._joint_options)  # the other joint data are read at every step
+            _warn_of_velocity_limits(self, stacklevel=3)
             if model.joint_count:  # a distance joint gains or loses its length
                 rebuild |= not np.array_equal(_map_joints(model).distance, self._distance_joints)
         if flags & ModelFlags.CONSTRAINT_PROPERTIES and model.attachment_particle_body_count:
