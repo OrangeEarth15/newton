@@ -232,6 +232,11 @@ def _check_supported(model: Model, joints: _JointOptions | None = None) -> None:
 class SolverIPC(SolverBase, CouplingInterface):
     """Incremental Potential Contact solver for soft bodies, cloth and rigid bodies.
 
+    .. experimental::
+
+        :class:`SolverIPC`, its constructor options and its behavior may change without the normal deprecation
+        period.
+
     Wraps the `libuipc-warp <https://github.com/OrangeEarth15/libuipc-warp>`_ engine,
     a Warp implementation of libuipc, through its array interface (no libuipc
     build is needed). Each :meth:`step` is one implicit time step, by default
