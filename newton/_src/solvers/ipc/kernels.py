@@ -415,6 +415,118 @@ def _joint_wrenches(
             wp.atomic_sub(wrench, p, wp.spatial_vector(wp.vec3(), t))
 
 
+@wp.func
+def _drive_inputs(
+    d: int,
+    i: int,
+    target_ke: wp.array[wp.float32],
+    target_kd: wp.array[wp.float32],
+    stiffness: wp.array[wp.float32],
+    rest_q: wp.array[wp.float32],
+    damping: wp.array[wp.float32],
+    has_springs: int,
+    target_q: wp.array[wp.float32],
+    has_target_q: int,
+    target_qd: wp.array[wp.float32],
+    has_target_qd: int,
+):
+    """The target gains ``ke`` and ``kd``, the passive stiffness ``ks`` and damping ``c``, the rest coordinate and the
+    targets of the degree of freedom ``d`` (coordinate ``i``) of a revolute or prismatic joint, in float64: 0 where the
+    model or the control has none."""
+    zero = wp.float64(0.0)
+    ke = wp.float64(target_ke[d])
+    kd = wp.float64(target_kd[d])
+    ks = zero
+    c = zero
+    q_rest = zero
+    if has_springs != 0:
+        ks = wp.float64(stiffness[d])
+        c = wp.float64(damping[d])
+        q_rest = wp.float64(rest_q[i])
+    q_target = zero
+    if has_target_q != 0:
+        q_target = wp.float64(target_q[i])
+    qd_target = zero
+    if has_target_qd != 0:
+        qd_target = wp.float64(target_qd[d])
+    return ke, kd, ks, c, q_rest, q_target, qd_target
+
+
+@wp.func
+def _joint_restarted(
+    j: int,
+    restart: wp.array[wp.int32],
+    restart_rows: wp.array[wp.int32],
+    per_row: int,
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    body_base: wp.array[wp.int32],
+) -> bool:
+    """Whether the engine's frame starts the BDF2 history of joint ``j``'s bodies with an implicit Euler step: that of
+    every row (``restart[0]``), or with ``per_row`` that of the rows of a reset or a new state of their world
+    (``restart_rows``, at the base row of the child or of the parent)."""
+    restarted = restart[0] != 0
+    if per_row != 0:
+        if restart_rows[body_base[joint_child[j]]] != 0:
+            restarted = True
+        p = joint_parent[j]
+        if p >= 0:
+            if restart_rows[body_base[p]] != 0:
+                restarted = True
+    return restarted
+
+
+# A joint's drive, passive spring and passive damping are one quadratic potential K/2 (q - N/K)^2 of the step's
+# coordinate q, K/2 q^2 - N q up to a constant: minus its gradient is ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd
+# at the step's end, with implicit Euler's qd = (q - q_n) / dt or BDF2's qd = w (q - q_bar), w = 3 / (2 dt),
+# q_bar = (4 q_n - q_nm1) / 3. Its stiffness K and load N under each integrator follow; the kernels call each where
+# they computed it, which keeps their machine code.
+
+
+@wp.func
+def _drive_stiffness_bdf1(ke: wp.float64, kd: wp.float64, ks: wp.float64, c: wp.float64, dt: wp.float64) -> wp.float64:
+    """The stiffness K of a drive's potential under implicit Euler."""
+    return ke + ks + (kd + c) / dt
+
+
+@wp.func
+def _drive_stiffness_bdf2(ke: wp.float64, kd: wp.float64, ks: wp.float64, c: wp.float64, w: wp.float64) -> wp.float64:
+    """The stiffness K of a drive's potential under BDF2, ``w`` = 3 / (2 dt)."""
+    return ke + ks + (kd + c) * w
+
+
+@wp.func
+def _drive_load_bdf1(
+    ke: wp.float64,
+    kd: wp.float64,
+    ks: wp.float64,
+    c: wp.float64,
+    q_rest: wp.float64,
+    q_target: wp.float64,
+    qd_target: wp.float64,
+    q_n: wp.float64,
+    dt: wp.float64,
+) -> wp.float64:
+    """The load N of a drive's potential under implicit Euler, from the coordinate ``q_n`` at the step's start."""
+    return ke * q_target + ks * q_rest + (kd / dt) * (q_n + dt * qd_target) + (c / dt) * q_n
+
+
+@wp.func
+def _drive_load_bdf2(
+    ke: wp.float64,
+    kd: wp.float64,
+    ks: wp.float64,
+    c: wp.float64,
+    q_rest: wp.float64,
+    q_target: wp.float64,
+    qd_target: wp.float64,
+    q_bar: wp.float64,
+    w: wp.float64,
+) -> wp.float64:
+    """The load N of a drive's potential under BDF2, ``w`` = 3 / (2 dt) and ``q_bar`` = (4 q_n - q_nm1) / 3."""
+    return ke * q_target + ks * q_rest + kd * w * (q_bar + qd_target / w) + c * w * q_bar
+
+
 @wp.kernel
 def _joint_terms(
     joints: wp.array[wp.int32],
@@ -482,43 +594,34 @@ def _joint_terms(
     if on and m > zero:
         r = strength[e] / m
     ratio[e] = r
-    ke = wp.float64(target_ke[d])
-    kd = wp.float64(target_kd[d])
-    ks = zero
-    c = zero
-    q_rest = zero
-    if has_springs != 0:
-        ks = wp.float64(stiffness[d])
-        c = wp.float64(damping[d])
-        q_rest = wp.float64(rest_q[i])
-    q_target = zero
-    if has_target_q != 0:
-        q_target = wp.float64(target_q[i])
-    qd_target = zero
-    if has_target_qd != 0:
-        qd_target = wp.float64(target_qd[d])
+    ke, kd, ks, c, q_rest, q_target, qd_target = _drive_inputs(
+        d,
+        i,
+        target_ke,
+        target_kd,
+        stiffness,
+        rest_q,
+        damping,
+        has_springs,
+        target_q,
+        has_target_q,
+        target_qd,
+        has_target_qd,
+    )
     q_n = current[e]
     q_start[e] = q_n
-    # implicit Euler: ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd at the step's end, qd = (q - q_n) / dt, is
-    # minus the gradient of K/2 (q - q_hat)^2; BDF2: qd = 3/2 (q - (4 q_n - q_nm1) / 3) / dt
-    K = ke + ks + (kd + c) / dt
+    # the drive, passive spring and passive damping as one quadratic potential of the step, K/2 (q - q_aim)^2
+    K = _drive_stiffness_bdf1(ke, kd, ks, c, dt)
     q_aim = zero
-    restarted = restart[0] != 0
-    if per_row != 0:
-        if restart_rows[body_base[joint_child[j]]] != 0:
-            restarted = True
-        p = joint_parent[j]
-        if p >= 0:
-            if restart_rows[body_base[p]] != 0:
-                restarted = True
+    restarted = _joint_restarted(j, restart, restart_rows, per_row, joint_parent, joint_child, body_base)
     if bdf2 != 0 and not restarted:
         w = wp.float64(1.5) / dt
-        K = ke + ks + (kd + c) * w
+        K = _drive_stiffness_bdf2(ke, kd, ks, c, w)
         q_bar = (wp.float64(4.0) * q_n - q_prev[e]) / wp.float64(3.0)
         if K > zero:
-            q_aim = (ke * q_target + ks * q_rest + kd * w * (q_bar + qd_target / w) + c * w * q_bar) / K
+            q_aim = _drive_load_bdf2(ke, kd, ks, c, q_rest, q_target, qd_target, q_bar, w) / K
     elif K > zero:
-        q_aim = (ke * q_target + ks * q_rest + (kd / dt) * (q_n + dt * qd_target) + (c / dt) * q_n) / K
+        q_aim = _drive_load_bdf1(ke, kd, ks, c, q_rest, q_target, qd_target, q_n, dt) / K
     drive = on and K > zero and m > zero
     drv_on[e] = wp.where(drive, 1, 0)
     if drive:
@@ -631,7 +734,7 @@ def _joint_option_terms(
 ):
     """The driving term of a revolute or prismatic joint with the terms SolverIPC adds on request (:ref:`ipc-joints`),
     launched after ``_joint_terms`` and in place of its driving term: the drive, passive spring and passive damping as
-    ``_joint_terms`` computes them (the same expressions, so that terms of 0 leave its values bit for bit), and with
+    ``_joint_terms`` computes them (the same functions, so that terms of 0 leave its values bit for bit), and with
     ``limit_damping`` the damping ``-joint_limit_kd qd`` of a joint whose coordinate is past one of its limits at the
     step's start, a passive damping of the step's velocity (BDF1 or BDF2, as ``_joint_terms`` takes it) folded into the
     same quadratic potential; with ``armature`` the inertia of the coordinate, the step's kinetic term ``a/2 |q - q~|^2
@@ -649,42 +752,34 @@ def _joint_option_terms(
     on = joint_enabled[j]
     zero = wp.float64(0.0)
     m = mass_sum[e]
-    ke = wp.float64(target_ke[d])
-    kd = wp.float64(target_kd[d])
-    ks = zero
-    c = zero
-    q_rest = zero
-    if has_springs != 0:
-        ks = wp.float64(stiffness[d])
-        c = wp.float64(damping[d])
-        q_rest = wp.float64(rest_q[i])
-    q_target = zero
-    if has_target_q != 0:
-        q_target = wp.float64(target_q[i])
-    qd_target = zero
-    if has_target_qd != 0:
-        qd_target = wp.float64(target_qd[d])
+    ke, kd, ks, c, q_rest, q_target, qd_target = _drive_inputs(
+        d,
+        i,
+        target_ke,
+        target_kd,
+        stiffness,
+        rest_q,
+        damping,
+        has_springs,
+        target_q,
+        has_target_q,
+        target_qd,
+        has_target_qd,
+    )
     q_n = current[e]
-    restarted = restart[0] != 0
-    if per_row != 0:
-        if restart_rows[body_base[joint_child[j]]] != 0:
-            restarted = True
-        p = joint_parent[j]
-        if p >= 0:
-            if restart_rows[body_base[p]] != 0:
-                restarted = True
+    restarted = _joint_restarted(j, restart, restart_rows, per_row, joint_parent, joint_child, body_base)
     second = bdf2 != 0 and not restarted
     # _joint_terms' potential K/2 (q - N/K)^2
-    K = ke + ks + (kd + c) / dt
+    K = _drive_stiffness_bdf1(ke, kd, ks, c, dt)
     N = zero
     w = wp.float64(1.5) / dt
     q_bar = q_n
     if second:
-        K = ke + ks + (kd + c) * w
+        K = _drive_stiffness_bdf2(ke, kd, ks, c, w)
         q_bar = (wp.float64(4.0) * q_n - q_prev[e]) / wp.float64(3.0)
-        N = ke * q_target + ks * q_rest + kd * w * (q_bar + qd_target / w) + c * w * q_bar
+        N = _drive_load_bdf2(ke, kd, ks, c, q_rest, q_target, qd_target, q_bar, w)
     else:
-        N = ke * q_target + ks * q_rest + (kd / dt) * (q_n + dt * qd_target) + (c / dt) * q_n
+        N = _drive_load_bdf1(ke, kd, ks, c, q_rest, q_target, qd_target, q_n, dt)
     saturated = False
     bound = zero
     if effort != 0 and (ke != zero or kd != zero):
@@ -1136,6 +1231,28 @@ def _keep_status(step: wp.array[wp.int32], kept: wp.array[wp.int32]):
 
 
 @wp.func
+def _record_count(rec_counts: wp.array[wp.int32]) -> int:
+    """The live records of libuipc-warp's ``ContactForces``: the sum of the counts of its 10 segments, the active and
+    the friction terms of kinds PT, EE, PE, PP and PH."""
+    total = int(0)
+    for k in range(10):
+        total += rec_counts[k]
+    return total
+
+
+@wp.func
+def _record_at(rec_counts: wp.array[wp.int32], rec_offsets: wp.array[wp.int32], idx: int):
+    """The segment of the ``idx``-th live record of libuipc-warp's ``ContactForces``, counting the live records of the
+    segments in their order, and its row among the records."""
+    seg = int(0)
+    i = idx
+    while seg < 9 and i >= rec_counts[seg]:
+        i -= rec_counts[seg]
+        seg += 1
+    return seg, rec_offsets[seg] + i
+
+
+@wp.func
 def _term_sides(kind: int):
     """(vertices of the first primitive, vertices of the term) of a contact term of libuipc-warp's ``ContactForces``
     kind PT, EE, PE, PP or PH (0 ... 4): the point, the first edge or the vertex comes first; a half-plane term's
@@ -1299,16 +1416,8 @@ def _contact_rows(
     feature and a shape, none between particle features. Grid-stride over the live records; a row takes its index from
     the rigid or the soft count, which counts every row, and is written only below its capacity."""
     tid = wp.tid()
-    total = int(0)
-    for k in range(10):
-        total += rec_counts[k]
-    for idx in range(tid, total, nthreads):
-        seg = int(0)
-        i = idx
-        while seg < 9 and i >= rec_counts[seg]:
-            i -= rec_counts[seg]
-            seg += 1
-        r = rec_offsets[seg] + i
+    for idx in range(tid, _record_count(rec_counts), nthreads):
+        seg, r = _record_at(rec_counts, rec_offsets, idx)
         kind = seg % 5
         first, count = _term_sides(kind)
         q = rec_vertices[r]
@@ -1433,16 +1542,8 @@ def _proxy_wrenches(
     vertex of a proxy body, and its torque about the body's centre of mass at the end of the step, added at the proxy's
     index ``proxy_of_body[b]``. Grid-stride over the live records of libuipc-warp's ``ContactForces``."""
     tid = wp.tid()
-    total = int(0)
-    for k in range(10):
-        total += rec_counts[k]
-    for idx in range(tid, total, nthreads):
-        seg = int(0)
-        i = idx
-        while seg < 9 and i >= rec_counts[seg]:
-            i -= rec_counts[seg]
-            seg += 1
-        r = rec_offsets[seg] + i
+    for idx in range(tid, _record_count(rec_counts), nthreads):
+        seg, r = _record_at(rec_counts, rec_offsets, idx)
         q = rec_vertices[r]
         _first, count = _term_sides(seg % 5)  # a half-plane term holds its plane after its one vertex
         for k in range(count):
@@ -1473,16 +1574,8 @@ def _proxy_particle_forces(
     a proxy particle, added at the proxy's index ``proxy_of_particle[p]``. Grid-stride over the live records of
     libuipc-warp's ``ContactForces``."""
     tid = wp.tid()
-    total = int(0)
-    for k in range(10):
-        total += rec_counts[k]
-    for idx in range(tid, total, nthreads):
-        seg = int(0)
-        i = idx
-        while seg < 9 and i >= rec_counts[seg]:
-            i -= rec_counts[seg]
-            seg += 1
-        r = rec_offsets[seg] + i
+    for idx in range(tid, _record_count(rec_counts), nthreads):
+        seg, r = _record_at(rec_counts, rec_offsets, idx)
         q = rec_vertices[r]
         _first, count = _term_sides(seg % 5)
         for k in range(count):
