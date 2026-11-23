@@ -9,6 +9,7 @@ wrenches (forces from the parent body through the joint) in world frame,
 referenced to the body's center of mass.
 """
 
+import functools
 import unittest
 
 import numpy as np
@@ -320,6 +321,17 @@ for device in devices:
             devices=[device],
             solver_fn=newton.solvers.SolverSteel,
         )
+        # SolverIPC (expected failures): each case checks a rigid joint's force after one step, and SolverIPC's joint
+        # is a penalty on an elastic affine body, which in its first step carries only part of the load (57% of the
+        # hanging box's weight; "Parent wrenches and accelerations" in docs/solvers/ipc.rst)
+        if device.is_cuda:
+            add_function_test(
+                TestParentForce,
+                f"{name}_ipc",
+                unittest.expectedFailure(functools.partial(test_fn)),
+                devices=[device],
+                solver_fn=requires("uipc_warp")(newton.solvers.SolverIPC),
+            )
 
 
 if __name__ == "__main__":
