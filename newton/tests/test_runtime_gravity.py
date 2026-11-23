@@ -814,6 +814,7 @@ devices = get_test_devices()
 solvers_particles = {
     "xpbd": SolverXPBD,
     "semi_implicit": SolverSemiImplicit,
+    "ipc": requires("uipc_warp")(newton.solvers.SolverIPC),
 }
 
 solvers_bodies = {
@@ -822,12 +823,14 @@ solvers_bodies = {
     "mujoco_cpu": requires(*MUJOCO_MODULES)(lambda model: newton.solvers.SolverMuJoCo(model, use_mujoco_cpu=True)),
     "mujoco_warp": requires(*MUJOCO_MODULES)(lambda model: newton.solvers.SolverMuJoCo(model, use_mujoco_cpu=False)),
     "kamino": SolverKamino,
+    "ipc": requires("uipc_warp")(newton.solvers.SolverIPC),
 }
 
 solvers_global_particles = {
     "xpbd": SolverXPBD,
     "semi_implicit": SolverSemiImplicit,
     "vbd": SolverVBD,
+    "ipc": requires("uipc_warp")(newton.solvers.SolverIPC),
 }
 
 solvers_global_bodies = {
@@ -835,12 +838,15 @@ solvers_global_bodies = {
     "semi_implicit": SolverSemiImplicit,
     "vbd": SolverVBD,
     "kamino": SolverKamino,
+    "ipc": requires("uipc_warp")(newton.solvers.SolverIPC),
 }
 
 # Add tests for each device and solver combination
 for device in devices:
     # Particle tests (MuJoCo doesn't support pure particle simulation)
     for solver_name, solver_fn in solvers_particles.items():
+        if device.is_cpu and solver_name == "ipc":
+            continue
         add_function_test(
             TestRuntimeGravity,
             f"test_runtime_gravity_particles_{solver_name}",
@@ -853,6 +859,8 @@ for device in devices:
     for solver_name, solver_fn in solvers_bodies.items():
         # Skip CPU MuJoCo on CUDA devices
         if device.is_cuda and solver_name == "mujoco_cpu":
+            continue
+        if device.is_cpu and solver_name == "ipc":
             continue
         add_function_test(
             TestRuntimeGravity,
@@ -881,6 +889,8 @@ for device in devices:
 
     # Per-world gravity tests (MuJoCo Warp tested separately - CUDA only)
     for solver_name, solver_fn in solvers_particles.items():
+        if device.is_cpu and solver_name == "ipc":
+            continue
         add_function_test(
             TestRuntimeGravity,
             f"test_per_world_gravity_bodies_{solver_name}",
@@ -897,6 +907,8 @@ for device in devices:
     )
 
     for solver_name, solver_fn in solvers_global_particles.items():
+        if device.is_cpu and solver_name == "ipc":
+            continue
         add_function_test(
             TestRuntimeGravity,
             f"test_global_gravity_particles_{solver_name}",
@@ -906,6 +918,8 @@ for device in devices:
         )
 
     for solver_name, solver_fn in solvers_global_bodies.items():
+        if device.is_cpu and solver_name == "ipc":
+            continue
         add_function_test(
             TestRuntimeGravity,
             f"test_global_gravity_bodies_{solver_name}",

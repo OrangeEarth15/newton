@@ -295,6 +295,14 @@ for device in devices:
 for device in get_cuda_test_devices():
     add_function_test(
         TestJointDamping,
+        "test_revolute_joint_damping_decays_velocity_ipc",
+        test_revolute_joint_damping_decays_velocity,
+        devices=[device],
+        solver_fn=requires("uipc_warp")(newton.solvers.SolverIPC),
+        sync_joint_qd=False,
+    )
+    add_function_test(
+        TestJointDamping,
         "test_revolute_joint_damping_decays_velocity_mujoco_warp",
         test_revolute_joint_damping_decays_velocity,
         devices=[device],

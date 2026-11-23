@@ -501,6 +501,19 @@ _SOLVERS = {
         "stopping_distance_rel_tol": 0.02,
         "stopping_distance_rest_speed_max": STOPPING_REST_SPEED_MAX,
     },
+    # SolverIPC finds its own contacts. d_hat below BOX_GAP: the boxes start 1 mm above the ramps, and a gap inside
+    # d_hat starts the barrier compressed; newton_velocity_tol below what a substep adds to a slow slide (1e-3 m/s)
+    "ipc": {
+        "factory": requires("uipc_warp")(
+            lambda model: newton.solvers.SolverIPC(model, d_hat=5.0e-4, newton_velocity_tol=1.0e-3)
+        ),
+        "native_contacts": True,
+        "mus": _DEFAULT_MUS,
+        "angles_deg": _DEFAULT_ANGLES_DEG,
+        "thresholds": _DEFAULT_THRESHOLDS,
+        "stopping_distance_rel_tol": 0.01,
+        "stopping_distance_rest_speed_max": STOPPING_REST_SPEED_MAX,
+    },
     "kamino": {
         "factory": newton.solvers.SolverKamino,
         "mus": _DEFAULT_MUS,
@@ -708,6 +721,8 @@ for device in devices:
         if device.is_cpu and solver_name.startswith("mujoco_warp"):
             continue
         if device.is_cuda and solver_name == "mujoco_cpu":
+            continue
+        if device.is_cpu and solver_name == "ipc":
             continue
         add_function_test(
             _RAMP_SUITES.get(solver_name, TestRigidFrictionRamp),

@@ -864,6 +864,8 @@ class ClothSim:
             )
         elif self.solver_name == "semi_implicit":
             self.solver = newton.solvers.SolverSemiImplicit(self.model)
+        elif self.solver_name == "ipc":
+            self.solver = newton.solvers.SolverIPC(self.model)
         else:
             raise ValueError("Unsupported solver type: " + self.solver_name)
 
@@ -1237,12 +1239,32 @@ tests_to_run = {
         test_cloth_body_collision,
         test_cloth_stitching,
     ],
+    # enable_tri_contact is a SemiImplicit attribute
+    "ipc": [
+        test_cloth_free_fall,
+        test_cloth_sagging,
+        test_cloth_bending,
+        test_cloth_collision,
+        test_cloth_bending_consistent_angle_computation,
+        test_cloth_bending_non_zero_rest_angle_bending,
+        test_cloth_bending_with_complex_rest_angles,
+        test_cloth_free_fall_with_internal_forces_and_damping,
+        test_cloth_body_collision,
+        test_cloth_stitching,
+    ],
 }
 
 for solver, tests in tests_to_run.items():
+    # SolverIPC runs on CUDA devices only and needs libuipc-warp
+    solver_devices = [d for d in devices if d.is_cuda] if solver == "ipc" else devices
     for test in tests:
         add_function_test(
-            TestCloth, f"{test.__name__}_{solver}", partial(test, solver=solver), devices=devices, check_output=False
+            TestCloth,
+            f"{test.__name__}_{solver}",
+            partial(test, solver=solver),
+            devices=solver_devices,
+            check_output=False,
+            requires=("uipc_warp",) if solver == "ipc" else (),
         )
 
 

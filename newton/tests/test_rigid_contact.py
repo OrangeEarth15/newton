@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
 import unittest
 
 import numpy as np
@@ -966,6 +967,7 @@ solvers = {
     "semi_implicit": newton.solvers.SolverSemiImplicit,
     "kamino": newton.solvers.SolverKamino,
     "steel": newton.solvers.SolverSteel,
+    "ipc": requires("uipc_warp")(newton.solvers.SolverIPC),
 }
 
 
@@ -1071,7 +1073,7 @@ add_function_test(
 
 for device in devices:
     for solver_name, solver_fn in solvers.items():
-        if device.is_cpu and solver_name == "mujoco_warp":
+        if device.is_cpu and solver_name in ("mujoco_warp", "ipc"):
             continue
         if device.is_cuda and solver_name == "mujoco_cpu":
             continue
@@ -1111,16 +1113,21 @@ add_function_test(
 # Register box drop tests for MuJoCo and XPBD solvers
 for device in devices:
     for solver_name, solver_fn in solvers.items():
-        if solver_name not in ("mujoco_cpu", "mujoco_warp", "xpbd", "steel"):
+        if solver_name not in ("mujoco_cpu", "mujoco_warp", "xpbd", "steel", "ipc"):
             continue
-        if device.is_cpu and solver_name == "mujoco_warp":
+        if device.is_cpu and solver_name in ("mujoco_warp", "ipc"):
             continue
         if device.is_cuda and solver_name == "mujoco_cpu":
             continue
+        # SolverIPC (an expected failure): the tilted box still rocks after 1 s, at 1.04 m/s over the bound of 1: the
+        # barrier is nearly elastic, and SolverIPC reads no restitution and has no contact damping
+        box_drop = test_box_drop
+        if solver_name == "ipc":
+            box_drop = unittest.expectedFailure(functools.partial(test_box_drop))
         add_function_test(
             TestRigidContact,
             f"test_box_drop_{solver_name}",
-            test_box_drop,
+            box_drop,
             devices=[device],
             solver_fn=solver_fn,
         )

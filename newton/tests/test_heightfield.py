@@ -1154,6 +1154,33 @@ class TestHeightfield(unittest.TestCase):
         z_auto = rest_z(Heightfield(data=data, nrow=9, ncol=9, hx=4.0, hy=4.0))
         self.assertAlmostEqual(z_auto, 0.6, delta=0.02)
 
+    @unittest.skipUnless(_cuda_available, "SolverIPC runs on CUDA devices only")
+    @requires("uipc_warp")
+    def test_heightfield_uniform_data_normalization_contract_ipc(self):
+        """The normalization contract of the test above with SolverIPC, which finds its own contacts."""
+
+        def rest_z(hfield):
+            builder = newton.ModelBuilder()
+            builder.add_shape_heightfield(heightfield=hfield)
+            sphere_body = builder.add_body(xform=wp.transform((0.0, 0.0, 1.0), wp.quat_identity()), mass=1.0)
+            builder.add_shape_sphere(body=sphere_body, radius=0.1)
+            builder.gravity = wp.vec3(0.0, 0.0, -9.81)
+
+            model = builder.finalize()
+            solver = newton.solvers.SolverIPC(model)
+            state_0, state_1 = model.state(), model.state()
+            dt = 0.002
+            for _ in range(int(2.0 / dt)):
+                solver.step(state_0, state_1, None, None, dt)
+                state_0, state_1 = state_1, state_0
+            return float(state_0.body_q.numpy()[sphere_body, 2])
+
+        data = np.full((9, 9), 0.5, dtype=np.float32)
+        z_explicit = rest_z(Heightfield(data=data, nrow=9, ncol=9, hx=4.0, hy=4.0, min_z=0.0, max_z=0.8))
+        self.assertAlmostEqual(z_explicit, 0.1, delta=0.02)
+        z_auto = rest_z(Heightfield(data=data, nrow=9, ncol=9, hx=4.0, hy=4.0))
+        self.assertAlmostEqual(z_auto, 0.6, delta=0.02)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

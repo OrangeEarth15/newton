@@ -56,6 +56,9 @@ def _make_solver(model, solver_name):
             particle_enable_tile_solve=False,
         )
 
+    if solver_name == "ipc":
+        return newton.solvers.SolverIPC(model)
+
     raise ValueError(f"Unsupported solver: {solver_name}")
 
 
@@ -160,19 +163,24 @@ class TestSoftBodySimulation(unittest.TestCase):
 
 
 devices = get_test_devices(mode="basic")
-for solver in ("semi_implicit", "xpbd", "vbd"):
+for solver in ("semi_implicit", "xpbd", "vbd", "ipc"):
+    # SolverIPC runs on CUDA devices only and needs libuipc-warp
+    solver_devices = [d for d in devices if d.is_cuda] if solver == "ipc" else devices
+    solver_requires = ("uipc_warp",) if solver == "ipc" else ()
     add_function_test(
         TestSoftBodySimulation,
         f"test_soft_grid_free_fall_{solver}",
         test_soft_grid_free_fall,
-        devices=devices,
+        devices=solver_devices,
+        requires=solver_requires,
         solver_name=solver,
     )
     add_function_test(
         TestSoftBodySimulation,
         f"test_soft_grid_anchored_deforms_{solver}",
         test_soft_grid_anchored_deforms,
-        devices=devices,
+        devices=solver_devices,
+        requires=solver_requires,
         solver_name=solver,
     )
 

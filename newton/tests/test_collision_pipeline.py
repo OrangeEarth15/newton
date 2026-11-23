@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
 import gc
 import itertools
 import math
@@ -570,12 +571,13 @@ def test_collision_pipeline(
     test_level_b: TestLevel,
     broad_phase: str,
     tolerance: float = 3e-3,
+    solver_fn=newton.solvers.SolverXPBD,
 ):
     viewer = newton.viewer.ViewerNull()
     setup = CollisionSetup(
         viewer=viewer,
         device=device,
-        solver_fn=newton.solvers.SolverXPBD,
+        solver_fn=solver_fn,
         sim_substeps=10,
         shape_type_a=shape_type_a,
         shape_type_b=shape_type_b,
@@ -627,6 +629,29 @@ def test_collision_pipeline_sap(
     test_collision_pipeline(_test, device, shape_type_a, shape_type_b, test_level_a, test_level_b, "sap", tolerance)
 
 
+def test_collision_pipeline_ipc(
+    _test,
+    device,
+    shape_type_a: GeoType,
+    shape_type_b: GeoType,
+    test_level_a: TestLevel,
+    test_level_b: TestLevel,
+    tolerance: float = 3e-3,
+):
+    # SolverIPC detects its own contacts, so one broad phase suffices
+    test_collision_pipeline(
+        _test,
+        device,
+        shape_type_a,
+        shape_type_b,
+        test_level_a,
+        test_level_b,
+        "explicit",
+        tolerance,
+        solver_fn=newton.solvers.SolverIPC,
+    )
+
+
 for test_config in collision_pipeline_contact_tests:
     shape_type_a, shape_type_b, test_level_a, test_level_b = test_config[:4]
     tolerance = test_config[4] if len(test_config) > 4 else 3e-3
@@ -660,6 +685,24 @@ for test_config in collision_pipeline_contact_tests:
         f"test_{type_to_str(shape_type_a)}_{type_to_str(shape_type_b)}_sap",
         test_collision_pipeline_sap,
         devices=devices,
+        shape_type_a=shape_type_a,
+        shape_type_b=shape_type_b,
+        test_level_a=test_level_a,
+        test_level_b=test_level_b,
+        tolerance=tolerance,
+    )
+    # SolverIPC (libuipc-warp). The box against the convex hull is an expected failure: the box's face presses a patch
+    # of the triangulated hull's vertices, which friction grips into a twist of 5.1e-3 rad/s about the impact axis,
+    # over the bound of 3e-3; solvers of point contacts have no such torsion
+    ipc_case = test_collision_pipeline_ipc
+    if (shape_type_a, shape_type_b) == (GeoType.BOX, GeoType.CONVEX_MESH):
+        ipc_case = unittest.expectedFailure(functools.partial(test_collision_pipeline_ipc))
+    add_function_test(
+        TestCollisionPipeline,
+        f"test_{type_to_str(shape_type_a)}_{type_to_str(shape_type_b)}_ipc",
+        ipc_case,
+        devices=devices,
+        requires=("uipc_warp",),
         shape_type_a=shape_type_a,
         shape_type_b=shape_type_b,
         test_level_a=test_level_a,

@@ -21,6 +21,7 @@ Note on tolerances:
   precision depending on solver and tolerance settings.
 """
 
+import functools
 import unittest
 
 import numpy as np
@@ -710,6 +711,11 @@ solvers = {
         False,
         1e-4,  # Tighter tolerance - directly integrates CoM velocity
     ),
+    "ipc": (
+        requires("uipc_warp")(newton.solvers.SolverIPC),
+        False,
+        1e-4,
+    ),
 }
 
 # Test configurations: different CoM offsets and velocity directions
@@ -736,11 +742,18 @@ for device in devices:
     for solver_name, (solver_fn, uses_gen_coords, tolerance) in solvers.items():
         if device.is_cuda and solver_name == "mujoco_cpu":
             continue
+        if device.is_cpu and solver_name == "ipc":
+            continue
 
+        # SolverIPC (an expected failure): the test's second half is a D6 joint of two angular axes, a universal
+        # joint, which no libuipc joint is: refused
+        d6_fk = test_d6_angular_state_matches_fk
+        if solver_name == "ipc":
+            d6_fk = unittest.expectedFailure(functools.partial(test_d6_angular_state_matches_fk))
         add_function_test(
             TestBodyVelocity,
             f"test_d6_angular_state_matches_fk_{solver_name}",
-            test_d6_angular_state_matches_fk,
+            d6_fk,
             devices=[device],
             solver_fn=solver_fn,
         )

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
 import sys
 import time
 import unittest
@@ -79,6 +80,7 @@ solvers = {
         )
     ),
     "xpbd": lambda model: newton.solvers.SolverXPBD(model, iterations=10),
+    "ipc": requires("uipc_warp")(newton.solvers.SolverIPC),
 }
 
 
@@ -2874,6 +2876,26 @@ add_function_test(
     devices=cuda_devices,
     solver_fn=solvers["xpbd"],
 )
+
+# SolverIPC (libuipc-warp) on the same stacks: it finds its own contacts and does not read hydroelastic ones. Expected
+# failures: the cubes start touching the ground and each other, at distance 0, inside the barrier's contact
+# thickness, which SolverIPC refuses
+for _name, _func in (
+    ("test_stacked_mesh_cubes_hydroelastic_ipc", test_stacked_mesh_cubes_hydroelastic),
+    ("test_stacked_small_primitive_cubes_hydroelastic_ipc", test_stacked_small_primitive_cubes_hydroelastic),
+    ("test_stacked_small_mesh_cubes_hydroelastic_ipc", test_stacked_small_mesh_cubes_hydroelastic),
+    (
+        "test_stacked_primitive_cubes_hydroelastic_ipc_no_reduction",
+        test_stacked_primitive_cubes_hydroelastic_no_reduction,
+    ),
+):
+    add_function_test(
+        TestHydroelastic,
+        _name,
+        unittest.expectedFailure(functools.partial(_func)),
+        devices=cuda_devices,
+        solver_fn=solvers["ipc"],
+    )
 
 # Penetration depth validation test
 add_function_test(

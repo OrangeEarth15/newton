@@ -606,10 +606,13 @@ solvers = {
     # "semi_implicit": lambda model: newton.solvers.SolverSemiImplicit(model, angular_damping=0.0),
     "kamino": newton.solvers.SolverKamino,
     "steel": _steel,
+    "ipc": requires("uipc_warp")(newton.solvers.SolverIPC),
 }
 for device in devices:
     for solver_name, solver_fn in solvers.items():
         if device.is_cuda and solver_name == "mujoco_cpu":
+            continue
+        if device.is_cpu and solver_name == "ipc":
             continue
 
         if "mujoco" in solver_name:

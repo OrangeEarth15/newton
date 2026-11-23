@@ -260,7 +260,8 @@ def _uses_maximal_coordinates(solver) -> bool:
         newton.solvers.SolverKamino
         | newton.solvers.SolverXPBD
         | newton.solvers.SolverSemiImplicit
-        | newton.solvers.SolverVBD,
+        | newton.solvers.SolverVBD
+        | newton.solvers.SolverIPC,
     )
 
 
@@ -857,6 +858,7 @@ solvers = {
         model,
         config=newton.solvers.SolverKamino.Config.from_model(model, dynamics_solver="lox"),
     ),
+    "ipc": requires("uipc_warp")(newton.solvers.SolverIPC),
 }
 for device in devices:
     for solver_name, solver_fn in solvers.items():
@@ -864,6 +866,8 @@ for device in devices:
             continue
         if device.is_cpu and solver_name in ("mujoco_warp", "steel_colored"):
             # On CPU the colored mode runs the serial propagation sweep.
+            continue
+        if device.is_cpu and solver_name == "ipc":
             continue
 
         add_function_test(

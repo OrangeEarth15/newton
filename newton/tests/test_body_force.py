@@ -15,6 +15,7 @@ For non-zero CoM tests:
   linearly and rotate about its CoM according to the applied force and torque.
 """
 
+import functools
 import unittest
 
 import numpy as np
@@ -216,10 +217,13 @@ solvers = {
     "xpbd": lambda model: newton.solvers.SolverXPBD(model, angular_damping=0.0),
     "semi_implicit": lambda model: newton.solvers.SolverSemiImplicit(model, angular_damping=0.0),
     "steel": _steel,
+    "ipc": requires("uipc_warp")(newton.solvers.SolverIPC),
 }
 for device in devices:
     for solver_name, solver_fn in solvers.items():
         if device.is_cuda and solver_name == "mujoco_cpu":
+            continue
+        if device.is_cpu and solver_name == "ipc":
             continue
         add_function_test(
             TestBodyForce,
@@ -267,10 +271,17 @@ for device in devices:
         )
 
         # test 3d articulation
+        # SolverIPC (an expected failure): about the box's axis of least inertia the torque turns it by 0.096 rad in
+        # the one 0.1 s step, more than the 0.05 rad the default body stiffness lets the first Newton iteration of the
+        # near-rigid affine body take about that axis, and the loop stops at 0.940 rad/s where a rigid body has 0.96
+        # (the bound is 1e-4; "Rigid bodies" in docs/solvers/ipc.rst)
+        angular_3d = test_3d_articulation
+        if solver_name == "ipc":
+            angular_3d = unittest.expectedFailure(functools.partial(test_3d_articulation))
         add_function_test(
             TestBodyForce,
             f"test_3d_articulation_up_axis_Y_{solver_name}",
-            test_3d_articulation,
+            angular_3d,
             devices=[device],
             solver_fn=solver_fn,
             test_angular=True,
@@ -279,7 +290,7 @@ for device in devices:
         add_function_test(
             TestBodyForce,
             f"test_3d_articulation_up_axis_Z_{solver_name}",
-            test_3d_articulation,
+            angular_3d,
             devices=[device],
             solver_fn=solver_fn,
             test_angular=True,
@@ -515,6 +526,7 @@ com_solvers = {
         True,
     ),
     "steel": (_steel, 1e-3, True),
+    "ipc": (requires("uipc_warp")(newton.solvers.SolverIPC), 1e-3, True),
 }
 
 # Test configurations for non-zero CoM tests
@@ -534,6 +546,8 @@ force_directions = [
 for device in devices:
     for solver_name, (solver_fn, _tolerance, supports_torque_com) in com_solvers.items():
         if device.is_cuda and solver_name == "mujoco_cpu":
+            continue
+        if device.is_cpu and solver_name == "ipc":
             continue
 
         for use_control in (False, True):
@@ -558,7 +572,9 @@ for device in devices:
 
 # Steel supports FREE joints only at articulation roots.
 for device in devices:
-    for solver_name in ("xpbd", "featherstone"):
+    for solver_name in ("xpbd", "featherstone", "ipc"):
+        if device.is_cpu and solver_name == "ipc":
+            continue
         add_function_test(
             TestBodyForce,
             f"test_descendant_free_joint_f_world_force_under_rotated_parent_{solver_name}",

@@ -3,6 +3,7 @@
 
 """Tests for mesh surface velocity in rigid contacts."""
 
+import functools
 import unittest
 
 import numpy as np
@@ -24,6 +25,8 @@ def _make_solver(name, model):
         return newton.solvers.SolverFeatherstone(model)
     if name == "mujoco":
         return newton.solvers.SolverMuJoCo(model, use_mujoco_contacts=False)
+    if name == "ipc":
+        return newton.solvers.SolverIPC(model)
     return newton.solvers.SolverXPBD(model, iterations=5)
 
 
@@ -335,14 +338,26 @@ for test_device in devices:
         test_mesh_surface_velocity_moves_rigid_body_through_coupled_solver,
         devices=[test_device],
     )
-    for name in ("xpbd", "semi_implicit", "featherstone", "vbd", "mujoco"):
-        if name == "vbd" and test_device.is_cpu:
+    for name in ("xpbd", "semi_implicit", "featherstone", "vbd", "mujoco", "ipc"):
+        if name in ("vbd", "ipc") and test_device.is_cpu:
             continue
-        requires = MUJOCO_MODULES if name == "mujoco" else ()
+        requires = MUJOCO_MODULES if name == "mujoco" else ("uipc_warp",) if name == "ipc" else ()
+        # SolverIPC (expected failures): it refuses meshes with a surface velocity, which its own contacts would
+        # ignore, and the box of the test with the velocity disabled starts 1 cm into the plane mesh, which the
+        # barrier refuses
+        moves, disabled, normal = (
+            test_mesh_surface_velocity_moves_rigid_body,
+            test_disabled_surface_velocity_runs_rigid_solver,
+            test_normal_surface_velocity_does_not_affect_contact,
+        )
+        if name == "ipc":
+            moves, disabled, normal = (
+                unittest.expectedFailure(functools.partial(f)) for f in (moves, disabled, normal)
+            )
         add_function_test(
             TestMeshSurfaceVelocity,
             f"test_mesh_surface_velocity_moves_rigid_body_{name}",
-            test_mesh_surface_velocity_moves_rigid_body,
+            moves,
             devices=[test_device],
             requires=requires,
             solver_name=name,
@@ -350,7 +365,7 @@ for test_device in devices:
         add_function_test(
             TestMeshSurfaceVelocity,
             f"test_disabled_surface_velocity_runs_rigid_solver_{name}",
-            test_disabled_surface_velocity_runs_rigid_solver,
+            disabled,
             devices=[test_device],
             requires=requires,
             solver_name=name,
@@ -358,7 +373,7 @@ for test_device in devices:
         add_function_test(
             TestMeshSurfaceVelocity,
             f"test_normal_surface_velocity_does_not_affect_contact_{name}",
-            test_normal_surface_velocity_does_not_affect_contact,
+            normal,
             devices=[test_device],
             requires=requires,
             solver_name=name,

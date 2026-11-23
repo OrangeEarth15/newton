@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
 import unittest
 
 import numpy as np
@@ -387,10 +388,13 @@ solvers = {
     "xpbd": lambda model: newton.solvers.SolverXPBD(model, angular_damping=0.0),
     "semi_implicit": lambda model: newton.solvers.SolverSemiImplicit(model, angular_damping=0.0),
     "kamino": newton.solvers.SolverKamino,
+    "ipc": requires("uipc_warp")(newton.solvers.SolverIPC),
 }
 for device in devices:
     for solver_name, solver_fn in solvers.items():
         if device.is_cuda and solver_name == "mujoco_cpu":
+            continue
+        if device.is_cpu and solver_name == "ipc":
             continue
         # add_function_test(TestControlForce, f"test_floating_body_linear_{solver_name}", test_floating_body, devices=[device], solver_fn=solver_fn, test_angular=False)
         add_function_test(
@@ -401,10 +405,15 @@ for device in devices:
             solver_fn=solver_fn,
             test_angular=True,
         )
+        # SolverIPC (an expected failure): a D6 joint of three linear axes locks every rotation, which no libuipc joint
+        # locks alone: refused
+        d6_linear = test_3d_articulation
+        if solver_name == "ipc":
+            d6_linear = unittest.expectedFailure(functools.partial(test_3d_articulation))
         add_function_test(
             TestControlForce,
             f"test_3d_articulation_{solver_name}",
-            test_3d_articulation,
+            d6_linear,
             devices=[device],
             solver_fn=solver_fn,
         )
@@ -412,10 +421,19 @@ for device in devices:
     for solver_name, solver_fn in {**solvers, "vbd": newton.solvers.SolverVBD}.items():
         if device.is_cuda and solver_name == "mujoco_cpu":
             continue
+        if solver_name == "ipc" and device.is_cpu:
+            continue
+        # SolverIPC (expected failures): the angular D6 joints of these tests are refused. libuipc's driving term acts
+        # on one hinge angle or one distance and cannot drive three angular axes, and a D6 joint of two angular axes
+        # is a universal joint, which no libuipc joint is
+        d6_target, d6_joint_f = test_d6_angular_target_is_equilibrium, test_d6_angular_joint_f_matches_featherstone
+        if solver_name == "ipc":
+            d6_target = unittest.expectedFailure(functools.partial(test_d6_angular_target_is_equilibrium))
+            d6_joint_f = unittest.expectedFailure(functools.partial(test_d6_angular_joint_f_matches_featherstone))
         add_function_test(
             TestControlForce,
             f"test_d6_angular_target_is_equilibrium_{solver_name}",
-            test_d6_angular_target_is_equilibrium,
+            d6_target,
             devices=[device],
             solver_fn=solver_fn,
         )
@@ -423,7 +441,7 @@ for device in devices:
             add_function_test(
                 TestControlForce,
                 f"test_d6_angular_joint_f_matches_featherstone_{solver_name}",
-                test_d6_angular_joint_f_matches_featherstone,
+                d6_joint_f,
                 devices=[device],
                 solver_fn=solver_fn,
             )
