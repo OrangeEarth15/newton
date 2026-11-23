@@ -3,7 +3,8 @@
 
 """The points at which SolverIPC meets the features libuipc has no term for (``newton._src.solvers.ipc.features``):
 the refusals the feature modules hold, with their messages and in their order, the joints the universal module is
-offered, the modules' hooks at build, step and notify, and the ``contact_damping`` option."""
+offered, the modules' hooks at build, step and notify, the supported observables and the ``contact_damping``
+option."""
 
 import contextlib
 import types
@@ -654,6 +655,29 @@ def test_hooks_are_called_at_their_points(test, device):
         test.assertEqual(between, regrow * (len(between) // len(regrow)))
 
 
+def test_supported_observables_come_from_the_observables_module(test, device):
+    """The solver's supported observables are the observables module's: SUPPORTED_OBSERVABLES holds STATUS,
+    SOLVER_RESIDUAL and CONTACT_F, a solver supports them, and under AL-IPC STATUS only; a kind the module adds is
+    taken by observables(), which refuses it, as every kind outside the set, without it."""
+    kind = newton.solvers.SolverIPC.ObservableKind
+    test.assertEqual(
+        newton.solvers.SolverIPC.SUPPORTED_OBSERVABLES, {kind.STATUS, kind.SOLVER_RESIDUAL, kind.CONTACT_F}
+    )
+    model = _falling_box(device)
+    solver = newton.solvers.SolverIPC(model)
+    test.assertEqual(solver.supported_observables, newton.solvers.SolverIPC.SUPPORTED_OBSERVABLES)
+    test.assertEqual(
+        newton.solvers.SolverIPC(model, contact_constitution="al-ipc").supported_observables, {kind.STATUS}
+    )
+    with test.assertRaisesRegex(ValueError, "SolverIPC does not support solver observable\\(s\\): 'body_qdd'"):
+        solver.observables({kind.BODY_QDD})
+    more = solver.SUPPORTED_OBSERVABLES | {kind.BODY_QDD}
+    with mock.patch.object(features.observables, "supported", return_value=more) as supported:
+        test.assertEqual(solver.supported_observables, more)
+        test.assertIsNotNone(solver.observables({kind.BODY_QDD}).body_qdd)
+    supported.assert_called_with(solver)
+
+
 def _falling_box(device):
     """A box 0.4 m above the ground."""
     builder = newton.ModelBuilder()
@@ -695,6 +719,10 @@ for name, func in (
     ("test_refusals_at_notify", test_refusals_at_notify),
     ("test_taken_joints_are_left_to_their_module", test_taken_joints_are_left_to_their_module),
     ("test_hooks_are_called_at_their_points", test_hooks_are_called_at_their_points),
+    (
+        "test_supported_observables_come_from_the_observables_module",
+        test_supported_observables_come_from_the_observables_module,
+    ),
     ("test_contact_damping_takes_none_only", test_contact_damping_takes_none_only),
 ):
     add_function_test(TestSolverIPCFeatureSeams, name, func, devices=devices)

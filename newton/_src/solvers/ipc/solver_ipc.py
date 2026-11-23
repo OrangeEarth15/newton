@@ -535,9 +535,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         ``FrameStatusFlags``): such a bit does not fail the step, and :meth:`SolverIPC.check_status` warns, naming it
         as libuipc-warp does."""
 
-    SUPPORTED_OBSERVABLES = frozenset(
-        {SolverBase.ObservableKind.SOLVER_RESIDUAL, SolverBase.ObservableKind.CONTACT_F, ObservableKind.STATUS}
-    )
+    SUPPORTED_OBSERVABLES = frozenset({*features.observables.KINDS, ObservableKind.STATUS})
 
     # libuipc-warp, imported by the first solver
     _uipc_warp: ClassVar = None
@@ -740,10 +738,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         """``STATUS``, ``SOLVER_RESIDUAL`` and ``CONTACT_F``; with ``contact_constitution="al-ipc"`` ``STATUS`` only: the
         AL-IPC frame ends on its own criterion, without a Newton residual, and its contact is an active set with
         multipliers, not the barrier and friction terms the contact output exports."""
-        config = getattr(self, "_config", None)
-        if config is not None and config.contact_constitution == "al-ipc":
-            return frozenset({self.ObservableKind.STATUS})
-        return self.SUPPORTED_OBSERVABLES
+        return features.observables.supported(self)
 
     @override
     def observables(

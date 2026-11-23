@@ -4,7 +4,8 @@
 """The solver observables SolverIPC writes (``SolverBase.observables``): its ``STATUS``, the Newton residual
 (``SOLVER_RESIDUAL``) and its contacts and their forces (``CONTACT_F``).
 
-Newton's ``SolverBase`` refuses an observable that a solver does not support. The hooks are those of ``features``
+The solver's ``SUPPORTED_OBSERVABLES`` holds ``KINDS`` and ``STATUS``, and its ``supported_observables`` is
+``supported(solver)``; Newton's ``SolverBase`` refuses an observable outside it. The hooks are those of ``features``
 (its docstring).
 """
 
@@ -12,13 +13,28 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from newton.solvers import SolverBase
+
 if TYPE_CHECKING:
     from newton import Control, Model, ModelFlags, State
-    from newton.solvers import SolverBase
 
     from ..joints import _JointDofs
     from ..solver_ipc import SolverIPC
     from . import FeatureOptions
+
+# the standard observable kinds SolverIPC writes, besides its own STATUS (SolverIPC.ObservableKind.STATUS)
+KINDS = frozenset({SolverBase.ObservableKind.SOLVER_RESIDUAL, SolverBase.ObservableKind.CONTACT_F})
+
+
+def supported(solver: SolverIPC) -> frozenset[str]:
+    """The observable kinds ``solver`` writes: those of ``SolverIPC.SUPPORTED_OBSERVABLES`` (``KINDS`` and
+    ``STATUS``), and with ``contact_constitution="al-ipc"`` ``STATUS`` only, since the AL-IPC frame ends on its own
+    criterion, without a Newton residual, and its contact is an active set with multipliers, not the barrier and
+    friction terms the contact output exports."""
+    config = getattr(solver, "_config", None)
+    if config is not None and config.contact_constitution == "al-ipc":
+        return frozenset({solver.ObservableKind.STATUS})
+    return solver.SUPPORTED_OBSERVABLES
 
 
 def check(model: Model, options: FeatureOptions, at: str) -> None:
