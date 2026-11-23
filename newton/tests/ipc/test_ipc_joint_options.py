@@ -248,7 +248,7 @@ def test_distance_joint_swings_as_a_pendulum(test, device):
     np.testing.assert_allclose(np.linalg.norm(offset, axis=1), L, rtol=0.0, atol=1e-6)
     for lower, upper in ((0.5, 1.0), (-1.0, 1.0), (0.5, -1.0)):
         with test.subTest(bounds=(lower, upper)):
-            with test.assertRaisesRegex(NotImplementedError, "a range or a single bound is an inequality"):
+            with test.assertRaisesRegex(NotImplementedError, "give both bounds one value, or make both negative"):
                 newton.solvers.SolverIPC(_distance_pendulum(device, L, 0.0, lower, upper))
 
 
@@ -425,7 +425,7 @@ def test_effort_limit_bounds_the_drive(test, device):
     model, state, _ = _hinged(
         device, axis=newton.Axis.X, radius=0.5, target_ke=ke, target_kd=kd, target_q=q_target, effort_limit=bound
     )
-    with test.assertRaisesRegex(NotImplementedError, "enable_joint_effort_limit=True.*joint_effort_limit 2.0"):
+    with test.assertRaisesRegex(NotImplementedError, "joint_effort_limit 2.0 and a drive; raise it to 1e\\+06"):
         newton.solvers.SolverIPC(model, enable_joint_effort_limit=False)
     inertia = float(model.body_inertia.numpy()[0][0, 0])
     forces = []
@@ -450,7 +450,7 @@ def test_effort_limit_bounds_the_drive(test, device):
     np.testing.assert_allclose(q[:, 0], torque, rtol=0.0, atol=1e-4 * np.abs(torque).max())
 
     model, _, _ = _hinged(device, axis=newton.Axis.X, target_ke=ke, effort_limit=-1.0)
-    with test.assertRaisesRegex(NotImplementedError, "takes no negative effort limit"):
+    with test.assertRaisesRegex(NotImplementedError, "joint_effort_limit -1.0 and a drive; make it 0 or positive"):
         newton.solvers.SolverIPC(model)
 
 
@@ -497,10 +497,10 @@ def test_rejects_d6_joints_libuipc_lacks(test, device):
 
     skew = (1.0, 1.0, 0.0)
     for name, m, pattern in (
-        ("universal", model(angular="XY"), "0 linear and 2 angular axes lock 3 translations and 1 rotations"),
-        ("translations", model(linear="XYZ"), "3 linear and 0 angular axes lock 0 translations and 3 rotations"),
-        ("cylindrical", model(linear="X", angular="X"), "1 linear and 1 angular axes lock 2 translations"),
-        ("skew axes", model(angular=("X", skew, "Z")), "its angular axes are not orthogonal"),
+        ("universal", model(angular="XY"), "has 0 linear and 2 angular axes.*lock 3 translations and 1 rotations"),
+        ("translations", model(linear="XYZ"), "has 3 linear and 0 angular axes.*lock 0 translations and 3 rotations"),
+        ("cylindrical", model(linear="X", angular="X"), "has 1 linear and 1 angular axes.*lock 2 translations"),
+        ("skew axes", model(angular=("X", skew, "Z")), "angular axes of the D6 joint 0 are not orthonormal"),
         ("ball drive", model(angular="XYZ", target_ke=10.0), "D6 joint 0 has the target mode POSITION"),
         ("free limit", model(linear="XYZ", angular="XYZ", limit_lower=-0.1), "limits revolute and prismatic"),
     ):

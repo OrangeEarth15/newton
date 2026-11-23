@@ -155,18 +155,26 @@ def _check_supported(model: Model, joints: _JointOptions | None = None) -> None:
     (``_JointOptions``). What independent worlds refuse is checked when the solve is laid out
     (``SolverIPC._check_independent_options``, ``_check_independent_content``)."""
     if model.requires_grad:
-        raise NotImplementedError("SolverIPC does not support gradients (model.requires_grad=True).")
+        raise NotImplementedError(
+            "SolverIPC: the model requires gradients (requires_grad=True); finalize it without them. SolverIPC "
+            "computes no gradients."
+        )
     for name, count in (
         ("tendons", model.tendon_count + model.custom_frequency_counts.get("mujoco:tendon", 0)),
         ("muscles", model.muscle_count),
     ):
         if count:
-            raise NotImplementedError(f"SolverIPC does not simulate {name}; the model has {count}.")
+            raise NotImplementedError(
+                f"SolverIPC: the model has {count} {name}; remove them. SolverIPC does not simulate {name}."
+            )
     mimic = int(model.constraint_mimic_count)
     if model.joint_count and model.joint_mimic_joint is not None:
         mimic += int(np.count_nonzero(model.joint_mimic_joint.numpy() >= 0))
     if mimic:
-        raise NotImplementedError(f"SolverIPC does not enforce mimic constraints; the model has {mimic}.")
+        raise NotImplementedError(
+            f"SolverIPC: the model has {mimic} mimic constraints; remove them. SolverIPC does not enforce mimic "
+            "constraints."
+        )
     mujoco = getattr(model, "mujoco", None)
     rows = int(getattr(mujoco, "equality_constraint_count", 0) or 0) if mujoco is not None else 0
     if rows:
@@ -174,7 +182,8 @@ def _check_supported(model: Model, joints: _JointOptions | None = None) -> None:
         rows = int(np.count_nonzero(enabled.numpy())) if enabled is not None else rows
     if rows:
         raise NotImplementedError(
-            f"SolverIPC does not enforce equality constraints; model.mujoco has {rows} enabled equality rows."
+            f"SolverIPC: model.mujoco has {rows} enabled equality rows; disable them (equality_constraint_enabled). "
+            "SolverIPC does not enforce equality constraints."
         )
     own_tris, own_tets, _ = _own_elements(model)
     for name, activations, own in (
@@ -182,7 +191,10 @@ def _check_supported(model: Model, joints: _JointOptions | None = None) -> None:
         ("tetrahedron", model.tet_activations, own_tets),
     ):
         if activations is not None and len(activations) and np.any(activations.numpy()[own] != 0.0):
-            raise NotImplementedError(f"SolverIPC does not take {name} activations; the model has non-zero ones.")
+            raise NotImplementedError(
+                f"SolverIPC: the model has non-zero {name} activations; set them to 0. SolverIPC does not read "
+                "activations."
+            )
     _check_joints(model, joints)
     _check_springs(model)
     _check_attachments(model)
@@ -466,7 +478,10 @@ class SolverIPC(SolverBase, CouplingInterface):
         enable_joint_effort_limit: bool = True,
     ):
         if not model.device.is_cuda:
-            raise NotImplementedError(f"SolverIPC runs on CUDA devices only; the model is on {model.device}.")
+            raise NotImplementedError(
+                f"SolverIPC: the model is on {model.device}; finalize it on a CUDA device. libuipc-warp runs on CUDA "
+                "devices only."
+            )
         super().__init__(model)
         self._coupled_worlds = bool(coupled_worlds)
         self._joint_options = _JointOptions(

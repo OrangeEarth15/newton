@@ -36,9 +36,9 @@ def test_rejects_springs_without_a_libuipc_form(test, device):
     """Reject a damped spring (libuipc has no damping element), a spring of negative rest length or of negative
     stiffness and one that joins a particle to itself."""
     for case, pattern in (
-        ("damped", "damping is 0.5"),
-        ("negative rest length", "rest length is -0.1"),
-        ("negative", "stiffness"),
+        ("damped", "spring 0 has spring_damping 0.5; set it to 0"),
+        ("negative rest length", "spring_rest_length -0.1[0-9]*; make it 0 or positive"),
+        ("negative", "spring_stiffness -1000.0; make it 0 or positive"),
         ("itself", "joins particle 0 to itself"),
     ):
         with test.subTest(case=case):
@@ -56,7 +56,7 @@ def test_rejects_attachment_damping(test, device):
     b = _box_body(builder, (0.0, 0.0, 2.0), (0.1, 0.1, 0.1))
     builder.add_attachment_particle_body(0, b, body_point=(0.0, 0.0, -0.5))
     builder.add_attachment_particle_body(1, b, body_point=(0.1, 0.0, -0.5), damping=2.0)
-    _rejects(test, builder, "particle-body attachment 1, whose damping is 2.0", device)
+    _rejects(test, builder, "particle-body attachment 1 has damping 2.0; set it to 0", device)
 
 
 def _hinged_pair(builder):
@@ -167,12 +167,12 @@ def test_rejects_unsupported_joints(test, device):
     _box_body(free, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
     free.joint_target_mode[0] = int(newton.JointTargetMode.POSITION)
     for name, builder, pattern in (
-        ("rod", hinged(rod), "ROD joints \\(joint 0\\): libuipc has no constitution of stretch, shear, bend"),
+        ("rod", hinged(rod), "joint 0 is a ROD joint; use SolverVBD or SolverKamino for rods"),
         ("free drive", free, "FREE joint 0 has the target mode POSITION"),
-        ("ball drive", hinged(ball, target_ke=10.0), "its ball joint has none .* BALL joint 0 has target_ke 10.0"),
+        ("ball drive", hinged(ball, target_ke=10.0), "BALL joint 0 has target_ke 10.0.*; set the gains"),
         ("ball limit", hinged(ball, limit_lower=-0.5), "limits revolute and prismatic joints only"),
         ("ball armature", hinged(ball, armature=0.01), "armature of revolute and prismatic joints only"),
-        ("friction", hinged(revolute, friction=0.5), "joint friction: libuipc's joints have none"),
+        ("friction", hinged(revolute, friction=0.5), "joint_friction 0.5; set it to 0. libuipc's joints have no"),
         ("effort limit", hinged(revolute, target_ke=100.0, effort_limit=-5.0), "joint_effort_limit -5.0"),
     ):
         with test.subTest(name):

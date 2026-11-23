@@ -33,10 +33,10 @@ if TYPE_CHECKING:
     from .solver_ipc import SolverIPC
 
 
-# why libuipc has no joint for a joint type SolverIPC refuses
+# what to do with a joint of a type SolverIPC refuses, and why libuipc has no joint for it
 _UNMAPPED_JOINTS = {
-    JointType.ROD: "libuipc has no constitution of stretch, shear, bend and twist between two affine bodies; its rods "
-    "are finite elements (Kirchhoff rod bending, constitution 15) and codimensional affine bodies",
+    JointType.ROD: "use SolverVBD or SolverKamino for rods. libuipc's rods are finite elements, not joints between two "
+    "affine bodies",
 }
 
 
@@ -97,8 +97,10 @@ def _map_joints(model: Model) -> _JointMap:
     if len(other):
         j = int(other[0])
         t = JointType(int(joint_type[j]))
-        why = _UNMAPPED_JOINTS.get(t, "libuipc's affine-body joints are revolute, prismatic, fixed and ball joints")
-        raise NotImplementedError(f"SolverIPC does not simulate {t.name} joints (joint {j}): {why}.")
+        why = _UNMAPPED_JOINTS.get(
+            t, "use revolute, prismatic, fixed, ball, free, D6 or distance joints. libuipc has no joint of this type"
+        )
+        raise NotImplementedError(f"SolverIPC: joint {j} is a {t.name} joint; {why}.")
     d6 = np.flatnonzero(joint_type == int(JointType.D6))
     if len(d6):
         dof_dim = model.joint_dof_dim.numpy()
@@ -109,17 +111,17 @@ def _map_joints(model: Model) -> _JointMap:
         t = _D6_KINDS.get((lin, ang))
         if t is None:
             raise NotImplementedError(
-                f"SolverIPC does not simulate the D6 joint {j}: its {lin} linear and {ang} angular axes lock "
-                f"{3 - lin} translations and {3 - ang} rotations, and libuipc's joints lock all six (fixed), all but "
-                "one rotation (revolute), all but one translation (prismatic), the translations (ball) or nothing."
+                f"SolverIPC: the D6 joint {j} has {lin} linear and {ang} angular axes; give it no axis, one axis, three "
+                f"angular axes, or three linear and three angular axes. Its axes lock {3 - lin} translations and "
+                f"{3 - ang} rotations, which no libuipc joint locks."
             )
         if ang == 3:
             s = int(qd_start[j])
             for name, rows in (("linear", axes[s : s + lin]), ("angular", axes[s + lin : s + lin + ang])):
                 if len(rows) and not _orthonormal(rows):
                     raise NotImplementedError(
-                        f"SolverIPC does not simulate the D6 joint {j}: its {name} axes are not orthogonal, which "
-                        "Newton's coordinates of a D6 joint of three axes assume."
+                        f"SolverIPC: the {name} axes of the D6 joint {j} are not orthonormal; make them orthonormal. "
+                        "Newton's coordinates of a D6 joint of three axes assume they are."
                     )
         kind[j] = int(t)
         store[j] = int(JointType.FIXED) if ang == 3 else int(t)
@@ -131,10 +133,9 @@ def _map_joints(model: Model) -> _JointMap:
         for j, a, b in zip(distance, lo, hi, strict=True):
             if (a >= 0.0 or b >= 0.0) and not (a == b):
                 raise NotImplementedError(
-                    f"SolverIPC does not simulate the DISTANCE joint {j}, whose distance is bounded to "
-                    f"[{float(a)!r}, {float(b)!r}] (a negative bound is none): a range or a single bound is an "
-                    "inequality, and libuipc's soft vertex stitch, the spring it holds a distance with, has one rest "
-                    "length; libuipc has no distance limit."
+                    f"SolverIPC: the DISTANCE joint {j} bounds its distance to [{float(a)!r}, {float(b)!r}] (a "
+                    "negative bound is none); give both bounds one value, or make both negative. libuipc's stitch, "
+                    "which holds the distance, has one rest length and no range."
                 )
         kind[distance] = int(JointType.FREE)
         store[distance] = int(JointType.FREE)
@@ -163,20 +164,20 @@ def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
         a = getattr(model, name)
         return np.zeros(model.joint_dof_count) if a is None else a.numpy().astype(np.float64)
 
-    def refuse(dofs: np.ndarray, what: Callable[[int], str], why: str) -> None:
+    def refuse(dofs: np.ndarray, what: Callable[[int], str], remedy: str) -> None:
+        """Raise for the first of ``dofs``: what it has, what to do and why (``remedy``)."""
         if len(dofs):
             d = int(dofs[0])
             j = int(dof_joint[d])
             raise NotImplementedError(
-                f"SolverIPC {why}: DOF {d} of the {JointType(int(joint_type[j])).name} joint {j} has {what(d)}."
+                f"SolverIPC: DOF {d} of the {JointType(int(joint_type[j])).name} joint {j} has {what(d)}; {remedy}."
             )
 
     friction = per_dof("joint_friction")
     refuse(
         np.flatnonzero(friction != 0.0),
         lambda d: f"joint_friction {float(friction[d])!r}",
-        "does not simulate joint friction: libuipc's joints have none, and dry friction, a bounded force, is no "
-        "quadratic potential that libuipc's driving term could hold",
+        "set it to 0. libuipc's joints have no friction",
     )
     ke, kd = per_dof("joint_target_ke"), per_dof("joint_target_kd")
     ks, c = per_dof("joint_stiffness"), per_dof("joint_damping")
@@ -192,14 +193,13 @@ def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
     refuse(
         np.flatnonzero(~(armature >= 0.0)),
         lambda d: f"joint_armature {float(armature[d])!r}",
-        "takes no negative joint armature",
+        "make it 0 or positive. An armature is an inertia",
     )
     refuse(
         np.flatnonzero((armature != 0.0) & other),
         lambda d: f"joint_armature {float(armature[d])!r}",
-        "gives the armature of revolute and prismatic joints only: libuipc's driving term, which holds it, is a "
-        "quadratic potential of one hinge angle or one distance, and the armature of a ball or a free joint is an "
-        "inertia about three axes, or a mass without weight",
+        "set it to 0. SolverIPC takes the armature of revolute and prismatic joints only, as the inertia of their one "
+        "coordinate",
     )
 
     def drive(d: int) -> str:
@@ -214,16 +214,14 @@ def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
     refuse(
         np.flatnonzero(other & driven),
         drive,
-        "drives, springs and damps revolute and prismatic joints only: libuipc's driving term (constitutions 19 "
-        "and 21) is a quadratic potential of one hinge angle or one distance, its ball joint has none (constitution "
-        "27 is only registered) and a free body has no joint (a D6 joint of three angular axes is a ball joint or "
-        "no joint); Control.joint_f acts on every joint",
+        "set the gains, stiffness and damping to 0 and the target mode to NONE, and apply forces through "
+        "Control.joint_f, which acts on every joint. libuipc drives, springs and damps revolute and prismatic joints "
+        "only",
     )
     refuse(
         np.flatnonzero(other & limited),
         lambda d: f"the limits [{float(lo[d])!r}, {float(hi[d])!r}] with limit_ke {float(limit_k[d])!r}",
-        "limits revolute and prismatic joints only: libuipc's limits (constitutions 669 and 670) act on one hinge "
-        "angle or one distance, and its ball joint has none",
+        "set limit_ke to 0, or the bounds to -MAXVAL and MAXVAL. libuipc limits revolute and prismatic joints only",
     )
     effort = per_dof("joint_effort_limit")
     gains = (ke != 0.0) | (kd != 0.0)
@@ -231,15 +229,14 @@ def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
         refuse(
             np.flatnonzero(gains & ~(effort >= 0.0)),
             lambda d: f"joint_effort_limit {float(effort[d])!r} and a drive",
-            "takes no negative effort limit",
+            "make it 0 or positive. It bounds the drive's force",
         )
     else:
         refuse(
             np.flatnonzero(gains & (effort < _EFFORT_LIMIT)),
             lambda d: f"joint_effort_limit {float(effort[d])!r} and a drive",
-            "cannot bound the force of a drive: libuipc's driving term is a quadratic potential, whose force has no "
-            f"bound; raise the limit to {_EFFORT_LIMIT:g}, Newton's default, to drive the joint without a bound, or "
-            "pass enable_joint_effort_limit=True for a bound decided at the start of every step",
+            f"raise it to {_EFFORT_LIMIT:g}, Newton's default, or pass enable_joint_effort_limit=True for a bound "
+            "decided at the start of every step. libuipc's quadratic drive cannot bound its force",
         )
 
 

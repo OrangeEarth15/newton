@@ -103,24 +103,22 @@ def _check_springs(model: Model) -> None:
     if model.spring_count == 0:
         return
     own = _own_elements(model)[2]
-    for name, array, bad, why in (
-        ("damping", model.spring_damping, lambda v: v != 0.0, "libuipc's springs and stitches have no damping"),
-        ("rest length", model.spring_rest_length, lambda v: ~(v >= 0.0), "it must not be negative"),
-        ("stiffness", model.spring_stiffness, lambda v: ~(v >= 0.0), "it must not be negative"),
+    for name, array, bad, remedy in (
+        ("spring_damping", model.spring_damping, lambda v: v != 0.0, "set it to 0. libuipc's springs have no damping"),
+        ("spring_rest_length", model.spring_rest_length, lambda v: ~(v >= 0.0), "make it 0 or positive"),
+        ("spring_stiffness", model.spring_stiffness, lambda v: ~(v >= 0.0), "make it 0 or positive"),
     ):
         values = array.numpy()
         found = np.flatnonzero(bad(values) & own)
         if len(found):
             k = int(found[0])
-            raise NotImplementedError(
-                f"SolverIPC does not simulate spring {k}, whose {name} is {float(values[k])!r}: {why}."
-            )
+            raise NotImplementedError(f"SolverIPC: spring {k} has {name} {float(values[k])!r}; {remedy}.")
     ends = model.spring_indices.numpy().reshape(-1, 2)
     same = np.flatnonzero((ends[:, 0] == ends[:, 1]) & own)
     if len(same):
         k = int(same[0])
         raise NotImplementedError(
-            f"SolverIPC does not simulate spring {k}, which joins particle {int(ends[k, 0])} to itself."
+            f"SolverIPC: spring {k} joins particle {int(ends[k, 0])} to itself; remove it, or join two particles."
         )
 
 
@@ -130,17 +128,18 @@ def _check_attachments(model: Model) -> None:
     offset to carry it) and a stiffness that is not negative, finite or infinite (hard)."""
     if model.attachment_particle_body_count == 0:
         return
-    for name, array, bad, why in (
-        ("damping", model.attachment_particle_body_damping, lambda v: v != 0.0, "libuipc's stitch has no damping"),
-        ("stiffness", model.attachment_particle_body_stiffness, lambda v: ~(v >= 0.0), "it must not be negative"),
-    ):
+    for name, array, bad, remedy in (
+        ("damping", model.attachment_particle_body_damping, lambda v: v != 0.0, "set it to 0. libuipc's stitch has no "
+         "damping"),
+        ("stiffness", model.attachment_particle_body_stiffness, lambda v: ~(v >= 0.0), "make it 0 or positive, or "
+         "infinite for a hard attachment"),
+    ):  # fmt: skip
         values = array.numpy()
         found = np.flatnonzero(bad(values))
         if len(found):
             k = int(found[0])
             raise NotImplementedError(
-                f"SolverIPC does not simulate particle-body attachment {k}, whose {name} is {float(values[k])!r}: "
-                f"{why}."
+                f"SolverIPC: particle-body attachment {k} has {name} {float(values[k])!r}; {remedy}."
             )
 
 
@@ -314,7 +313,10 @@ def _shape_mesh(model: Model, s: int, segments: int) -> tuple[np.ndarray, np.nda
     elif t == GeoType.HFIELD:
         return _heightfield_mesh(model, s)
     else:
-        raise NotImplementedError(f"SolverIPC does not support shape {s} of type {GeoType(t).name}.")
+        raise NotImplementedError(
+            f"SolverIPC: shape {s} is a {GeoType(t).name} shape; give it another type, or clear its collide flags. "
+            "SolverIPC triangulates every colliding shape and has no triangulation of this type."
+        )
     return _weld(mesh.vertices, mesh.indices)
 
 
@@ -935,7 +937,10 @@ def _add_shapes_and_bodies(
             b = int(shape_body[s])
             if shape_type[s] == GeoType.PLANE:
                 if b != -1:
-                    raise NotImplementedError(f"SolverIPC does not support the plane shape {s} on a body.")
+                    raise NotImplementedError(
+                        f"SolverIPC: the plane shape {s} is on body {b}; put planes on the world (body -1). libuipc's "
+                        "half planes do not move."
+                    )
                 continue
             v, f = _shape_mesh(model, s, solver._shape_segments)
             if len(f) == 0:

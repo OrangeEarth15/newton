@@ -332,8 +332,8 @@ def _check_surface_velocity(model: Model) -> None:
         source = model.shape_source[s]
         if isinstance(source, Mesh) and source.enable_surface_velocity:
             raise NotImplementedError(
-                f"SolverIPC does not apply mesh surface velocities: shape {int(s)} is a mesh with "
-                "enable_surface_velocity=True."
+                f"SolverIPC: shape {int(s)} is a mesh with enable_surface_velocity=True; turn the surface velocity "
+                "off. SolverIPC finds its own contacts, which do not apply surface velocities."
             )
 
 

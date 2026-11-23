@@ -209,7 +209,7 @@ def test_attachment_changes(test, device):
     [rows] = solver._uipc_warp.arrays.stitch_groups(solver._engine)
     np.testing.assert_array_equal(rows.kappa.numpy(), [20.0])
     model.attachment_particle_body_damping.assign(np.array([1.0], np.float32))
-    with test.assertRaisesRegex(NotImplementedError, "attachment 0, whose damping is 1.0"):
+    with test.assertRaisesRegex(NotImplementedError, "attachment 0 has damping 1.0; set it to 0"):
         solver.notify_model_changed(newton.ModelFlags.CONSTRAINT_PROPERTIES)
     model.attachment_particle_body_damping.assign(np.array([0.0], np.float32))
     model.attachment_particle_body_body_point.assign(np.array([[0.0, 0.0, -0.19]], np.float32))
