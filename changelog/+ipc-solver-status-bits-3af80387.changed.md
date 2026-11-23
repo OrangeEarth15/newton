@@ -1,0 +1,1 @@
+Take a libuipc-warp whose status flags add bits to SolverIPC.StatusBits: a bit above SolverIPC.StatusBits.KNOWN does not fail a step, and check_status warns, naming it as libuipc-warp does. A libuipc-warp without a StatusBits bit under its name is still refused.

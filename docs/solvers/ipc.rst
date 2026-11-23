@@ -841,7 +841,11 @@ an affine body's :math:`A` scaled by
 ``newton_velocity_tol * dt``. It is dimensionless, at most one when the loop
 ended on its displacement test, may be above one when the semi-implicit test
 ended it, and infinite when the step failed on a value in
-:class:`~newton.solvers.SolverIPC.StatusBits`.
+:class:`~newton.solvers.SolverIPC.StatusBits`. A later libuipc-warp may set bits
+of its own above those of :attr:`~newton.solvers.SolverIPC.StatusBits.KNOWN`
+(its ``FrameStatusFlags``): such a bit does not fail the step, and
+:meth:`~newton.solvers.SolverIPC.check_status` warns, naming it as libuipc-warp
+does.
 
 A step that is not captured reads the status itself after the solve, with one
 synchronization. When a contact list overflowed (with independent worlds, a

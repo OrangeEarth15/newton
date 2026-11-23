@@ -80,6 +80,48 @@ def test_check_status(test, device):
         solver.check_status(solver.observables({solver.ObservableKind.SOLVER_RESIDUAL}))
 
 
+def test_status_bits_of_a_later_libuipc_warp(test, device):
+    """A libuipc-warp with a status bit SolverIPC does not name (a made-up PCG_LIMIT, 1 << 9) is taken: the import
+    checks only that every StatusBits bit is one of its flags under its name. check_status takes the extra bit as no
+    failure and warns, naming it as libuipc-warp does, and still raises on a failure next to it. A libuipc-warp without
+    a StatusBits bit, or with one under another name, is refused."""
+    import enum  # noqa: PLC0415
+
+    import uipc_warp.arrays  # noqa: PLC0415
+
+    members = {flag.name: int(flag) for flag in uipc_warp.arrays.FrameStatusFlags}
+    later = enum.IntFlag("FrameStatusFlags", {**members, "PCG_LIMIT": 1 << 9})
+    without = enum.IntFlag("FrameStatusFlags", {k: v for k, v in members.items() if k != "NEWTON_LIMIT"})
+    renamed = enum.IntFlag(
+        "FrameStatusFlags", {("TOO_CLOSE" if k == "THICKNESS_VIOLATED" else k): v for k, v in members.items()}
+    )
+    imported = newton.solvers.SolverIPC._uipc_warp
+    try:
+        for flags, missing in ((without, "NEWTON_LIMIT"), (renamed, "THICKNESS_VIOLATED")):
+            newton.solvers.SolverIPC._uipc_warp = None
+            with mock.patch.object(uipc_warp.arrays, "FrameStatusFlags", flags):
+                with test.assertRaisesRegex(RuntimeError, f"lack SolverIPC.StatusBits {missing} under their names"):
+                    newton.solvers.SolverIPC._import_uipc_warp()
+        newton.solvers.SolverIPC._uipc_warp = None
+        with mock.patch.object(uipc_warp.arrays, "FrameStatusFlags", later):
+            model, _ = _boxes_apart(device)
+            solver = newton.solvers.SolverIPC(model)
+            observables = solver.observables({solver.ObservableKind.STATUS})
+            s0, s1 = model.state(), model.state()
+            solver.step(s0, s1, None, None, 0.01, observables=observables)
+            words = observables.status.numpy()
+            observables.status.assign(words | (1 << 9))
+            with test.assertWarnsRegex(
+                newton.NewtonWarning, "libuipc-warp set PCG_LIMIT, which StatusBits do not name"
+            ):
+                test.assertFalse(solver.check_status(observables))
+            observables.status.assign(words | (1 << 9) | int(solver.StatusBits.THICKNESS_VIOLATED))
+            with test.assertRaisesRegex(RuntimeError, "a step failed on THICKNESS_VIOLATED"):
+                solver.check_status(observables)
+    finally:
+        newton.solvers.SolverIPC._uipc_warp = imported
+
+
 def test_default_d_hat_follows_small_features(test, device):
     """Without a d_hat argument the solver lowers d_hat to a quarter of the smallest colliding feature.
 
@@ -651,6 +693,7 @@ devices = get_cuda_test_devices()
 for name, func in (
     ("test_contact_at_start_fails", test_contact_at_start_fails),
     ("test_check_status", test_check_status),
+    ("test_status_bits_of_a_later_libuipc_warp", test_status_bits_of_a_later_libuipc_warp),
     ("test_default_d_hat_follows_small_features", test_default_d_hat_follows_small_features),
     ("test_overflow_grows", test_overflow_grows),
     ("test_grown_lists_keep_a_changed_gravity", test_grown_lists_keep_a_changed_gravity),

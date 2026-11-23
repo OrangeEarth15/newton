@@ -385,7 +385,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         """Bits of the per-world ``Observables.status`` mask: how the solve of the step ended.
 
         The step failed, and its result must not be used, when a bit of :attr:`SolverIPC.StatusBits.FAILED` is set. The two
-        iteration limits are not failures.
+        iteration limits are not failures, and neither is a bit of a later libuipc-warp outside
+        :attr:`SolverIPC.StatusBits.KNOWN`.
         """
 
         OVERFLOW = 1 << 0
@@ -430,6 +431,11 @@ class SolverIPC(SolverBase, CouplingInterface):
             | TRAVERSAL_EXHAUSTED
         )
         """The bits of a failed step."""
+
+        KNOWN = FAILED | LINE_SEARCH_LIMIT | NEWTON_LIMIT
+        """Every bit this class names. A later libuipc-warp may set bits above them in the status mask (its
+        ``FrameStatusFlags``): such a bit does not fail the step, and :meth:`SolverIPC.check_status` warns, naming it
+        as libuipc-warp does."""
 
     SUPPORTED_OBSERVABLES = frozenset(
         {SolverBase.ObservableKind.SOLVER_RESIDUAL, SolverBase.ObservableKind.CONTACT_F, ObservableKind.STATUS}
@@ -678,14 +684,18 @@ class SolverIPC(SolverBase, CouplingInterface):
                 f"SolverIPC requires libuipc-warp {minimum} or newer with {', '.join(_capabilities(uipc_warp))}; "
                 f"the installed one ({version}) lacks {', '.join(missing)}: {_UIPC_WARP_INSTALL}"
             )
-        # write_frame_status writes libuipc-warp's FrameStatusFlags into the status arrays: the same bits under the
-        # same names, but for the CCD bit, which libuipc-warp names after the time of impact
+        # write_frame_status writes libuipc-warp's FrameStatusFlags into the status arrays: every StatusBits bit must be
+        # one of them under its name (but the CCD bit, which libuipc-warp names after the time of impact); a bit that
+        # a later libuipc-warp adds is taken as no failure (StatusBits)
         flags = {int(flag): flag.name for flag in uipc_warp.arrays.FrameStatusFlags}
-        bits = {int(bit): bit.name for bit in cls.StatusBits}
         renamed = int(cls.StatusBits.INVALID_CCD_STEP)
-        if flags.keys() != bits.keys() or any(flags[b] != bits[b] for b in bits if b != renamed):
+        unlike = [
+            bit.name for bit in cls.StatusBits if int(bit) not in flags or (flags[bit] != bit.name and bit != renamed)
+        ]
+        if unlike:
             raise RuntimeError(
-                f"Incompatible libuipc-warp {version}: its FrameStatusFlags {flags} are not SolverIPC.StatusBits."
+                f"Incompatible libuipc-warp {version}: its FrameStatusFlags {flags} lack SolverIPC.StatusBits "
+                f"{', '.join(unlike)} under their names and values."
             )
         cls._uipc_warp = uipc_warp
         return uipc_warp
@@ -1457,7 +1467,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         if status.traversal_exhausted:
             return "SolverIPC: a BVH traversal ran out of its node budget, so contact candidates are missing."
         report = self._engine.nonfinite_report()
-        name = self.StatusBits(1 << status.nonfinite).name
+        name = self._bit_names(1 << status.nonfinite)
         detail = report.get("message", "")
         if not detail:
             detail = ", ".join(f"{k}={v}" for k, v in report.items() if k not in ("kind",))
@@ -1626,7 +1636,9 @@ class SolverIPC(SolverBase, CouplingInterface):
                 residual = (
                     f" (residual {float(observables.solver_residual.numpy().max()):.3g}, at most 1 when converged)"
                 )
-        bits = self.StatusBits(int(np.bitwise_or.reduce(words)))
+        word = int(np.bitwise_or.reduce(words))
+        known = int(self.StatusBits.KNOWN)
+        bits = self.StatusBits(word & known)
         if bits & self.StatusBits.OVERFLOW and grow:
             self.grow()
             return True
@@ -1677,11 +1689,20 @@ class SolverIPC(SolverBase, CouplingInterface):
             limits.append(f"the Newton loop stopped at newton_max_iter without converging{residual}")
         if bits & self.StatusBits.LINE_SEARCH_LIMIT:
             limits.append("a line search ran out of its line_search_max_iter trials")
+        if word & ~known:
+            limits.append(f"libuipc-warp set {self._bit_names(word & ~known)}, which StatusBits do not name")
         if limits:
             warnings.warn(
                 f"SolverIPC: {' and '.join(limits)}; this does not fail the step.", NewtonWarning, stacklevel=2
             )
         return False
+
+    def _bit_names(self, bits: int) -> str:
+        """``bits`` of a status mask by name: ``StatusBits``' names, and libuipc-warp's (its ``FrameStatusFlags``) for
+        the bits of a later libuipc-warp, or ``1 << k``."""
+        names = {int(flag): flag.name for flag in self._uipc_warp.arrays.FrameStatusFlags}
+        names.update({int(bit): bit.name for bit in self.StatusBits})
+        return "|".join(names.get(1 << k, f"1 << {k}") for k in range(bits.bit_length()) if bits >> k & 1)
 
     @override
     def reset(
