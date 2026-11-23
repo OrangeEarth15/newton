@@ -730,7 +730,9 @@ joint and takes the row as held by it, by SolverSteel's rule: a CONNECT row
 linked to a BALL joint, or a WELD row to a FIXED joint (to a BALL joint when its
 ``torquescale`` is 0), that is in no articulation and joins the row's two
 bodies (or its body and the world). Every other enabled row raises
-:class:`NotImplementedError` when the solver is built; a row's
+:class:`NotImplementedError`, when the solver is built and when
+:meth:`~newton.solvers.SolverIPC.notify_model_changed` reports
+``CONSTRAINT_PROPERTIES`` (a row enabled since); a row's
 ``equality_constraint_enabled`` does not switch its loop joint,
 ``joint_enabled`` does.
 

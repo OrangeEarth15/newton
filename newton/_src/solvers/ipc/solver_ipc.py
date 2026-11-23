@@ -1876,7 +1876,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         the joint flags only check them again against what :ref:`ipc-joints` rejects and, once per solver, warn of
         velocity limits below Newton's default (:ref:`ipc-not-read`). So are the stiffness and the
         enabled flags of the particle-body attachments (``CONSTRAINT_PROPERTIES``), which that flag checks again against
-        what :ref:`ipc-attachments` rejects; a new body, particle or point of an attachment builds the solve again. With
+        what :ref:`ipc-attachments` rejects; a new body, particle or point of an attachment builds the solve again.
+        ``CONSTRAINT_PROPERTIES`` also checks the mimic constraints and MuJoCo's equality rows again, so that a row
+        enabled since the solver was built that no loop joint holds is refused (:ref:`ipc-joints`). With
         ``kinematic_motion="aim"`` a change of a kinematic body's mass properties builds the solve again too, since its
         soft transform constraint follows the masses it was built with. Copies from the host: not inside a graph
         capture. With ``contact_constitution="al-ipc"`` new masses build the solve again too, since the AL-IPC penalty
@@ -1909,6 +1911,8 @@ class SolverIPC(SolverBase, CouplingInterface):
             _warn_of_velocity_limits(self, stacklevel=3)
             if model.joint_count:  # a distance joint gains or loses its length
                 rebuild |= not np.array_equal(_map_joints(model).distance, self._distance_joints)
+        if flags & ModelFlags.CONSTRAINT_PROPERTIES:
+            _check_constraints(model)  # an equality row enabled since, a mimic relation set since
         if flags & ModelFlags.CONSTRAINT_PROPERTIES and model.attachment_particle_body_count:
             _check_attachments(model)  # their stiffness and enabled flags are read at every step
             body, particle, point = self._attachment_inputs or (None, None, None)

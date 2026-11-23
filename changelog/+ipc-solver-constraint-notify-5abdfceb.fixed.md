@@ -1,0 +1,1 @@
+Check SolverIPC's mimic constraints and MuJoCo equality rows again whenever notify_model_changed reports CONSTRAINT_PROPERTIES, so that a row enabled after construction that no loop joint holds is refused instead of ignored; the check ran only at construction, and the flag checked only particle-body attachments.

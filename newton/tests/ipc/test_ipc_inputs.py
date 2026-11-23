@@ -97,8 +97,23 @@ def _equality_row(enabled):
 
 
 def test_rejects_equality_constraints(test, device):
-    """Reject an enabled MuJoCo equality row that no loop joint holds instead of letting the body fall through it."""
+    """Reject an enabled MuJoCo equality row that no loop joint holds instead of letting the body fall through it;
+    a row disabled when the solver is built and enabled later is refused when notify_model_changed reports
+    CONSTRAINT_PROPERTIES, and so is a mimic relation set later."""
     _rejects(test, _equality_row(True), "1 enabled equality rows that no loop joint holds \\(rows \\[0\\]\\)", device)
+    model = _equality_row(False).finalize(device=device)
+    solver = newton.solvers.SolverIPC(model)
+    model.mujoco.equality_constraint_enabled.assign(np.array([True]))
+    with test.assertRaisesRegex(NotImplementedError, "1 enabled equality rows that no loop joint holds"):
+        solver.notify_model_changed(newton.ModelFlags.CONSTRAINT_PROPERTIES)
+
+    builder = newton.ModelBuilder()
+    _hinged_pair(builder)
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model)
+    model.joint_mimic_joint.assign(np.array([-1, 0], np.int32))
+    with test.assertRaisesRegex(NotImplementedError, "1 mimic constraints; remove them"):
+        solver.notify_model_changed(newton.ModelFlags.CONSTRAINT_PROPERTIES)
 
 
 # Newton's importers turn the weld into a FIXED joint between the boxes and the connect into a BALL joint from the world
