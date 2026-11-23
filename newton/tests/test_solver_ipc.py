@@ -2148,7 +2148,7 @@ def _sheet(builder, x, tris, rows=None, rest=None, mass=0.01, tri_k=1.0e3, edge_
 def _newton_angles(model, x):
     """Newton's angle of every bending edge row at the positions ``x``, as it measures rest angles (SolverIPC's copy of
     Newton's helper, which test_rest_shape_copies_match_newtons_builders holds to the builders)."""
-    from newton._src.solvers.ipc.solver_ipc import _dihedral_angles  # noqa: PLC0415
+    from newton._src.solvers.ipc.scene import _dihedral_angles  # noqa: PLC0415
 
     e = model.edge_indices.numpy().reshape(-1, 4)
     x = np.asarray(x, np.float64)
@@ -2259,7 +2259,7 @@ def test_rest_shapes_from_tri_poses_and_edge_rest_angle(test, device):
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     _sheet(builder, curved, sheet, rows, edge_ke=1.0)
     by_hand = builder.finalize(device=device)
-    from newton._src.solvers.ipc.solver_ipc import _winding_signs  # noqa: PLC0415
+    from newton._src.solvers.ipc.scene import _winding_signs  # noqa: PLC0415
 
     hinges = []
     for model in (given, by_hand):
@@ -2334,7 +2334,7 @@ def test_cloth_at_rest_takes_its_rest_triangles_from_particle_q(test, device):
     tests/test_arrays_rest_shapes.py holds them to libuipc's, bit for bit), not those of the float32 tri_poses, which
     are off by their rounding, a strain the sheet would start with. A triangle whose tri_poses were changed keeps them;
     the others then take the rest edges of particle_q in float64."""
-    from newton._src.solvers.ipc.solver_ipc import _triangle_rest_geometry  # noqa: PLC0415
+    from newton._src.solvers.ipc.scene import _triangle_rest_geometry  # noqa: PLC0415
 
     model = _flat_sheet(device, rot=wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.3))
     x = model.particle_q.numpy().astype(np.float64)
@@ -2680,9 +2680,10 @@ def test_near_parts_forms_no_pair_of_two_worlds(test, device):
     themselves, some not, the global subscene meeting all) and one of another form: every near pair the table lets
     meet, each once, and with the form of separate worlds no pair of two worlds (the caller tests the pairs within a
     world against the table)."""
+    from newton._src.solvers.ipc.start_check import _near_parts  # noqa: PLC0415
+
     del device
     rng = np.random.default_rng(7)
-    solver = newton.solvers.SolverIPC
     for trial in range(6):
         n_sub = 41
         table = np.eye(n_sub, dtype=bool) & (rng.uniform(size=n_sub) < 0.8)[:, None]
@@ -2696,8 +2697,8 @@ def test_near_parts_forms_no_pair_of_two_worlds(test, device):
         lo, hi = centre - half, centre + half
         reach = rng.uniform(0.0, 0.01, n)
         slack = 1e-6
-        owner = types.SimpleNamespace(_subscene_enabled=table, _near_boxes=solver._near_boxes)
-        got = solver._near_parts(owner, lo, hi, reach, slack, sub)
+        owner = types.SimpleNamespace(_subscene_enabled=table)
+        got = _near_parts(owner, lo, hi, reach, slack, sub)
         a, b = np.triu_indices(n, 1)
         apart = np.maximum(lo[b] - hi[a], lo[a] - hi[b]).max(axis=1)
         near = apart <= reach[a] + reach[b] + slack
@@ -5301,7 +5302,7 @@ def test_jump_mode_builds_the_engine_of_before(test, device):
     constraint, with the contact elements of before, its state_out a copy of state_in; "aim" builds it free, with the
     constraint and the kinematic and static shapes in elements of their own. Invalid options and AL-IPC with aims are
     refused, and so is a kinematic body of mass 0 whose shapes enclose no volume."""
-    from newton._src.solvers.ipc.solver_ipc import _contact_elements  # noqa: PLC0415
+    from newton._src.solvers.ipc.contacts import _contact_elements  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
@@ -7284,7 +7285,7 @@ class TestSolverIPCInputs(unittest.TestCase):
         tri_poses, tri_areas and edge_rest_angle that ModelBuilder stores, computed from particle_q as the solver
         computes them to tell a cloth built at rest: random sheets from add_cloth_grid, from add_cloth_mesh (bent)
         and from add_triangles with add_edges (random particles, the hinge rows in both orders)."""
-        from newton._src.solvers.ipc.solver_ipc import _dihedral_angles, _triangle_rest_geometry  # noqa: PLC0415
+        from newton._src.solvers.ipc.scene import _dihedral_angles, _triangle_rest_geometry  # noqa: PLC0415
 
         rng = np.random.default_rng(3)
 
@@ -7376,7 +7377,8 @@ class TestSolverIPCInputs(unittest.TestCase):
         pairs, shapes on one body), the shape pairs that SolverIPC's contact elements enable on different bodies are
         exactly Model.shape_contact_pairs, with the mean of the two coefficients; particles meet the shapes with
         COLLIDE_PARTICLES."""
-        from newton._src.solvers.ipc.solver_ipc import _colliding_shapes, _contact_elements  # noqa: PLC0415
+        from newton._src.solvers.ipc.contacts import _contact_elements  # noqa: PLC0415
+        from newton._src.solvers.ipc.scene import _colliding_shapes  # noqa: PLC0415
 
         rng = np.random.default_rng(7)
         for trial in range(40):
@@ -7436,7 +7438,8 @@ class TestSolverIPCInputs(unittest.TestCase):
         """With kinematic_motion="aim" (``aims``), on random models of static shapes, dynamic and kinematic bodies: the
         pairs the contact elements enable on different bodies are Model.shape_contact_pairs less the pairs of two
         shapes that are each static or kinematic, and without the option the elements of before."""
-        from newton._src.solvers.ipc.solver_ipc import _colliding_shapes, _contact_elements  # noqa: PLC0415
+        from newton._src.solvers.ipc.contacts import _contact_elements  # noqa: PLC0415
+        from newton._src.solvers.ipc.scene import _colliding_shapes  # noqa: PLC0415
 
         rng = np.random.default_rng(11)
         for trial in range(30):
@@ -7473,7 +7476,8 @@ class TestSolverIPCInputs(unittest.TestCase):
         some drawn on their own, the shape pairs that the contact elements enable on different bodies, in the same
         world or with a global shape (the subscenes), are exactly Model.shape_contact_pairs; replicated worlds add no
         contact element."""
-        from newton._src.solvers.ipc.solver_ipc import _colliding_shapes, _contact_elements, _Worlds  # noqa: PLC0415
+        from newton._src.solvers.ipc.contacts import _contact_elements  # noqa: PLC0415
+        from newton._src.solvers.ipc.scene import _colliding_shapes, _Worlds  # noqa: PLC0415
 
         rng = np.random.default_rng(11)
 
@@ -7547,7 +7551,8 @@ class TestSolverIPCInputs(unittest.TestCase):
         Model.shape_contact_pairs less those of a proxy shape with another proxy shape, a static shape or a shape on a
         body of inverse mass 0 (another entry's); a proxy particle meets the shapes a particle of its kind meets but
         those, the entry's own particles as a particle of its kind does, and no other proxy particle."""
-        from newton._src.solvers.ipc.solver_ipc import _colliding_shapes, _contact_elements  # noqa: PLC0415
+        from newton._src.solvers.ipc.contacts import _contact_elements  # noqa: PLC0415
+        from newton._src.solvers.ipc.scene import _colliding_shapes  # noqa: PLC0415
         from newton.solvers.experimental.coupled import ModelView  # noqa: PLC0415
 
         rng = np.random.default_rng(13)
