@@ -413,7 +413,6 @@ def _add_joints(solver: SolverIPC, scene) -> None:
             solver._joint_history[kind] = tuple(wp.zeros(len(rows), dtype=wp.float64, device=device) for _ in range(3))
             if solver._joint_options.rates:  # their rates likewise (_joint_rates)
                 solver._joint_rate[kind] = tuple(wp.zeros(len(rows), dtype=wp.float64, device=device) for _ in range(3))
-    solver._no_joint_state = wp.zeros(1, dtype=wp.float64, device=device)  # the state of a kind without joints
     solver._joint_element = wp.array(element, dtype=wp.int32, device=device)
     solver._joint_q_written = wp.full(model.joint_coord_count, np.nan, dtype=wp.float32, device=device)
 
@@ -496,13 +495,11 @@ def _write_joint_controls(solver: SolverIPC, control: Control, dt: float) -> Non
     model, groups = solver.model, solver._joint_groups
     if solver._engine is None or model.joint_count == 0:
         return
-    springs = all(a is not None for a in (model.joint_stiffness, model.joint_rest_q, model.joint_damping))
     target_q, target_qd, joint_f = control.joint_target_q, control.joint_target_qd, control.joint_f
     bdf2 = solver._config.integrator == "bdf2"
-    restart = solver._engine.bdf1_frame[0:1] if bdf2 else solver._no_restart
+    restart = solver._engine.bdf1_frame[0:1] if bdf2 else None
     # with several worlds a reset or a new state restarts the rows of its worlds only (reset, _load)
     rows = solver._engine.restart_rows if bdf2 else None
-    restart_rows = solver._no_restart if rows is None else rows
     for kind, group, scale in (("revolute", groups.revolute, 1.0), ("prismatic", groups.prismatic, 0.5)):
         if group is None:
             continue
@@ -521,24 +518,19 @@ def _write_joint_controls(solver: SolverIPC, control: Control, dt: float) -> Non
                 model.joint_stiffness,
                 model.joint_rest_q,
                 model.joint_damping,
-                int(springs),
                 model.joint_limit_lower,
                 model.joint_limit_upper,
                 model.joint_limit_ke,
                 target_q,
-                int(target_q is not None),
                 target_qd,
-                int(target_qd is not None),
                 joint_f,
-                int(joint_f is not None),
                 solver._joint_strength[kind],
                 group.mass_sum,
                 group.current,
                 q_prev,
                 int(bdf2),
                 restart,
-                restart_rows,
-                int(rows is not None),
+                rows,
                 model.joint_parent,
                 model.joint_child,
                 solver._body_base,
@@ -574,7 +566,6 @@ def _write_joint_controls(solver: SolverIPC, control: Control, dt: float) -> Non
                     model.joint_stiffness,
                     model.joint_rest_q,
                     model.joint_damping,
-                    int(springs),
                     model.joint_limit_lower,
                     model.joint_limit_upper,
                     model.joint_limit_ke,
@@ -582,22 +573,18 @@ def _write_joint_controls(solver: SolverIPC, control: Control, dt: float) -> Non
                     int(solver._joint_options.limit_damping),
                     model.joint_armature,
                     int(solver._joint_options.armature),
-                    *(solver._joint_rate[kind][:2] if solver._joint_options.rates else (q_prev, q_prev)),
+                    *(solver._joint_rate[kind][:2] if solver._joint_options.rates else (None, None)),
                     model.joint_effort_limit,
                     int(solver._joint_options.effort_limit),
                     joint_f,
-                    int(joint_f is not None),
                     target_q,
-                    int(target_q is not None),
                     target_qd,
-                    int(target_qd is not None),
                     group.mass_sum,
                     group.current,
                     q_prev,
                     int(bdf2),
                     restart,
-                    restart_rows,
-                    int(rows is not None),
+                    rows,
                     model.joint_parent,
                     model.joint_child,
                     solver._body_base,

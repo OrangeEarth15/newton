@@ -927,9 +927,6 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._particle_quiet = wp.array(quiet, dtype=wp.int32, device=device)
         self._status_scratch = wp.zeros(1, dtype=wp.int32, device=device)
         self._residual_scratch = wp.zeros(1, dtype=wp.float32, device=device)
-        self._no_restart = wp.zeros(1, dtype=wp.int32, device=device)  # BDF1: no history to restart
-        self._no_float32 = wp.zeros(1, dtype=wp.float32, device=device)  # a model array the model does not have
-        self._no_bool = wp.zeros(1, dtype=wp.bool, device=device)
         nb = model.body_count
         if nb:
             self._body_base = wp.array(layout.body_base.astype(np.int32), dtype=wp.int32, device=device)
@@ -1304,7 +1301,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             wp.launch(
                 _particle_accelerations,
                 self._n_free,
-                inputs=[particle_f, int(particle_f is not None), model.particle_mass, self._free_particles],
+                inputs=[particle_f, model.particle_mass, self._free_particles],
                 outputs=[acc],
                 device=model.device,
             )
@@ -1356,7 +1353,6 @@ class SolverIPC(SolverBase, CouplingInterface):
                 self._n_dynamic,
                 inputs=[
                     body_f,
-                    int(body_f is not None),
                     self._joint_wrench,
                     self._dynamic_bodies,
                     model.body_com,
@@ -1408,8 +1404,8 @@ class SolverIPC(SolverBase, CouplingInterface):
                 )
         if model.joint_count and state_out is not None and state_out.joint_q is not None:
             groups = self._joint_groups
-            angle = self._no_joint_state if groups.revolute is None else groups.revolute.current
-            distance = self._no_joint_state if groups.prismatic is None else groups.prismatic.current
+            angle = None if groups.revolute is None else groups.revolute.current
+            distance = None if groups.prismatic is None else groups.prismatic.current
             wp.launch(
                 _store_joints,
                 model.joint_count,
@@ -1601,13 +1597,8 @@ class SolverIPC(SolverBase, CouplingInterface):
                 self._world_entries_device,
                 self._status_scratch,
                 self._residual_scratch,
-                int(status is not None),
-                int(residual is not None),
             ],
-            outputs=[
-                self._status_scratch if status is None else status,
-                self._residual_scratch if residual is None else residual,
-            ],
+            outputs=[status, residual],
             device=self.model.device,
         )
 

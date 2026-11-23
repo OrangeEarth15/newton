@@ -320,15 +320,14 @@ def _release_held(
 @wp.kernel
 def _particle_accelerations(
     particle_f: wp.array[wp.vec3],
-    has_force: int,
     particle_mass: wp.array[wp.float32],
     free: wp.array[wp.int32],
     acc: wp.array[wp.vec3d],
 ):
-    """``f / m`` of the free particles, the first rows of the external accelerations."""
+    """``f / m`` of the free particles, the first rows of the external accelerations; 0 without ``particle_f``."""
     k = wp.tid()
     a = wp.vec3d()
-    if has_force != 0:
+    if particle_f:
         i = free[k]
         a = _to64(particle_f[i]) / wp.float64(particle_mass[i])
     acc[k] = a
@@ -337,7 +336,6 @@ def _particle_accelerations(
 @wp.kernel
 def _body_accelerations(
     body_f: wp.array[wp.spatial_vector],
-    has_body_f: int,
     joint_wrench: wp.array[wp.spatial_vector],
     dynamic_body: wp.array[wp.int32],
     body_com: wp.array[wp.vec3],
@@ -348,12 +346,12 @@ def _body_accelerations(
     acc: wp.array[wp.vec3d],
 ):
     """The accelerations of a dynamic body's q = (p, rows of A) under the wrench ``body_f`` plus the wrench of the
-    ``joint_f`` of its free and ball joints (``_joint_wrenches``): M^-1 Q of its generalized force Q, four rows from
-    ``row0 + 4 j``."""
+    ``joint_f`` of its free and ball joints (``_joint_wrenches``), ``body_f`` None being none: M^-1 Q of its
+    generalized force Q, four rows from ``row0 + 4 j``."""
     j = wp.tid()
     b = dynamic_body[j]
     wrench = joint_wrench[b]
-    if has_body_f != 0:
+    if body_f:
         wrench = wrench + body_f[b]
     f = _to64(wp.spatial_top(wrench))
     t = _to64(wp.spatial_bottom(wrench))
@@ -424,30 +422,27 @@ def _drive_inputs(
     stiffness: wp.array[wp.float32],
     rest_q: wp.array[wp.float32],
     damping: wp.array[wp.float32],
-    has_springs: int,
     target_q: wp.array[wp.float32],
-    has_target_q: int,
     target_qd: wp.array[wp.float32],
-    has_target_qd: int,
 ):
     """The target gains ``ke`` and ``kd``, the passive stiffness ``ks`` and damping ``c``, the rest coordinate and the
     targets of the degree of freedom ``d`` (coordinate ``i``) of a revolute or prismatic joint, in float64: 0 where the
-    model or the control has none."""
+    model or the control has none (None)."""
     zero = wp.float64(0.0)
     ke = wp.float64(target_ke[d])
     kd = wp.float64(target_kd[d])
     ks = zero
     c = zero
     q_rest = zero
-    if has_springs != 0:
+    if stiffness and rest_q and damping:
         ks = wp.float64(stiffness[d])
         c = wp.float64(damping[d])
         q_rest = wp.float64(rest_q[i])
     q_target = zero
-    if has_target_q != 0:
+    if target_q:
         q_target = wp.float64(target_q[i])
     qd_target = zero
-    if has_target_qd != 0:
+    if target_qd:
         qd_target = wp.float64(target_qd[d])
     return ke, kd, ks, c, q_rest, q_target, qd_target
 
@@ -457,16 +452,17 @@ def _joint_restarted(
     j: int,
     restart: wp.array[wp.int32],
     restart_rows: wp.array[wp.int32],
-    per_row: int,
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
     body_base: wp.array[wp.int32],
 ) -> bool:
     """Whether the engine's frame starts the BDF2 history of joint ``j``'s bodies with an implicit Euler step: that of
-    every row (``restart[0]``), or with ``per_row`` that of the rows of a reset or a new state of their world
-    (``restart_rows``, at the base row of the child or of the parent)."""
-    restarted = restart[0] != 0
-    if per_row != 0:
+    every row (``restart[0]``), or that of the rows of a reset or a new state of their world (``restart_rows``, at the
+    base row of the child or of the parent); neither when they are None (implicit Euler, no restarts per row)."""
+    restarted = False
+    if restart:
+        restarted = restart[0] != 0
+    if restart_rows:
         if restart_rows[body_base[joint_child[j]]] != 0:
             restarted = True
         p = joint_parent[j]
@@ -538,16 +534,12 @@ def _joint_terms(
     stiffness: wp.array[wp.float32],
     rest_q: wp.array[wp.float32],
     damping: wp.array[wp.float32],
-    has_springs: int,
     limit_lower: wp.array[wp.float32],
     limit_upper: wp.array[wp.float32],
     limit_ke: wp.array[wp.float32],
     target_q: wp.array[wp.float32],
-    has_target_q: int,
     target_qd: wp.array[wp.float32],
-    has_target_qd: int,
     joint_f: wp.array[wp.float32],
-    has_joint_f: int,
     strength: wp.array[wp.float64],
     mass_sum: wp.array[wp.float64],
     current: wp.array[wp.float64],
@@ -555,7 +547,6 @@ def _joint_terms(
     bdf2: int,
     restart: wp.array[wp.int32],
     restart_rows: wp.array[wp.int32],
-    per_row: int,
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
     body_base: wp.array[wp.int32],
@@ -579,9 +570,9 @@ def _joint_terms(
     step (libuipc's driving term, ``drive_scale`` 1 for a revolute joint, 1/2 for a prismatic one, whose driving energy
     counts its distance twice), with the velocity at the step's end of the step's integrator: BDF1, or with ``bdf2``
     BDF2 from the coordinate ``q_prev`` at the start of the step before, unless the engine's frame starts the history of
-    the joint's bodies with an implicit Euler step: that of every row (``restart[0]``), or with ``per_row`` that of the
-    rows of a reset or a new state of their world (``restart_rows``, at the base row of the child or of the parent); the
-    limit as libuipc's cubic penalty with Newton's limit stiffness at ``_LIMIT_OVERSHOOT``; ``joint_f`` as libuipc's
+    the joint's bodies with an implicit Euler step: that of every row (``restart[0]``), or that of the rows of a reset
+    or a new state of their world (``restart_rows``, at the base row of the child or of the parent); the limit as
+    libuipc's cubic penalty with Newton's limit stiffness at ``_LIMIT_OVERSHOOT``; ``joint_f`` as libuipc's
     external torque or force. ``q_start`` takes the coordinate at the step's start."""
     e = wp.tid()
     j = joints[e]
@@ -595,25 +586,14 @@ def _joint_terms(
         r = strength[e] / m
     ratio[e] = r
     ke, kd, ks, c, q_rest, q_target, qd_target = _drive_inputs(
-        d,
-        i,
-        target_ke,
-        target_kd,
-        stiffness,
-        rest_q,
-        damping,
-        has_springs,
-        target_q,
-        has_target_q,
-        target_qd,
-        has_target_qd,
+        d, i, target_ke, target_kd, stiffness, rest_q, damping, target_q, target_qd
     )
     q_n = current[e]
     q_start[e] = q_n
     # the drive, passive spring and passive damping as one quadratic potential of the step, K/2 (q - q_aim)^2
     K = _drive_stiffness_bdf1(ke, kd, ks, c, dt)
     q_aim = zero
-    restarted = _joint_restarted(j, restart, restart_rows, per_row, joint_parent, joint_child, body_base)
+    restarted = _joint_restarted(j, restart, restart_rows, joint_parent, joint_child, body_base)
     if bdf2 != 0 and not restarted:
         w = wp.float64(1.5) / dt
         K = _drive_stiffness_bdf2(ke, kd, ks, c, w)
@@ -641,7 +621,7 @@ def _joint_terms(
         lim_upper[e] = wp.float64(hi)
         lim_strength[e] = dt * dt * limit_k * w3 / (wp.float64(3.0) * _LIMIT_OVERSHOOT)
     value = zero
-    if has_joint_f != 0:
+    if joint_f:
         value = wp.float64(joint_f[d])
     force_on[e] = wp.where(on and value != zero, 1, 0)
     force[e] = value
@@ -696,7 +676,6 @@ def _joint_option_terms(
     stiffness: wp.array[wp.float32],
     rest_q: wp.array[wp.float32],
     damping: wp.array[wp.float32],
-    has_springs: int,
     limit_lower: wp.array[wp.float32],
     limit_upper: wp.array[wp.float32],
     limit_ke: wp.array[wp.float32],
@@ -709,18 +688,14 @@ def _joint_option_terms(
     effort_limit: wp.array[wp.float32],
     effort: int,
     joint_f: wp.array[wp.float32],
-    has_joint_f: int,
     target_q: wp.array[wp.float32],
-    has_target_q: int,
     target_qd: wp.array[wp.float32],
-    has_target_qd: int,
     mass_sum: wp.array[wp.float64],
     current: wp.array[wp.float64],
     q_prev: wp.array[wp.float64],
     bdf2: int,
     restart: wp.array[wp.int32],
     restart_rows: wp.array[wp.int32],
-    per_row: int,
     joint_parent: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
     body_base: wp.array[wp.int32],
@@ -753,21 +728,10 @@ def _joint_option_terms(
     zero = wp.float64(0.0)
     m = mass_sum[e]
     ke, kd, ks, c, q_rest, q_target, qd_target = _drive_inputs(
-        d,
-        i,
-        target_ke,
-        target_kd,
-        stiffness,
-        rest_q,
-        damping,
-        has_springs,
-        target_q,
-        has_target_q,
-        target_qd,
-        has_target_qd,
+        d, i, target_ke, target_kd, stiffness, rest_q, damping, target_q, target_qd
     )
     q_n = current[e]
-    restarted = _joint_restarted(j, restart, restart_rows, per_row, joint_parent, joint_child, body_base)
+    restarted = _joint_restarted(j, restart, restart_rows, joint_parent, joint_child, body_base)
     second = bdf2 != 0 and not restarted
     # _joint_terms' potential K/2 (q - N/K)^2
     K = _drive_stiffness_bdf1(ke, kd, ks, c, dt)
@@ -836,7 +800,7 @@ def _joint_option_terms(
         drv_ratio[e] = drive_scale * K * dt * dt / m
     if saturated:
         value = bound
-        if has_joint_f != 0:
+        if joint_f:
             value += wp.float64(joint_f[d])
         force_on[e] = wp.where(on and value != zero, 1, 0)
         force[e] = value
@@ -1209,16 +1173,15 @@ def _copy_status(
     entries: wp.array[wp.int32],
     status_in: wp.array[wp.int32],
     residual_in: wp.array[wp.float32],
-    write_status: int,
-    write_residual: int,
     status: wp.array[wp.int32],
     residual: wp.array[wp.float32],
 ):
-    """The status bits and the residual of the one solve, written into every world entry that owns content."""
+    """The status bits and the residual of the one solve, written into every world entry that owns content; ``status``
+    or ``residual`` None: not requested."""
     k = wp.tid()
-    if write_status != 0:
+    if status:
         status[entries[k]] = status_in[0]
-    if write_residual != 0:
+    if residual:
         residual[entries[k]] = residual_in[0]
 
 

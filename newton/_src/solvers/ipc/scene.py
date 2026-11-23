@@ -834,10 +834,10 @@ def _write_stitch_stiffness(solver: SolverIPC, dt: float) -> None:
             source.shape[0],
             inputs=[
                 source,
-                model.attachment_particle_body_stiffness if attached else solver._no_float32,
-                model.attachment_particle_body_enabled if attached else solver._no_bool,
+                model.attachment_particle_body_stiffness if attached else None,
+                model.attachment_particle_body_enabled if attached else None,
                 solver._attachment_hard,
-                model.spring_stiffness if springs else solver._no_float32,
+                model.spring_stiffness if springs else None,
                 wp.float64(1.0 / (dt * dt)),
             ],
             outputs=[kappa],

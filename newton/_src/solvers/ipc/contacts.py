@@ -386,18 +386,13 @@ def _make_contact_export(solver: SolverIPC) -> None:
     if not rows:
         return
     solver._contact_vertex_shape = wp.array(solver._vertex_shape, dtype=wp.int32, device=device)
+    # the half planes' shapes, points and normals, which only the rows of a vertex / half-plane term read
     P, N, shapes = solver._planes
-    n_planes = max(len(shapes), 1)
-    solver._contact_plane_shape = wp.array(
-        np.asarray(shapes, np.int32) if len(shapes) else np.full(1, -1, np.int32), dtype=wp.int32, device=device
-    )
-    solver._contact_plane_P = wp.array(np.asarray(P, np.float64).reshape(-1, 3), dtype=wp.vec3d, device=device)
-    solver._contact_plane_N = wp.array(np.asarray(N, np.float64).reshape(-1, 3), dtype=wp.vec3d, device=device)
-    if not len(shapes):
-        solver._contact_plane_P = wp.zeros(n_planes, dtype=wp.vec3d, device=device)
-        solver._contact_plane_N = wp.zeros(n_planes, dtype=wp.vec3d, device=device)
-    solver._no_transform = wp.zeros(1, dtype=wp.transform, device=device)
-    solver._no_vec3 = wp.zeros(1, dtype=wp.vec3, device=device)
+    solver._contact_plane_shape = solver._contact_plane_P = solver._contact_plane_N = None
+    if len(shapes):
+        solver._contact_plane_shape = wp.array(np.asarray(shapes, np.int32), dtype=wp.int32, device=device)
+        solver._contact_plane_P = wp.array(np.asarray(P, np.float64).reshape(-1, 3), dtype=wp.vec3d, device=device)
+        solver._contact_plane_N = wp.array(np.asarray(N, np.float64).reshape(-1, 3), dtype=wp.vec3d, device=device)
 
 
 def _write_contacts(solver: SolverIPC, observables: SolverBase.Observables | None, state_out: State | None) -> None:
@@ -414,8 +409,9 @@ def _write_contacts(solver: SolverIPC, observables: SolverBase.Observables | Non
         return
     export = _contact_records(solver)
     model = solver.model
-    body_q = state_out.body_q if model.body_count and state_out.body_q is not None else solver._no_transform
-    body_com = model.body_com if model.body_count else solver._no_vec3
+    # only the rows of a shape on a body read the bodies' poses and centres of mass
+    body_q = state_out.body_q if model.body_count and state_out.body_q is not None else None
+    body_com = model.body_com if model.body_count else None
     wp.launch(
         _contact_rows,
         solver._contact_threads,
