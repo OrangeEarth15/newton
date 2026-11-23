@@ -117,8 +117,8 @@ contacts, so it cannot follow a variant row's shape), non-zero triangle or
 tetrahedron activations, the joint types
 and properties that :ref:`ipc-joints` rejects, gradients
 (``model.requires_grad``), with independent worlds what :ref:`ipc-worlds`
-refuses (an unknown of the global world, an element that joins two worlds, and
-the options they do not take yet), a :attr:`~newton.Model.shape_contact_pairs`
+refuses (an unknown of the global world and an element that joins two worlds),
+a :attr:`~newton.Model.shape_contact_pairs`
 array assigned to the model, more contact elements than the engine takes (see
 :ref:`ipc-contact`), and a CPU device. Gaussian shapes and planes attached to bodies raise
 when the shapes are triangulated. A step that is not captured raises
@@ -534,7 +534,9 @@ moves into collides with it): what it meets joins the active set and is pushed,
 and one that contact holds back ends the step short of its pose and goes on
 toward it in the next. The first step after the solver is built, the step after
 a :meth:`~newton.solvers.SolverIPC.reset` that selects its world and the step
-after a failed one place it at its pose instead, without a sweep. ``kappa`` is
+after a failed one place it at its pose instead, without a sweep. With
+independent worlds a kinematic body of the global world jumps instead (see
+:ref:`ipc-worlds`). ``kappa`` is
 not used: a ``kappa`` other than the default and ``adaptive_kappa`` are
 refused, and so is a collision mesh with ``Mesh.enable_surface_velocity``
 (libuipc-warp's AL-IPC friction takes no surface velocity). The step ends on AL-IPC's own
@@ -632,12 +634,24 @@ a coupled solver, and a global kinematic body that an explicit
 shapes; the default takes the jump for it, as a fixed body). Newton's implicit MPM refuses global colliders backed by dynamic bodies
 with ``separate_worlds`` in the same way. A triangle, tetrahedron or spring that
 joins two worlds is refused too. Global static shapes and planes, kinematic
-particles and kinematic bodies that jump act in every world. Not offered with independent worlds yet, where two worlds or
-more move, and refused naming what to use instead:
-``contact_constitution="al-ipc"``. ``fem_preconditioner="mas"`` is taken, every
-world preconditioned as the same world alone (:ref:`ipc-mas`). The engine's
-Newton exit check, which independent worlds do not take either, is not used by
-the solver.
+particles and kinematic bodies that jump act in every world.
+``fem_preconditioner="mas"`` is taken, every world preconditioned as the same
+world alone (:ref:`ipc-mas`). The engine's Newton exit check, which independent
+worlds do not take, is not used by the solver.
+
+``contact_constitution="al-ipc"`` is taken too (:ref:`ipc-al-ipc`): every world
+runs the augmented-Lagrangian loop of the same world alone, with its own Newton
+iterations, line searches and outer updates (its multipliers, its
+collision-free sweep, the contact pairs that join its active set and its
+progress weight), and its own quota of active contact pairs. A world that fails
+is put back at its state at the step's start with the active pairs it started
+the step with. A kinematic body of the global world has one pose for every
+world, which no world's contact may hold back: it jumps as on the barrier
+pipeline, its move swept before the step, and a world whose surfaces the move
+meets fails the step with
+:attr:`~newton.solvers.SolverIPC.StatusBits.INVALID_CCD_STEP`. A kinematic body
+of a local world is carried by that world's collision-free sweeps and pushes
+what it meets, as alone.
 
 With ``coupled_worlds=True`` the worlds are one solve instead, with the same
 subscenes: one step length (the smallest time of impact over all worlds, and a
@@ -739,7 +753,8 @@ a box does not carry it). The first step after the solver is built, the step
 after a :meth:`~newton.solvers.SolverIPC.reset` that selects the body's world,
 and the step after a failed step take the new poses without a sweep. Under
 AL-IPC the step's collision-free sweeps carry the jump and push what it meets
-(see :ref:`ipc-al-ipc`). Newton's test suite gives the same results with either
+(see :ref:`ipc-al-ipc`), except, with independent worlds, a body of the global
+world, which is swept before the step as here (see :ref:`ipc-worlds`). Newton's test suite gives the same results with either
 mode.
 
 .. _ipc-attachments:

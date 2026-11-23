@@ -239,7 +239,7 @@ def _check_supported(model: Model, joints: _JointOptions, options: features.Feat
     """Reject model content the solver would otherwise accept and ignore; joints as ``joints`` maps them
     (``_JointOptions``), and with the feature modules' refusals (``features.check``, with ``options``) at their points
     among these checks. What independent worlds refuse is checked when the solve is laid out
-    (``SolverIPC._check_independent_options``, ``_check_independent_content``)."""
+    (``_check_independent_content``)."""
     if model.requires_grad:
         raise NotImplementedError(
             "SolverIPC: the model requires gradients (requires_grad=True); finalize it without them. SolverIPC "
@@ -891,8 +891,6 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._dyadic = _add_shapes_and_bodies(self, scene, elements)
         if self._independent:
             _check_independent_content(self)
-            if len(self._status_entries) > 1:  # one world that moves is solved as one world: no option to refuse
-                self._check_independent_options()
         if self._config.contact_constitution == "al-ipc":
             _check_al_ipc(self, elements)
         _add_joints(self, scene)
@@ -1045,23 +1043,6 @@ class SolverIPC(SolverBase, CouplingInterface):
             raise NotImplementedError(
                 "SolverIPC: contact_constitution='al-ipc' is not offered to an entry of a coupled solver with proxies: "
                 "the proxies' feedback is the force of the step's contact terms on them, which AL-IPC does not export."
-            )
-
-    def _check_independent_options(self) -> None:
-        """``NotImplementedError`` for the options that independent worlds do not take yet (:ref:`ipc-worlds`), naming
-        what to use instead, when two worlds or more hold unknowns: libuipc-warp solves the worlds apart from each other
-        with libuipc's barrier contact only, under either preconditioner."""
-        worlds = self._worlds.worlds
-        which = f"the worlds {worlds.tolist()}" if len(worlds) <= 8 else f"{len(worlds)} worlds"
-        instead = (
-            f"or pass coupled_worlds=True to solve {which} as one (see Worlds in Newton's IPC solver guide), or give "
-            "the solver a model of one world"
-        )
-        if self._config.contact_constitution == "al-ipc":
-            raise NotImplementedError(
-                "SolverIPC: contact_constitution='al-ipc' is not offered with independent worlds yet: libuipc-warp "
-                f"solves {which} apart from each other with libuipc's barrier contact only, AL-IPC's frame being one "
-                f"solve of the whole scene. Use contact_constitution='ipc', {instead}."
             )
 
     def _forget_written(self) -> None:
