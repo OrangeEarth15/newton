@@ -541,6 +541,39 @@ def test_refused_first_step_takes_state_in_again(test, device):
     np.testing.assert_allclose(s1.body_q.numpy()[pusher, :3], [1.0, 0.0, 1.0], rtol=0.0, atol=1e-6)
 
 
+def test_aims_pass_the_twist_through(test, device):
+    """With kinematic_motion="aim" state_out holds the pose a kinematic box reached and the twist of state_in, as
+    Newton's solvers pass a kinematic body's twist through. A caller who writes only body_q, 2 mm further at every
+    step, gets the box at that pose (to 1e-6 m) with the twist 0 it never wrote; one who writes a twist of 0.2 m/s
+    once gets motion at that twist. The box's twist in state_out was the one it reached (0.2 m/s), which the next
+    step took as the caller's: the poses written alone ran a step ahead and swung about their path."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    box = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()), is_kinematic=True)
+    builder.add_shape_box(box, hx=0.05, hy=0.05, hz=0.05)
+    model = builder.finalize(device=device)
+    dt = 0.01
+    for written in ("poses", "twist"):
+        solver = newton.solvers.SolverIPC(model, kinematic_motion="aim")
+        np.testing.assert_array_equal(solver._aim_bodies, [box])
+        s0, s1 = model.state(), model.state()
+        twist = np.zeros(6, np.float32)
+        if written == "twist":
+            twist[0] = 0.2
+            qd = s0.body_qd.numpy()
+            qd[box] = twist
+            s0.body_qd.assign(qd)
+        for k in range(1, 11):
+            if written == "poses":
+                q = s0.body_q.numpy()
+                q[box, 0] = 0.002 * k
+                s0.body_q.assign(q)
+            solver.step(s0, s1, None, None, dt)
+            s0, s1 = s1, s0
+            with test.subTest(written=written, step=k):
+                np.testing.assert_allclose(s0.body_q.numpy()[box, :3], [0.002 * k, 0.0, 1.0], rtol=0.0, atol=1e-6)
+                np.testing.assert_array_equal(s0.body_qd.numpy()[box], twist)
+
+
 @requires("uipc_warp")
 class TestSolverIPCKinematicMotion(unittest.TestCase):
     """Which kinematic bodies move toward their aims, the twist of a body that becomes kinematic, and the sweep of the
@@ -554,6 +587,7 @@ for name, func in (
     ("test_jump_through_a_surface_fails_the_step", test_jump_through_a_surface_fails_the_step),
     ("test_import_requires_the_kinematic_sweep", test_import_requires_the_kinematic_sweep),
     ("test_refused_first_step_takes_state_in_again", test_refused_first_step_takes_state_in_again),
+    ("test_aims_pass_the_twist_through", test_aims_pass_the_twist_through),
 ):
     add_function_test(TestSolverIPCKinematicMotion, name, func, devices=devices)
 

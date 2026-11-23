@@ -1,0 +1,1 @@
+Fix ``SolverIPC``'s ``kinematic_motion="aim"`` writing the twist a kinematic body reached into ``state_out``, which the next step took as the caller's: a caller who wrote only ``body_q`` got aims a step ahead of the poses it wrote, and the body swung about its path. ``state_out`` now holds the twist of ``state_in``, as Newton's solvers pass a kinematic body's twist through.

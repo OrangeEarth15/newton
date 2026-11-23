@@ -536,8 +536,8 @@ kinematic body moves with Newton's mass; one of mass 0, such as a link of
 density 0 that anchors joints, keeps the jump: there is no mass for the
 constraint to move, and a soft anchor would let the joints it holds sag. A
 caller who writes consistent ``body_q`` and ``body_qd`` every step gets the
-next pose as the aim, one who writes poses only (``body_qd`` 0) the written
-pose, one who writes nothing motion at constant twist. A body that a
+next pose as the aim, one who writes poses only the written pose, one who writes
+nothing motion at constant twist. A body that a
 notification makes kinematic (``notify_model_changed`` with
 ``BODY_PROPERTIES``) does not take the twist the solver wrote for it as a
 dynamic body, which ``state_in`` holds until the caller writes another: it
@@ -547,8 +547,10 @@ to the aim is swept, a jump included; the first step after the solver is built
 and the step after a :meth:`~newton.solvers.SolverIPC.reset` that selects the
 body's world take ``state_in`` instead, which is how a caller moves such a body
 without sweeping; a first step that the start check refuses (see
-:ref:`ipc-start`) leaves the next step the first. ``state_out`` holds the pose the body reached and its twist,
-not a copy of ``state_in``. Pairs of two shapes that are each kinematic or
+:ref:`ipc-start`) leaves the next step the first. ``state_out`` holds the pose
+the body reached and the twist of ``state_in``, which the step passes through,
+as Newton's solvers pass a kinematic body's twist: the twist stays the caller's,
+0 unless it wrote one, and never becomes the one the body reached. Pairs of two shapes that are each kinematic or
 static do not collide, as Newton's collision pipeline can filter them
 (``include_static_kinematic_pairs=False``) and as they never collide in the
 default mode, where neither moves inside the step; the solver checks its pairs

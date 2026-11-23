@@ -967,14 +967,15 @@ class SolverIPC(SolverBase, CouplingInterface):
             if self._proxy_body.any():
                 quiet = (self._kinematic_body | self._proxy_body).astype(np.int32)
                 self._body_quiet = wp.array(quiet, dtype=wp.int32, device=device)
-            # kinematic_motion="aim": the bodies whose state the solver keeps (held), and those whose state_out copies
-            # state_in (passed through: every kinematic body, but those moving toward their aims)
+            # kinematic_motion="aim": the bodies whose state the solver keeps (held); and what state_out takes from
+            # state_in (_store_bodies): the pose and the twist of a kinematic body that jumps (1), the twist of one
+            # moving toward its aims (2), whose pose is the one it reached
             self._body_hold = wp.zeros(nb, dtype=wp.int32, device=device)
             self._body_passthrough = self._body_kinematic
             if len(self._aim_bodies):
-                through = self._kinematic_body.copy()
-                through[self._aim_bodies] = False
-                self._body_passthrough = wp.array(through.astype(np.int32), dtype=wp.int32, device=device)
+                through = self._kinematic_body.astype(np.int32)
+                through[self._aim_bodies] = 2
+                self._body_passthrough = wp.array(through, dtype=wp.int32, device=device)
             self._aim_rows = wp.array(self._aim_bodies.astype(np.int32), dtype=wp.int32, device=device)
             # the twist of every such body that it had as a dynamic body before a notification made it kinematic,
             # which its aims do not take (NaN: none; _drop_residual_twists)

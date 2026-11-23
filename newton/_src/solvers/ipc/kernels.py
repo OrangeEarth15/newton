@@ -166,7 +166,7 @@ def _store_bodies(
     v: wp.array[wp.vec3d],
     base: wp.array[wp.int32],
     body_com: wp.array[wp.vec3],
-    kinematic: wp.array[wp.int32],
+    through: wp.array[wp.int32],
     body_q_in: wp.array[wp.transform],
     body_qd_in: wp.array[wp.spatial_vector],
     body_q: wp.array[wp.transform],
@@ -175,9 +175,11 @@ def _store_bodies(
     written_qd: wp.array[wp.spatial_vector],
 ):
     """Newton's body pose and COM twist from the affine state, A projected to its nearest rotation; also kept in
-    ``written_q`` / ``written_qd`` for the next load."""
+    ``written_q`` / ``written_qd`` for the next load. ``through[b]`` 1 takes the pose and the twist of ``state_in``
+    instead (a kinematic body that jumps), 2 its twist (a kinematic body moving toward its aims): a kinematic body's
+    twist is the caller's, which Newton's solvers pass through."""
     b = wp.tid()
-    if kinematic[b] != 0:
+    if through[b] == 1:
         tf = body_q_in[b]
         tw = body_qd_in[b]
         body_q[b] = tf
@@ -198,6 +200,8 @@ def _store_bodies(
     r = wp.quat_from_matrix(R)
     tf = wp.transform(_to32(x_com - R * c), wp.quat(float(r[0]), float(r[1]), float(r[2]), float(r[3])))
     tw = wp.spatial_vector(_to32(v[o] + A_dot * c), _to32(w))
+    if through[b] == 2:
+        tw = body_qd_in[b]
     body_q[b] = tf
     body_qd[b] = tw
     written_q[b] = tf
