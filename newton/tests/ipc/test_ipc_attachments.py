@@ -13,7 +13,6 @@ from newton.tests.ipc._fixtures import _TIGHT, _box_body, _implicit_euler_oscill
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 
-@requires("uipc_warp")
 def _attached_pair(device, stiffness=2.0e4, damping=0.0):
     """VBD's test_body_particle_attachment_is_native_vbd without its damping: a free body of 1 kg (inertia 0.1, no
     shape) and a particle of 1 kg at its origin moving at 1 m/s along x, joined by an attachment at that origin,

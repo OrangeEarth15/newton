@@ -11,7 +11,7 @@ import warp as wp
 
 import newton
 from newton.tests.ipc._fixtures import D_HAT, _box_body, _cloth, _run, _soft_cube
-from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 
 def test_drop_on_ground(test, device):
@@ -635,8 +635,9 @@ def test_body_rotation_defaults_to_rigid(test, device):
         newton.solvers.SolverIPC(model, body_rotation="linear")
 
 
+@requires("uipc_warp")
 class TestSolverIPC(unittest.TestCase):
-    pass
+    """Scenes of every kind of content SolverIPC takes."""
 
 
 devices = get_cuda_test_devices()
