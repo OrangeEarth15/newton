@@ -607,7 +607,7 @@ def _add_particles_and_tets(solver: SolverIPC, scene, elements: _ContactElements
     scene.add_vertices(
         model.particle_q.numpy().astype(np.float64),
         model.particle_qd.numpy().astype(np.float64),
-        mass,
+        mass=mass,
         fixed=solver._fixed_particle,
         thickness=np.where(elements.on_mesh, solver._thickness, radius),
         contact_element=elements.particle,
