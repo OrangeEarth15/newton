@@ -63,8 +63,6 @@ KINDS = frozenset(
 )
 # the kinds of this module that AL-IPC takes too: they need neither a Newton residual nor the barrier's contact terms
 _BODY_KINDS = frozenset({SolverBase.ObservableKind.BODY_PARENT_F, SolverBase.ObservableKind.BODY_QDD})
-# the libuipc joint groups of libuipc-warp's JointGroups, by the solver's names of its joint kinds
-_JOINT_KINDS = ("revolute", "prismatic", "fixed", "spherical")
 
 
 @wp.kernel
@@ -219,8 +217,14 @@ class _Parents:
         terms = []  # (element group, the joint of every element)
         if solver.model.joint_count:
             found = arrays.joint_groups(engine)
-            for kind in _JOINT_KINDS:
-                group = getattr(found, kind)
+            # libuipc-warp's joint groups by the solver's names of its joint kinds
+            groups = {
+                "revolute": found.revolute,
+                "prismatic": found.prismatic,
+                "fixed": found.fixed,
+                "spherical": found.spherical,
+            }
+            for kind, group in groups.items():
                 if group is not None:
                     terms.append((group, solver._joint_rows[kind].numpy()))
             for stitches in arrays.stitch_groups(engine):
