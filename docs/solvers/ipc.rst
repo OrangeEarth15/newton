@@ -872,8 +872,9 @@ coordinate in the same potential:
 :math:`\tilde q = \tfrac{4 q_n - q_{n-1}}{3} + \tfrac{2 \Delta t}{9} (4 \dot q_n - \dot q_{n-1})`),
 as libuipc writes the inertia of every degree of freedom, :math:`\dot q_n` being
 the rate the bodies' twists give at the step's start (as ``joint_qd`` is
-written). The armature of a ball or free joint, an inertia about three axes or a
-mass without weight, has no such potential and is rejected.
+written). A ball joint's armature is an inertia of its rotation (see
+:ref:`ipc-ball`); a free joint's, a mass without weight, has no such potential
+and is rejected.
 
 The drive's force cannot be bounded inside libuipc's driving term, a quadratic
 potential. A ``joint_effort_limit`` :math:`L` below Newton's default 1e6 bounds
@@ -937,6 +938,68 @@ position of a revolute joint, which is libuipc's angle and turns on past
 libuipc's distance. A revolute joint's angle continues from the step before;
 where ``state_in.joint_q`` is not what the solver wrote, it picks the turn of
 the bodies' angle (the pose decides the angle modulo :math:`2\pi`).
+
+.. _ipc-ball:
+
+Ball joints
+~~~~~~~~~~~
+
+libuipc's ball joint holds the anchors and lets the bodies turn freely about
+them. The drives, springs, damping, armature and friction of a ``BALL`` joint
+are libuipc-warp's ball terms (``uipc_warp.ext.ball``). They act per degree of
+freedom, an axis of the parent's joint frame, on the joint's rotation: the
+rotation of the child's joint frame in the parent's, which ``joint_q`` holds as a
+quaternion.
+
+- The drive pulls the rotation vector of the joint's rotation toward that of
+  :attr:`~newton.Control.joint_target_q` (the four entries at the joint's
+  coordinates, a quaternion, converted as SolverMuJoCo converts it: the
+  principal value, at most a half turn) with ``joint_target_ke``, and the joint's
+  angular velocity toward ``joint_target_qd`` (in the parent's joint frame) with
+  ``joint_target_kd``.
+- ``joint_stiffness`` pulls the rotation from ``joint_rest_q`` (a quaternion)
+  back to zero, per axis of the child's joint frame.
+- ``joint_damping`` damps the joint's angular velocity, and ``joint_armature``
+  adds an inertia to its rotation.
+- ``joint_friction`` bounds a dry friction torque about each axis: libuipc's
+  smoothed friction, which opposes a turning joint with that torque and holds a
+  joint whose load is below it, but for a creep of about ``eps_velocity`` (taken
+  in rad/s) times half the ratio of load to bound. A model with joint friction
+  takes the Newton tolerances of :ref:`ipc-joint-terms`, at which a ball joint
+  under 1.5 times its friction slides at :math:`(\tau - F) / I` whatever its
+  axis.
+- ``joint_effort_limit`` below Newton's default 1e6 bounds the drive's torque, as
+  for a revolute joint: decided at the start of every step, an axis whose
+  drive's torque is above the bound takes the constant torque of the bound.
+
+Each is a term of the step's energy, so the step is implicit in all of them: the
+joint's angular velocity is its rotation over the step divided by the step under
+implicit Euler, and BDF2's estimate under BDF2. The degrees of freedom are the
+axes of the parent's joint frame, as in ``joint_qd``, and the spring's are those
+of the child's joint frame; MuJoCo's per-axis actuators act about the child
+body's axes instead. With equal gains on the three axes, which
+``add_joint_ball`` writes, that changes nothing: the drive is MuJoCo's ball
+actuators' and the spring and damping are MuJoCo's and Featherstone's, the
+drive's torque differing from MuJoCo's by terms of the second order in the
+rotation, since MuJoCo's torque is not the gradient of an energy. With unequal
+gains it does: MuJoCo's position gains take the rotation vector's components
+along the child body's axes, equal to those along the parent's joint frame only
+where ``joint_X_c`` has no rotation, and its velocity gains the angular
+velocity's components along the child body's axes, which turn with the joint.
+``joint_target_mode`` is not read: the gains act, as for revolute joints. A ball
+joint whose gains, stiffness, damping, armature and friction are all 0 gets no
+terms; one given a term after the solver was built gets its terms when
+:meth:`~newton.solvers.SolverIPC.notify_model_changed` reports
+``JOINT_DOF_PROPERTIES``, which builds the solve again. ``BODY_PARENT_F``
+includes the terms (see :ref:`ipc-body-observables`).
+
+The rotation vector flips where the rotation crosses a half turn from the
+identity (the drive) or from the rest (the spring), as MuJoCo's does: the line
+search shortens a step that would cross it. Newton defines no limits of a ball
+joint (``add_joint_ball`` takes none, its importers drop them, and its solvers
+do not read them), so a finite limit with a ``joint_limit_ke`` above 0 is
+refused. A D6 joint of three angular axes, which becomes a ball joint, takes
+none of these terms: its coordinates are angles about its axes.
 
 .. _ipc-d6-joints:
 
@@ -1024,7 +1087,9 @@ Newton's ``joint_q``:
   ``joint_friction`` (MuJoCo's ``frictionloss``): libuipc's smoothed friction
   on the step's increment of the coordinate. Below ``eps_velocity`` it is
   viscous, so a joint under a load below its friction creeps, at about
-  ``eps_velocity`` times the load over twice the friction.
+  ``eps_velocity`` times the load over twice the friction. That of a ball joint
+  is the same friction about each axis, one of its ball terms
+  (:ref:`ipc-ball`).
 
 **Friction and the Newton tolerances.** The Newton loop ends when its step,
 by its largest component, is below ``newton_velocity_tol`` :math:`\Delta t`
@@ -1082,16 +1147,18 @@ Refused joints
 Rejected (:class:`NotImplementedError`), each for the libuipc constitution it
 lacks: distance joints and D6 joints but those above, which libuipc does not
 have, and rod joints, which no libuipc constitution between two affine bodies
-represents; drives, springs, damping and limits on ball and free joints, since
-libuipc's driving term and limits act on one hinge angle or one distance and its
-ball joint has neither (its ball driving term, constitution 27, is only
-registered); a negative ``joint_armature``, and one other than 0 on a ball or
-free joint, an inertia about three axes or a mass without weight, which
-libuipc's driving term of one coordinate cannot hold; ``joint_friction`` other
-than 0 on a ball, free or distance joint (that of revolute and prismatic joints
-is :ref:`ipc-joint-terms`); a negative ``joint_effort_limit`` on a driven
-degree of freedom, and with ``enable_joint_effort_limit=False`` one below
-Newton's default 1e6, since the quadratic drive cannot bound its force.
+represents; drives, springs, damping and limits on free joints and on D6 joints
+that become ball joints, since libuipc's driving term and limits act on one
+hinge angle or one distance and the ball terms on a ball joint's rotation
+vector, not on a D6 joint's angles; limits on ball joints, which Newton does not
+define; a negative ``joint_armature``, and one other than 0 on a free joint, a
+mass without weight, or on a D6 joint that becomes a ball joint;
+``joint_friction`` other than 0 on a free or distance joint or on a D6 joint
+that becomes a free or ball joint (that of revolute and prismatic joints is
+:ref:`ipc-joint-terms`, that of ball joints :ref:`ipc-ball`); a negative
+``joint_effort_limit`` on a driven degree of freedom, and with
+``enable_joint_effort_limit=False`` one below Newton's default 1e6, since the
+quadratic drive cannot bound its force.
 
 .. _ipc-state:
 

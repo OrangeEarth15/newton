@@ -11,6 +11,7 @@ import warp as wp
 import newton
 from newton.tests.ipc._fixtures import (
     _CONVERGED,
+    _box_body,
     _drive_recurrence,
     _drive_recurrence_bdf2,
     _hinged,
@@ -359,8 +360,8 @@ def test_armature_is_implicit_euler(test, device):
     """A revolute and a prismatic joint driven from rest by target gains, a passive spring, passive damping and joint_f
     take their joint_armature as the inertia of their coordinate: they follow the recurrence of
     (I + a) q'' = ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd + f step by step to 1e-4 of their motion, under
-    implicit Euler and, from an implicit Euler step, under BDF2, where the recurrence of I alone is farther off. A ball
-    joint's armature is refused."""
+    implicit Euler and, from an implicit Euler step, under BDF2, where the recurrence of I alone is farther off. A free
+    joint's armature is refused (a ball joint's is test_ball's)."""
     for integrator, recurrence in (("bdf1", _drive_recurrence), ("bdf2", _drive_recurrence_bdf2)):
         for kind, length, scale, armature in (("revolute", 0.1, 1.0, 20.0), ("prismatic", 1.0, 10.0, 200.0)):
             with test.subTest(integrator=integrator, kind=kind):
@@ -388,10 +389,9 @@ def test_armature_is_implicit_euler(test, device):
                 np.testing.assert_allclose(q[:, 0], expected, rtol=0.0, atol=1e-4 * motion)
                 test.assertGreater(np.abs(recurrence(inertia, h, steps, **args) - expected).max(), 1e-2 * motion)
     builder = newton.ModelBuilder()
-    link = builder.add_link(xform=wp.transform((0.0, 0.0, 1.0), wp.quat_identity()))
-    builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1)
-    builder.add_articulation([builder.add_joint_ball(-1, link, armature=0.01)])
-    with test.assertRaisesRegex(NotImplementedError, "armature of revolute and prismatic joints only"):
+    _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
+    builder.joint_armature[3] = 0.01  # the free joint's first angular degree of freedom
+    with test.assertRaisesRegex(NotImplementedError, "armature of revolute, prismatic and ball joints only"):
         newton.solvers.SolverIPC(builder.finalize(device=device))
 
 

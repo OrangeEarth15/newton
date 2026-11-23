@@ -22,10 +22,17 @@ from newton.tests.ipc._fixtures import _TINY_LISTS, _box_body, _scene_calls, _st
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 D = newton.ModelBuilder.JointDofConfig
-_ARMATURE = "SolverIPC takes the armature of revolute and prismatic joints only, as the inertia of their one coordinate"
+_ARMATURE = (
+    "SolverIPC takes the armature of revolute, prismatic and ball joints only; that of a free joint, a mass without "
+    "weight and an inertia, has no term"
+)
 _DRIVE = (
     "set the gains, stiffness and damping to 0 and the target mode to NONE, and apply forces through Control.joint_f, "
-    "which acts on every joint. libuipc drives, springs and damps revolute and prismatic joints only"
+    "which acts on every joint. SolverIPC drives, springs and damps revolute, prismatic and ball joints only"
+)
+_D6_BALL = (
+    "SolverIPC takes the drives, springs, damping, armature and friction of a BALL joint, on the rotation vector of its "
+    "rotation, and those of no D6 joint of three angular axes, whose coordinates are angles about its axes"
 )
 
 
@@ -196,7 +203,8 @@ _MOVED = (
         "friction of a free joint (joint_terms)",
         (_free(3, friction=0.75),),
         "SolverIPC: DOF 3 of the FREE joint 0 has joint_friction 0.75; set it to 0. SolverIPC holds the friction of "
-        "revolute and prismatic joints only, as a force on one coordinate.",
+        "revolute, prismatic and ball joints only, as a force on one coordinate or a torque about each axis of a ball "
+        "joint.",
     ),
     (
         "a universal joint (universal)",
@@ -220,14 +228,14 @@ _MOVED = (
         "distance, has one rest length and no range.",
     ),
     (
-        "friction of a ball joint (ball)",
-        (_ball(1, friction=0.25),),
-        "SolverIPC: DOF 1 of the BALL joint 0 has joint_friction 0.25; set it to 0. libuipc's joints have no friction.",
+        "friction of a D6 joint that becomes a ball joint (ball)",
+        (_d6("", "XYZ", 1, friction=0.25),),
+        f"SolverIPC: DOF 1 of the D6 joint 0 has joint_friction 0.25; set it to 0. {_D6_BALL}.",
     ),
     (
-        "armature of a ball joint (ball)",
-        (_ball(2, armature=0.5),),
-        f"SolverIPC: DOF 2 of the BALL joint 0 has joint_armature 0.5; set it to 0. {_ARMATURE}.",
+        "armature of a D6 joint that becomes a ball joint (ball)",
+        (_d6("", "XYZ", 2, armature=0.5),),
+        f"SolverIPC: DOF 2 of the D6 joint 0 has joint_armature 0.5; set it to 0. {_D6_BALL}.",
     ),
     (
         "armature of a free joint (ball)",
@@ -235,16 +243,16 @@ _MOVED = (
         f"SolverIPC: DOF 5 of the FREE joint 0 has joint_armature 0.5; set it to 0. {_ARMATURE}.",
     ),
     (
-        "a drive of a ball joint (ball)",
-        (_ball(0, target_ke=10.0),),
-        "SolverIPC: DOF 0 of the BALL joint 0 has target_ke 10.0, target_kd 0.0, stiffness 0.0 and damping 0.0; "
+        "a drive of a free joint (ball)",
+        (_free(0, target_ke=10.0),),
+        "SolverIPC: DOF 0 of the FREE joint 0 has target_ke 10.0, target_kd 0.0, stiffness 0.0 and damping 0.0; "
         f"{_DRIVE}.",
     ),
     (
         "damping of a D6 joint that becomes a ball joint (ball)",
         (_d6("", "XYZ", 1, damping=2.0),),
-        "SolverIPC: DOF 1 of the D6 joint 0 has target_ke 0.0, target_kd 0.0, stiffness 0.0 and damping 2.0; "
-        f"{_DRIVE}.",
+        "SolverIPC: DOF 1 of the D6 joint 0 has target_ke 0.0, target_kd 0.0, stiffness 0.0 and damping 2.0; set the "
+        f"gains, stiffness and damping to 0 and the target mode to NONE. {_D6_BALL}.",
     ),
     (
         "a target mode of a free joint (ball)",
@@ -255,6 +263,13 @@ _MOVED = (
         "limits of a ball joint (ball)",
         (_ball(0, limit_lower=-0.5, limit_upper=0.5, limit_ke=100.0),),
         "SolverIPC: DOF 0 of the BALL joint 0 has the limits [-0.5, 0.5] with limit_ke 100.0; set limit_ke to 0, or "
+        "the bounds to -MAXVAL and MAXVAL. Newton defines no limits of a ball joint: add_joint_ball takes none, its "
+        "importers drop them and its solvers do not read them.",
+    ),
+    (
+        "limits of a D6 joint that becomes a ball joint (ball)",
+        (_d6("", "XYZ", 0, limit_lower=-0.5, limit_upper=0.5, limit_ke=100.0),),
+        "SolverIPC: DOF 0 of the D6 joint 0 has the limits [-0.5, 0.5] with limit_ke 100.0; set limit_ke to 0, or "
         "the bounds to -MAXVAL and MAXVAL. libuipc limits revolute and prismatic joints only.",
     ),
     (
@@ -273,10 +288,10 @@ _MOVED = (
 def test_moved_refusals_keep_their_messages(test, device):
     """Every refusal a feature module holds raises NotImplementedError with the message it had before the modules
     held it, when the solver is built: Newton's tendons, mimics of joints of several coordinates and the friction of
-    free joints
-    (joint_terms), D6 joints of no libuipc joint and distance joints with a range (universal), the friction,
-    armature, drives, damping, target mode and limits of ball and free joints (ball) and springs and attachments with a
-    negative damping (damping). (contact_damping's is in test_contact_damping_takes_none_only.)"""
+    free joints (joint_terms), D6 joints of no libuipc joint and distance joints with a range (universal), the
+    armature, drives and target mode of free joints, the friction, armature, damping and limits of D6 joints that
+    become ball joints and the limits of ball joints (ball), and springs and attachments with a negative damping
+    (damping). (contact_damping's is in test_contact_damping_takes_none_only.)"""
     for name, contents, message in _MOVED:
         with test.subTest(name):
             test.assertEqual(_refusal(test, _model(device, *contents)), message)
@@ -289,28 +304,28 @@ _ORDER = (
     ("muscles before mimic constraints", (_vector_mimic, _muscle), {}, "the model has 1 muscles;"),
     ("mimic constraints before equality rows", (_equality, _vector_mimic), {}, "the follower of the mimic joint 2"),
     (
-        "the lowest DOF of a category, a ball joint's",
-        (_ball(1, friction=0.25), _revolute(friction=0.5)),
+        "the lowest DOF of a category, a D6 joint's that becomes a ball joint",
+        (_d6("", "XYZ", 1, friction=0.25), _free(0, friction=0.5)),
         {},
-        "DOF 1 of the BALL joint 0 has joint_friction 0.25;",
+        "DOF 1 of the D6 joint 0 has joint_friction 0.25;",
     ),
     (
         "the lowest DOF of a category, a free joint's",
-        (_free(0, friction=0.5), _ball(1, friction=0.25)),
+        (_free(0, friction=0.5), _d6("", "XYZ", 1, friction=0.25)),
         {},
         "DOF 0 of the FREE joint 0 has joint_friction 0.5;",
     ),
     (
         "friction before armature",
-        (_ball(0, armature=0.5), _free(3, friction=0.5)),
+        (_d6("", "XYZ", 0, armature=0.5), _free(3, friction=0.5)),
         {},
         "DOF 6 of the FREE joint 1 has joint_friction 0.5;",
     ),
     (
-        "a negative armature before the drives of ball joints",
-        (_ball(0, target_ke=10.0), _revolute(armature=-0.5)),
+        "a negative armature before the drives of free joints",
+        (_free(0, target_ke=10.0), _revolute(armature=-0.5)),
         {},
-        "DOF 3 of the REVOLUTE joint 1 has joint_armature -0.5; make it 0 or positive.",
+        "DOF 6 of the REVOLUTE joint 1 has joint_armature -0.5; make it 0 or positive.",
     ),
     (
         "armature before limits",
@@ -319,10 +334,10 @@ _ORDER = (
         "DOF 3 of the FREE joint 1 has joint_armature 0.5; set it to 0.",
     ),
     (
-        "the drives of ball joints before the effort limit",
-        (_revolute(target_ke=100.0, effort_limit=-5.0), _ball(2, target_ke=10.0)),
+        "the drives of free joints before the effort limit",
+        (_revolute(target_ke=100.0, effort_limit=-5.0), _free(2, target_ke=10.0)),
         {},
-        "DOF 3 of the BALL joint 1 has target_ke 10.0,",
+        "DOF 3 of the FREE joint 1 has target_ke 10.0,",
     ),
     (
         "the axes of a D6 joint before a later universal joint",
@@ -376,7 +391,7 @@ def test_refusals_keep_their_order(test, device):
     before the modules held them: the modules' checks run at the points of the checks they replace, a module's
     refusal of the joints' degrees of freedom names the lowest degree of freedom of its category whichever module
     holds it, and the categories keep their order among the joints' own checks (friction, a negative armature, the
-    armature, drives and limits of ball and free joints, the effort limit)."""
+    armature, drives and limits of free joints and of D6 joints that become ball joints, the effort limit)."""
     for name, contents, options, start in _ORDER:
         with test.subTest(name):
             message = _refusal(test, _model(device, *contents), **options)
@@ -432,7 +447,8 @@ def test_refusals_at_notify(test, device):
     refused(
         flags.JOINT_DOF_PROPERTIES,
         "SolverIPC: DOF 5 of the FREE joint 2 has joint_friction 0.5; set it to 0. SolverIPC holds the friction of "
-        "revolute and prismatic joints only, as a force on one coordinate.",
+        "revolute, prismatic and ball joints only, as a force on one coordinate or a torque about each axis of a ball "
+        "joint.",
     )
     model.joint_friction.assign(np.zeros_like(friction))
     model.spring_damping.assign(np.array([-0.5], np.float32))

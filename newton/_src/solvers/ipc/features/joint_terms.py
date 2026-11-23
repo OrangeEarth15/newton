@@ -234,7 +234,8 @@ def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
     return dofs.refusal(
         np.flatnonzero((friction != 0.0) & (dofs.kind == int(JointType.FREE))),
         lambda d: f"joint_friction {float(friction[d])!r}",
-        "set it to 0. SolverIPC holds the friction of revolute and prismatic joints only, as a force on one coordinate",
+        "set it to 0. SolverIPC holds the friction of revolute, prismatic and ball joints only, as a force on one "
+        "coordinate or a torque about each axis of a ball joint",
     )
 
 

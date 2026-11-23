@@ -289,9 +289,9 @@ def test_control_activations_refused_at_eager_steps(test, device):
 
 
 def test_rejects_unsupported_joints(test, device):
-    """Reject the joints SolverIPC does not simulate, naming what libuipc lacks: rod joints, drives, passive springs,
-    limits and armature on ball and free joints, the friction of a free joint, and a negative effort limit on a driven
-    joint."""
+    """Reject the joints SolverIPC does not simulate, naming what libuipc lacks: rod joints, drives, passive springs and
+    armature on free joints and on D6 joints that become ball joints, limits on ball joints (Newton defines none), the
+    friction of a free joint, and a negative effort limit on a driven joint."""
 
     def hinged(add, **dof):
         builder = newton.ModelBuilder()
@@ -311,6 +311,10 @@ def test_rejects_unsupported_joints(test, device):
     def rod(builder, link):
         return builder.add_joint_rod(-1, link)
 
+    def d6_ball(builder, link):
+        D = newton.ModelBuilder.JointDofConfig
+        return builder.add_joint_d6(-1, link, angular_axes=[D(axis=a) for a in "XYZ"])
+
     free = newton.ModelBuilder()
     _box_body(free, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
     free.joint_target_mode[0] = int(newton.JointTargetMode.POSITION)
@@ -320,9 +324,9 @@ def test_rejects_unsupported_joints(test, device):
     for name, builder, pattern in (
         ("rod", hinged(rod), "joint 0 is a ROD joint; use SolverVBD or SolverKamino for rods"),
         ("free drive", free, "FREE joint 0 has the target mode POSITION"),
-        ("ball drive", hinged(ball, target_ke=10.0), "BALL joint 0 has target_ke 10.0.*; set the gains"),
-        ("ball limit", hinged(ball, limit_lower=-0.5), "limits revolute and prismatic joints only"),
-        ("ball armature", hinged(ball, armature=0.01), "armature of revolute and prismatic joints only"),
+        ("D6 ball drive", hinged(d6_ball, target_ke=10.0), "D6 joint 0 has target_ke 10.0.*; set the gains"),
+        ("ball limit", hinged(ball, limit_lower=-0.5), "Newton defines no limits of a ball joint"),
+        ("D6 ball armature", hinged(d6_ball, armature=0.01), "of no D6 joint of three angular axes"),
         ("free friction", free_friction, "DOF 3 of the FREE joint 0 has joint_friction 0.5; set it to 0"),
         ("effort limit", hinged(revolute, target_ke=100.0, effort_limit=-5.0), "joint_effort_limit -5.0"),
     ):
