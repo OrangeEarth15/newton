@@ -351,14 +351,15 @@ linearizes the constraint :math:`d \ge \hat d + \text{thickness}` of the active
 contact pairs, with a penalty that follows the masses and multipliers that
 converge to the contact forces, and a collision-free sweep moves the
 configuration toward the solution. Contact rests at ``d_hat`` beyond the contact
-thickness, where the barrier rests inside ``d_hat``. Its constraints hold
-between surfaces of vertices with mass, the penalty of a pair scaling with the
-smallest mass of its vertices: particles on no cloth or tetrahedron that collide
-are refused, and so are static mesh shapes, particles and bodies without mass
-that collide (Newton's static shapes have no mass; static planes are taken). A
-pair joins the active set only when a sweep finds its two primitives touching,
-and the step that solves its constraint ends with the gap at ``d_hat``: a body
-whose step began a gap :math:`g` from a surface leaves it at about
+thickness, where the barrier rests inside ``d_hat``: two free particles that
+meet are held ``d_hat`` beyond the sum of their radii. Its constraints hold
+between vertices with mass, the penalty of a pair scaling with the smallest
+mass of its vertices: static mesh shapes, particles and bodies without mass
+that collide are refused (Newton's static shapes have no mass; static planes
+are taken). A pair joins the active set only when a sweep finds its two
+primitives touching, and the step that solves its constraint ends with the gap
+at ``d_hat``: a body whose step began a gap :math:`g` from a surface leaves it
+at about
 :math:`(\hat d - g) / \Delta t`, whatever its speed of impact. This is the
 method's own (libuipc and the authors' code do the same), and it gains energy
 where ``d_hat`` exceeds the distance a body travels in a step: a cube dropped

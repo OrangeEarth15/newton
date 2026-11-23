@@ -428,11 +428,11 @@ def _unread_materials(model: Model) -> list[str]:
 def _check_al_ipc(solver: SolverIPC, elements: _ContactElements) -> None:
     """``NotImplementedError`` for a kinematic body that ``kinematic_motion="aim"`` moves toward its aims, which AL-IPC
     does not offer (its frame tests animated aims with a check of its own, libuipc's ``animation_reach_target``, which
-    this path does not run), and for contact that libuipc's AL-IPC does not constrain. Its active set holds the
-    vertex / half-plane, point / triangle and edge / edge pairs of surfaces, so a particle on no cloth or
-    tetrahedron that collides has no constraint; and the penalty of a pair is the smallest of its vertices'
-    mass-scaled penalties, so a pair with a vertex without mass has none (a static mesh shape, a particle of no
-    mass, a body of no mass), where libuipc's own obstacles are bodies or vertices with mass."""
+    this path does not run), and for contact that libuipc's AL-IPC does not constrain. The penalty of a pair is the
+    smallest of its vertices' mass-scaled penalties, so a pair with a vertex without mass has none (a static mesh
+    shape, a cloth or tetrahedron particle of no mass, a body of no mass), where libuipc's own obstacles are bodies or
+    vertices with mass. Free particles are taken: libuipc-warp's active set holds the pairs of a point with another
+    point and with an edge besides those of surfaces."""
     if len(solver._aim_bodies):
         raise NotImplementedError(
             "SolverIPC: kinematic_motion='aim' would move the kinematic body "
@@ -443,8 +443,6 @@ def _check_al_ipc(solver: SolverIPC, elements: _ContactElements) -> None:
     model = solver.model
     colliding = elements.enabled[elements.particle].any(axis=1) if model.particle_count else np.zeros(0, bool)
     massless = []
-    if np.any(colliding & ~elements.on_mesh):
-        massless.append("particles on no cloth or tetrahedron, which are points of no surface")
     if np.any(colliding & elements.on_mesh & (model.particle_mass.numpy() <= 0.0)):
         massless.append("cloth or tetrahedron particles without mass")
     if solver._obstacle_shapes:
@@ -457,7 +455,7 @@ def _check_al_ipc(solver: SolverIPC, elements: _ContactElements) -> None:
             massless.append(f"the bodies {light.tolist()} without mass")
     if massless:
         raise NotImplementedError(
-            "SolverIPC: contact_constitution='al-ipc' constrains contact between surfaces of vertices with mass "
+            "SolverIPC: contact_constitution='al-ipc' constrains contact between vertices with mass "
             "(libuipc's AL-IPC scales the penalty of a pair by the smallest mass of its vertices); this model "
             "collides " + "; ".join(massless) + ". Static planes are taken."
         )

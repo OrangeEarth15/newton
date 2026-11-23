@@ -293,8 +293,8 @@ def test_bdf2_drives(test, device):
 
 def test_al_ipc_rests_at_d_hat(test, device):
     """With contact_constitution="al-ipc" a box dropped onto the ground comes to rest with its gap at d_hat, the
-    distance AL-IPC's constraint keeps, to 1%, and at rest; the barrier keeps it inside d_hat. A free particle and a
-    static box, which AL-IPC would not constrain, are refused."""
+    distance AL-IPC's constraint keeps, to 1%, and at rest; the barrier keeps it inside d_hat. A static box, whose
+    vertices have no mass for AL-IPC's penalty, is refused."""
     d_hat = 0.005
     for constitution in ("ipc", "al-ipc"):
         with test.subTest(contact_constitution=constitution):
@@ -314,18 +314,42 @@ def test_al_ipc_rests_at_d_hat(test, device):
             else:
                 test.assertGreater(gap, 0.0)
                 test.assertLess(gap, 0.99 * d_hat)
-    # a particle on no cloth or tetrahedron takes part in no AL-IPC constraint, and a static shape has no mass for
-    # its penalty: refused
-    builder = newton.ModelBuilder()
-    builder.add_particle(wp.vec3(0.0, 0.0, 0.02), wp.vec3(0.0, 0.0, 0.0), 0.01, radius=0.01)
-    builder.add_ground_plane()
-    with test.assertRaisesRegex(NotImplementedError, "particles on no cloth"):
-        newton.solvers.SolverIPC(builder.finalize(device=device), contact_constitution="al-ipc")
+    # a static shape has no mass for AL-IPC's penalty: refused
     builder = newton.ModelBuilder()
     _box_body(builder, (0.0, 0.0, 0.17), (0.05, 0.05, 0.05))
     builder.add_shape_box(-1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.05), wp.quat_identity()), hx=0.1, hy=0.1, hz=0.05)
     with test.assertRaisesRegex(NotImplementedError, "static shapes"):
         newton.solvers.SolverIPC(builder.finalize(device=device), contact_constitution="al-ipc")
+
+
+def test_al_ipc_holds_free_particles(test, device):
+    """With contact_constitution="al-ipc" free particles collide. Two particles of radius 1 cm closing at 2 m/s without
+    gravity are held d_hat beyond the sum of their radii, and a particle dropped onto the ground comes to rest d_hat
+    above its radius, every step without a status bit: libuipc-warp's AL-IPC holds the pairs of two points and of a
+    point and an edge. (libuipc's AL-IPC has no such pairs: the two particles stop where they touch, in a step that
+    runs to its Newton iteration limit, and the solver refused models whose free particles collide.)"""
+
+    def run(model, d_hat, steps):
+        solver = newton.solvers.SolverIPC(model, d_hat=d_hat, contact_constitution="al-ipc")
+        observables = solver.observables({solver.ObservableKind.STATUS})
+        s0, s1 = model.state(), model.state()
+        for _ in range(steps):
+            solver.step(s0, s1, None, None, 0.01, observables=observables)
+            test.assertFalse(solver.check_status(observables))
+            s0, s1 = s1, s0
+        test.assertLess(np.abs(s0.particle_qd.numpy()).max(), 1e-3)  # at rest
+        return s0.particle_q.numpy()[:, 2]
+
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    builder.add_particle(wp.vec3(0.0, 0.0, 1.0), wp.vec3(0.0, 0.0, 1.0), mass=1.0, radius=0.01)
+    builder.add_particle(wp.vec3(0.0, 0.0, 1.1), wp.vec3(0.0, 0.0, -1.0), mass=1.0, radius=0.01)
+    z = run(builder.finalize(device=device), 0.005, 20)
+    test.assertAlmostEqual(z[1] - z[0], 0.02 + 0.005, delta=0.01 * 0.005)
+    builder = newton.ModelBuilder()
+    builder.add_particle(wp.vec3(0.0, 0.0, 0.02), wp.vec3(0.0, 0.0, 0.0), 0.01, radius=0.01)
+    builder.add_ground_plane()
+    z = run(builder.finalize(device=device), 0.001, 100)
+    test.assertAlmostEqual(z[0], 0.01 + 0.001, delta=0.01 * 0.001)
 
 
 def test_al_ipc_keeps_a_stack(test, device):
@@ -503,6 +527,7 @@ for name, func in (
     ("test_bdf2_history_restarts_where_gravity_changes", test_bdf2_history_restarts_where_gravity_changes),
     ("test_bdf2_drives", test_bdf2_drives),
     ("test_al_ipc_rests_at_d_hat", test_al_ipc_rests_at_d_hat),
+    ("test_al_ipc_holds_free_particles", test_al_ipc_holds_free_particles),
     ("test_al_ipc_keeps_a_stack", test_al_ipc_keeps_a_stack),
     ("test_al_ipc_sweeps_kinematic_bodies", test_al_ipc_sweeps_kinematic_bodies),
     ("test_al_ipc_status_and_new_masses", test_al_ipc_status_and_new_masses),
