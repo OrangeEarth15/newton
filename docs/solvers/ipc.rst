@@ -1045,6 +1045,54 @@ step's. Not with ``contact_constitution="al-ipc"``. The output costs, only when
 requested, one pass over the step's contact terms and one over its rows, and 64
 bytes per slot of the contact lists.
 
+.. _ipc-body-observables:
+
+Parent wrenches and accelerations
+---------------------------------
+
+Request ``SolverBase.ObservableKind.BODY_PARENT_F`` or ``BODY_QDD`` with
+:meth:`~newton.solvers.SolverIPC.observables` and pass the container to
+:meth:`~newton.solvers.SolverIPC.step`: the step writes, per body, the wrench
+its parent joint passes to it into ``body_parent_f`` and its acceleration into
+``body_qdd``, on the device, also during graph replay. Both are in the world
+frame, as in Newton's other solvers: the force or the linear acceleration of the
+centre of mass first, then the torque about the centre of mass or the angular
+acceleration. :class:`~newton.sensors.SensorIMU` reads ``body_qdd``.
+
+``body_parent_f`` is the force of the parent joint's terms at the end of the
+step. A joint of SolverIPC is a penalty, not a hard constraint (see
+:ref:`ipc-joints`), so this is the force that holds the body where the step
+moved it: the body's momentum balance, ``m (v1 - v0) / dt - m g`` less the
+other forces on the body, to the Newton tolerance. It is not a rigid joint's
+force at every step. A 0.2 m box released 1 m below a hinge pulls on it with
+57% of its weight in the first step of 5 ms with the default body stiffness,
+and with 94% with ``body_kappa=1e8``, where it is within 1e-4 of the weight
+from the sixth step on: the hinge first pulls on the box's affine stretch.
+Newton's ``test_parent_force``, which expects the weight from the first step,
+fails with SolverIPC for this reason. The joint's terms are those of the
+libuipc joint it maps onto (its penalty, drive and limit) or the stitch of a
+distance joint, and its ``joint_f``: libuipc's joint torque or force for a
+revolute or prismatic joint, and for a free, ball or distance joint or a D6
+joint of three angular axes the wrench the solver applies to the child, taken
+at the step's start as the step applies it. A free joint holds nothing and
+passes its ``joint_f`` only. A body's parent joint is the joint of an
+articulation whose child it is, or else the first joint whose child it is: a
+loop-closing joint is no body's parent joint, and a body that is no joint's
+child gets zero. The records of the joints' forces take about 2.8 KB per
+joint, allocated when a container first requests ``BODY_PARENT_F``, and a step
+that requests it evaluates the joints' forces once more.
+
+``body_qdd`` is the finite difference of the twists over the step,
+``(qd_out - qd_in) / dt``, as SolverKamino computes it: for the linear part the
+velocity of the centre of mass, for the angular part the angular velocity,
+which under ``body_rotation="rigid"`` is the one that carries the angular
+momentum. ``state_in`` may be ``state_out``.
+
+With independent worlds, a world whose step failed gets zero in both. A step
+that raises leaves no result in them. Both are offered under
+``contact_constitution="al-ipc"`` too, where the joint's force balances the
+step's motion as far as AL-IPC's step converges.
+
 .. _ipc-coupling:
 
 Coupling

@@ -657,25 +657,26 @@ def test_hooks_are_called_at_their_points(test, device):
 
 def test_supported_observables_come_from_the_observables_module(test, device):
     """The solver's supported observables are the observables module's: SUPPORTED_OBSERVABLES holds STATUS,
-    SOLVER_RESIDUAL and CONTACT_F, a solver supports them, and under AL-IPC STATUS only; a kind the module adds is
-    taken by observables(), which refuses it, as every kind outside the set, without it."""
+    SOLVER_RESIDUAL, CONTACT_F, BODY_PARENT_F and BODY_QDD, a solver supports them, and under AL-IPC STATUS,
+    BODY_PARENT_F and BODY_QDD only; a kind the module adds is taken by observables(), which refuses it, as every kind
+    outside the set, without it."""
     kind = newton.solvers.SolverIPC.ObservableKind
+    body = {kind.BODY_PARENT_F, kind.BODY_QDD}
     test.assertEqual(
-        newton.solvers.SolverIPC.SUPPORTED_OBSERVABLES, {kind.STATUS, kind.SOLVER_RESIDUAL, kind.CONTACT_F}
+        newton.solvers.SolverIPC.SUPPORTED_OBSERVABLES, {kind.STATUS, kind.SOLVER_RESIDUAL, kind.CONTACT_F, *body}
     )
     model = _falling_box(device)
     solver = newton.solvers.SolverIPC(model)
     test.assertEqual(solver.supported_observables, newton.solvers.SolverIPC.SUPPORTED_OBSERVABLES)
-    test.assertEqual(
-        newton.solvers.SolverIPC(model, contact_constitution="al-ipc").supported_observables, {kind.STATUS}
-    )
-    with test.assertRaisesRegex(ValueError, "SolverIPC does not support solver observable\\(s\\): 'body_qdd'"):
-        solver.observables({kind.BODY_QDD})
-    more = solver.SUPPORTED_OBSERVABLES | {kind.BODY_QDD}
+    al = newton.solvers.SolverIPC(model, contact_constitution="al-ipc")
+    test.assertEqual(al.supported_observables, {kind.STATUS, *body})
+    with test.assertRaisesRegex(ValueError, "SolverIPC does not support solver observable\\(s\\): 'solver_residual'"):
+        al.observables({kind.SOLVER_RESIDUAL})
+    more = al.supported_observables | {kind.SOLVER_RESIDUAL}
     with mock.patch.object(features.observables, "supported", return_value=more) as supported:
-        test.assertEqual(solver.supported_observables, more)
-        test.assertIsNotNone(solver.observables({kind.BODY_QDD}).body_qdd)
-    supported.assert_called_with(solver)
+        test.assertEqual(al.supported_observables, more)
+        test.assertIsNotNone(al.observables({kind.SOLVER_RESIDUAL}).solver_residual)
+    supported.assert_called_with(al)
 
 
 def test_observables_module_allocates_for_every_container(test, device):

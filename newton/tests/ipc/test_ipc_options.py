@@ -450,7 +450,7 @@ def test_al_ipc_status_and_new_masses(test, device):
     solver = newton.solvers.SolverIPC(model, d_hat=0.005, contact_constitution="al-ipc")
     test.assertEqual(type(solver._engine).__name__, "ALIPCSimEngine")
     kind = solver.ObservableKind
-    test.assertEqual(solver.supported_observables, {kind.STATUS})
+    test.assertEqual(solver.supported_observables, {kind.STATUS, kind.BODY_PARENT_F, kind.BODY_QDD})
     with test.assertRaisesRegex(ValueError, "solver_residual"):
         solver.observables({kind.STATUS, kind.SOLVER_RESIDUAL})
     observables = solver.observables({solver.ObservableKind.STATUS})

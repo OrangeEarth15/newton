@@ -736,9 +736,10 @@ class SolverIPC(SolverBase, CouplingInterface):
 
     @property
     def supported_observables(self) -> frozenset[str]:
-        """``STATUS``, ``SOLVER_RESIDUAL`` and ``CONTACT_F``; with ``contact_constitution="al-ipc"`` ``STATUS`` only: the
-        AL-IPC frame ends on its own criterion, without a Newton residual, and its contact is an active set with
-        multipliers, not the barrier and friction terms the contact output exports."""
+        """``STATUS``, ``SOLVER_RESIDUAL``, ``CONTACT_F``, ``BODY_PARENT_F`` and ``BODY_QDD``; with
+        ``contact_constitution="al-ipc"`` ``STATUS``, ``BODY_PARENT_F`` and ``BODY_QDD`` only: the AL-IPC frame ends on
+        its own criterion, without a Newton residual, and its contact is an active set with multipliers, not the barrier
+        and friction terms the contact output exports."""
         return features.observables.supported(self)
 
     @override
