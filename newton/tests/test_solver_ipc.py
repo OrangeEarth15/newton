@@ -4401,6 +4401,85 @@ def test_bdf2_history_starts_anew(test, device):
                     np.testing.assert_allclose(continued[step // 2][1], f0.body_q.numpy(), rtol=0.0, atol=1e-6)
 
 
+def test_bdf2_history_restarts_where_gravity_changes(test, device):
+    """With integrator="bdf2" a change of gravity starts the history anew, at the next step and also between replays of
+    a captured graph: a particle and a rigid box that fall from rest under one gravity and then under another follow
+    v = v_k + n h g2 after the change, to the float32 output, where BDF2 within its history would lag h (g2 - g1) / 2
+    behind for good. With two independent worlds a change in world 1 restarts world 1 alone: world 0 steps bit for
+    bit as in a run without the change. A gravity notified unchanged restarts nothing: the steps are bit for bit those
+    of a run without the notification."""
+    tight = {"newton_velocity_tol": 1e-6, "newton_transrate_tol": 1e-6, "linear_tol_rate": 1e-12}
+    tight["semi_implicit"] = False
+    h = 0.01
+    g1, g2 = np.array([0.0, 0.0, -9.81]), np.array([1.0, 0.0, 3.0])
+
+    def run(model, solver, capture, change):
+        """Five steps, ``change()``, four steps; the states after the last step and after steps 7 and 9."""
+        s0, s1 = model.state(), model.state()
+        solver.step(s0, s1, None, None, h)
+        s0, s1 = s1, s0
+        if capture:
+            with wp.ScopedCapture(device=device) as cap:
+                solver.step(s0, s1, None, None, h)
+                solver.step(s1, s0, None, None, h)
+        out = []
+        for k in range(4):  # two steps each
+            if k == 2:
+                change()
+            if capture:
+                wp.capture_launch(cap.graph)
+            else:
+                for _ in range(2):
+                    solver.step(s0, s1, None, None, h)
+                    s0, s1 = s1, s0
+            bodies = (s0.body_q.numpy(), s0.body_qd.numpy()) if model.body_count else (None, None)
+            out.append((s0.particle_q.numpy(), s0.particle_qd.numpy(), *bodies))
+        return out
+
+    builder = newton.ModelBuilder(gravity=tuple(g1))
+    builder.add_particle(wp.vec3(0.0, 0.0, 1.0), wp.vec3(0.0, 0.0, 0.0), 0.5)
+    b = _box_body(builder, (1.0, 0.0, 1.0), (0.1, 0.1, 0.1))
+    for capture in (False, True):
+        with test.subTest(capture=capture):
+            model = builder.finalize(device=device)
+            solver = newton.solvers.SolverIPC(model, integrator="bdf2", **tight)
+
+            def change(model=model, solver=solver):
+                model.set_gravity(tuple(g2))
+                solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES)
+
+            states = run(model, solver, capture, change)
+            for (_, qd, _, body_qd), n in zip(states[2:], (2, 4), strict=True):
+                v = 5.0 * h * g1 + n * h * g2
+                np.testing.assert_allclose(qd[0], v, rtol=0.0, atol=1e-5)
+                np.testing.assert_allclose(body_qd[b, :3], v, rtol=0.0, atol=1e-5)
+
+    builder = newton.ModelBuilder(gravity=tuple(g1))
+    for w in range(2):
+        builder.begin_world(gravity=tuple(g1))
+        builder.add_particle(wp.vec3(float(w), 0.0, 1.0), wp.vec3(0.0, 0.0, 0.0), 0.5)
+        builder.end_world()
+    runs = {}
+    for case in ("none", "world 1", "unchanged"):
+        model = builder.finalize(device=device)
+        solver = newton.solvers.SolverIPC(model, integrator="bdf2", **tight)
+        test.assertTrue(solver._independent)
+        gravity = {"none": None, "world 1": g2, "unchanged": g1}[case]
+
+        def change(model=model, solver=solver, gravity=gravity):
+            if gravity is not None:
+                model.set_gravity(tuple(gravity), world=1)
+                solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES)
+
+        runs[case] = run(model, solver, True, change)
+    for k in range(4):
+        for i in (0, 1):
+            np.testing.assert_array_equal(runs["unchanged"][k][i], runs["none"][k][i])
+            np.testing.assert_array_equal(runs["world 1"][k][i][0], runs["none"][k][i][0])
+    for (_, qd, _, _), n in zip(runs["world 1"][2:], (2, 4), strict=True):
+        np.testing.assert_allclose(qd[1], 5.0 * h * g1 + n * h * g2, rtol=0.0, atol=1e-5)
+
+
 def test_bdf2_drives(test, device):
     """With integrator="bdf2" a revolute and a prismatic joint driven from rest by target gains, a passive spring and
     passive damping follow BDF2's recurrence of I q'' = ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd after an
@@ -7524,6 +7603,7 @@ for name, func in (
     ),
     ("test_bdf2_is_second_order_on_a_spring", test_bdf2_is_second_order_on_a_spring),
     ("test_bdf2_history_starts_anew", test_bdf2_history_starts_anew),
+    ("test_bdf2_history_restarts_where_gravity_changes", test_bdf2_history_restarts_where_gravity_changes),
     ("test_bdf2_drives", test_bdf2_drives),
     ("test_al_ipc_rests_at_d_hat", test_al_ipc_rests_at_d_hat),
     ("test_al_ipc_status_and_new_masses", test_al_ipc_status_and_new_masses),

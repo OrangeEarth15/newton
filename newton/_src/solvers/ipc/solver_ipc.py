@@ -1546,6 +1546,24 @@ def _body_stiffness(
 
 
 @wp.kernel
+def _gravity_changed(
+    now: wp.array[wp.vec3d],
+    subscene: wp.array[wp.int32],
+    last: wp.array[wp.vec3d],
+    restart: wp.array[wp.int32],
+):
+    """``integrator="bdf2"``: ``restart[subscene[w]]`` = 1 where the gravity of world entry ``w`` that the step takes,
+    ``now[w]``, differs from the one the step before took, ``last[w]``, which then takes it; ``subscene[w]`` is -1 for
+    an entry without particles or bodies."""
+    w = wp.tid()
+    g, h = now[w], last[w]
+    if g[0] != h[0] or g[1] != h[1] or g[2] != h[2]:
+        last[w] = g
+        if subscene[w] >= 0:
+            restart[subscene[w]] = 1
+
+
+@wp.kernel
 def _any_selected(world_mask: wp.array[wp.bool], entries: wp.array[wp.int32], selected: wp.array[wp.int32]):
     """``selected[0]`` = 1 when ``world_mask`` selects a world the solver simulates."""
     s = int(0)
@@ -2919,16 +2937,25 @@ class SolverIPC(SolverBase, CouplingInterface):
     Newton's other solvers. (libuipc starts the history from rest, without
     acceleration: a constant force from rest gets two thirds of its impulse in
     the first step, and the velocity lags half a step's impulse behind for
-    good.) Within a history the velocity lags the same way behind a force that
-    jumps: gravity changed by :math:`\\Delta g` through
-    :meth:`notify_model_changed` leaves it :math:`\\Delta t \\, \\Delta g / 2`
-    behind. With several worlds a new state in one world, or its reset, makes
-    the step an implicit Euler step of that world's particles and bodies, and
-    the other worlds go on with BDF2. As in libuipc the coefficients assume
-    one ``dt`` for consecutive steps: a step of another ``dt`` is taken as it
-    is. The drives, passive springs and damping of joints take BDF2's velocity
-    at the end of the step (see **Joints**); the default body stiffness follows
-    the rule of **Rigid bodies**.
+    good.) A change of gravity (:meth:`notify_model_changed` with
+    ``MODEL_PROPERTIES``) starts the history anew too: the next step compares
+    the gravity of every world with the step before's, on the device, also
+    inside a captured graph, and is an implicit Euler step of the worlds
+    whose gravity changed, so that their velocity follows the new gravity at
+    once; without it the velocity would lag :math:`\\Delta t \\, \\Delta g / 2`
+    behind for good, as above. Gravity is a parameter of the model, changed
+    between steps by a jump that a history taken under the old gravity
+    cannot hold. The external forces (``particle_f``, ``body_f``,
+    ``joint_f``) and the drives are inputs of every step that may change at
+    every step, and BDF2 takes them as they come, as libuipc does: a force
+    that jumps within a history leaves the velocity half a step's impulse of
+    the jump behind. With several worlds a new state in one world, or its
+    reset, makes the step an implicit Euler step of that world's particles
+    and bodies, and the other worlds go on with BDF2. As in libuipc the
+    coefficients assume one ``dt`` for consecutive steps: a step of another
+    ``dt`` is taken as it is. The drives, passive springs and damping of
+    joints take BDF2's velocity at the end of the step (see **Joints**); the
+    default body stiffness follows the rule of **Rigid bodies**.
 
     **AL-IPC contact.** ``contact_constitution="al-ipc"`` is libuipc's
     augmented-Lagrangian contact (its ``contact/constitution``): each Newton
@@ -3883,6 +3910,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._restarts = False
         self._save_pending = self._restore_pending = False
         self._carried = []
+        # integrator="bdf2": the gravity of the steps and of the step before, on the device (_build_engine)
+        self._gravity_now = self._gravity_last = None
         # the failure, in the model's state, of the start of a pair with a body whose start the caller writes, which
         # a captured first step raises (_check_start)
         self._start_pending = None
@@ -4128,6 +4157,21 @@ class SolverIPC(SolverBase, CouplingInterface):
         )
         self._world_entries = np.where(worlds < 0, model.world_count, worlds).astype(np.int32)
         self._world_entries_device = wp.array(self._world_entries, dtype=wp.int32, device=device)
+        # integrator="bdf2": the gravity of every world entry that the steps take (_gravity) and the one the step
+        # before took, on the device, and the subscene whose history a change restarts (-1: an entry without particles
+        # or bodies); a step whose gravity differs restarts the histories of those subscenes (_load)
+        self._gravity_now = self._gravity_last = None
+        if self._config.integrator == "bdf2":
+            self._gravity_now = wp.array(self._gravity, dtype=wp.vec3d, device=device)
+            self._gravity_last = wp.clone(self._gravity_now)
+            self._gravity_restart = wp.zeros(n_sub, dtype=wp.int32, device=device)
+            subscene = np.full(model.world_count + 1, -1, np.int32)
+            if self._worlds is None:
+                subscene[self._world_entries] = 0
+            else:
+                subscene[self._worlds.worlds] = np.arange(1, self._worlds.count)
+                subscene[-1] = 0
+            self._gravity_subscene = wp.array(subscene, dtype=wp.int32, device=device)
         if self._independent:  # the entry of every independent world, and a scratch word for each world entry
             self._status_entries_device = wp.array(self._status_entries, dtype=wp.int32, device=device)
             self._world_words = wp.zeros(model.world_count + 1, dtype=wp.int32, device=device)
@@ -5658,6 +5702,17 @@ class SolverIPC(SolverBase, CouplingInterface):
         # step is an implicit Euler step (BDF1: nothing); with several worlds the other worlds go on as they were
         eng.discard_friction(where=self._changed)
         eng.restart_history(where=self._changed)
+        if self._gravity_now is not None:
+            # BDF2: so is the step of the subscenes whose gravity changed since the step before (class docstring)
+            self._gravity_restart.zero_()
+            wp.launch(
+                _gravity_changed,
+                self._gravity_now.shape[0],
+                inputs=[self._gravity_now, self._gravity_subscene],
+                outputs=[self._gravity_last, self._gravity_restart],
+                device=device,
+            )
+            eng.restart_history(where=self._gravity_restart)
 
     def _aim_bodies_of(self, state_in: State) -> None:
         """``kinematic_motion="aim"``: the aims of the kinematic bodies for the step, from ``state_in`` (the poses
@@ -6495,7 +6550,9 @@ class SolverIPC(SolverBase, CouplingInterface):
 
         Gravity, of every world (``MODEL_PROPERTIES``), and the bodies' mass, centre of mass and inertia
         (``BODY_INERTIAL_PROPERTIES``), with the joints' penalties, which follow the masses, are updated in place:
-        graphs captured before take them. A change of the triangulated shapes (``SHAPE_PROPERTIES`` with new
+        graphs captured before take them. With ``integrator="bdf2"`` the next step starts the history of the worlds
+        whose gravity changed anew (see **BDF2** in the class docstring). A change of the triangulated shapes
+        (``SHAPE_PROPERTIES`` with new
         transforms or scales, ``SHAPE_TYPE_AND_SOURCE``), of the friction coefficients and the contact thicknesses
         (``SHAPE_PROPERTIES`` with a new ``shape_material_mu`` or ``shape_margin``, ``MODEL_PROPERTIES`` with a new
         ``soft_contact_mu``, ``particle_mu`` or ``particle_radius``), of the particles' masses (``MODEL_PROPERTIES``
@@ -6571,6 +6628,8 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._gravity = self._world_gravity()
             self._config.gravity = tuple(self._gravity[-1])
             self._engine.set_gravity(self._vertex_gravity())
+            if self._gravity_now is not None:  # BDF2: the next step compares it with the gravity of the step before
+                self._gravity_now.assign(self._gravity)
         if flags & ModelFlags.BODY_INERTIAL_PROPERTIES and model.body_count:
             self._dyadic = dyadic
             self._engine.set_dyadic_mass(*self._engine_dyadic(dyadic))
@@ -6772,8 +6831,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         """An entry of a coupler that restarts its steps: the engine keeps its frame start on the device
         (libuipc-warp's ``enable_frame_restart``), and the solver a copy of what it carries from one step to the next:
         what it wrote of the bodies and the joints, the kinematic bodies it holds toward their aims, the joints'
-        history under BDF2, and the status bits it keeps for :meth:`check_status`, so that a restarted step replaces
-        the bits of the pass before it. Outside graph capture."""
+        history and the gravity of the step before under BDF2, and the status bits it keeps for :meth:`check_status`,
+        so that a restarted step replaces the bits of the pass before it. Outside graph capture."""
         self._carried = []
         if self._engine is None:
             return
@@ -6785,6 +6844,8 @@ class SolverIPC(SolverBase, CouplingInterface):
             carried.append(self._joint_q_written)
         for _, q_prev, q_kept in (*self._joint_history.values(), *self._joint_rate.values()):
             carried += [q_prev, q_kept]
+        if self._gravity_last is not None:  # BDF2: the gravity of the step before, which a change of gravity restarts
+            carried.append(self._gravity_last)
         self._carried = [(a, wp.clone(a)) for a in carried if a.size]
 
     def _save_step(self) -> None:
