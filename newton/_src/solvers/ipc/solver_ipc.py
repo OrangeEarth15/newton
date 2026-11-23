@@ -2670,7 +2670,7 @@ def _closed_volume(v: np.ndarray, f: np.ndarray) -> float:
 class SolverIPC(SolverBase, CouplingInterface):
     """Incremental Potential Contact solver for soft bodies, cloth and rigid bodies.
 
-    Wraps the libuipc-warp engine (not publicly released yet),
+    Wraps the `libuipc-warp <https://github.com/OrangeEarth15/libuipc-warp>`_ engine,
     a Warp implementation of libuipc, through its array interface (no libuipc
     build is needed). Each :meth:`step` is one implicit time step, by default
     of implicit Euler (BDF1): a Newton iteration with a backtracking line
@@ -3947,8 +3947,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             import uipc_warp.validation  # noqa: PLC0415
         except ImportError as e:
             raise ImportError(
-                "SolverIPC requires the libuipc-warp package, which is not publicly released yet; "
-                "ask the SolverIPC maintainers for access"
+                "SolverIPC requires the libuipc-warp package: pip install git+https://github.com/OrangeEarth15/libuipc-warp"
             ) from e
         version = getattr(uipc_warp, "__version__", "0")
         # the newest calls of each kind the solver makes, all of them public names of libuipc-warp: the frame status,
