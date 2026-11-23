@@ -1624,6 +1624,47 @@ def test_overflow_grows(test, device):
     np.testing.assert_allclose(states[a].particle_q.numpy(), eager, rtol=0.0, atol=1e-6)
 
 
+def test_grown_lists_keep_a_changed_gravity(test, device):
+    """A gravity changed through notify_model_changed holds after contact lists that overflow have grown, in an eager
+    step and through grow(): the cubes fall and land as those of a model built with that gravity, whose lists grow the
+    same way. (The grown solve used to take the gravity the model was laid out with.)"""
+    tight = {"newton_velocity_tol": 1e-6, "linear_tol_rate": 1e-12, "semi_implicit": False}
+    g = (0.0, 0.0, -2.0 * 9.81)
+
+    def run(changed: bool, capture: bool):
+        model = _stacking_cubes(device)
+        if not changed:
+            model.set_gravity(g)
+        solver = newton.solvers.SolverIPC(model, **tight)
+        solver._make_engine(_TINY_LISTS)
+        if changed:
+            model.set_gravity(g)
+            solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES)
+        observables = solver.observables({solver.ObservableKind.STATUS})
+        s0, s1 = model.state(), model.state()
+        for _ in range(20):
+            if capture:
+                with wp.ScopedCapture(device=device) as cap:
+                    solver.step(s0, s1, None, None, 0.01, observables=observables)
+                wp.capture_launch(cap.graph)
+                if solver.check_status(observables, grow=True):  # grown: the same step again
+                    with wp.ScopedCapture(device=device) as cap:
+                        solver.step(s0, s1, None, None, 0.01, observables=observables)
+                    wp.capture_launch(cap.graph)
+            else:
+                solver.step(s0, s1, None, None, 0.01)
+            s0, s1 = s1, s0
+        test.assertGreater(_active_slots(solver)[0], 1)  # the point-triangle list grew from _TINY_LISTS's one pair
+        return s0.particle_q.numpy(), s0.particle_qd.numpy()
+
+    for capture in (False, True):
+        with test.subTest(capture=capture):
+            q, qd = run(True, capture)
+            q_ref, qd_ref = run(False, capture)
+            np.testing.assert_allclose(q, q_ref, rtol=0.0, atol=1e-6)
+            np.testing.assert_allclose(qd, qd_ref, rtol=0.0, atol=1e-4)
+
+
 # ---------------------------------------------------------------------------- state and step
 
 
@@ -7425,6 +7466,7 @@ for name, func in (
     ("test_check_status", test_check_status),
     ("test_default_d_hat_follows_small_features", test_default_d_hat_follows_small_features),
     ("test_overflow_grows", test_overflow_grows),
+    ("test_grown_lists_keep_a_changed_gravity", test_grown_lists_keep_a_changed_gravity),
     ("test_teleport_equals_fresh_solver", test_teleport_equals_fresh_solver),
     ("test_reset_inside_captured_graph", test_reset_inside_captured_graph),
     ("test_reset_checks_world_mask_as_newton_does", test_reset_checks_world_mask_as_newton_does),

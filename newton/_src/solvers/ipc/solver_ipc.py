@@ -4038,8 +4038,10 @@ class SolverIPC(SolverBase, CouplingInterface):
             return
         if self._proxies:
             self._check_proxies()
-        # the global world's gravity, which every part overrides with the gravity of its own world
-        self._config.gravity = tuple(model.gravity.numpy()[-1].astype(np.float64))
+        # the gravity of every world, the global world's last, which the parts are laid out with; the config takes the
+        # global world's, which every part overrides with the gravity of its own world
+        self._gravity = self._layout_gravity = self._world_gravity()
+        self._config.gravity = tuple(self._gravity[-1])
         if not self._d_hat_given:
             self._config.d_hat = _default_d_hat(model)
 
@@ -4310,10 +4312,11 @@ class SolverIPC(SolverBase, CouplingInterface):
         return self.model.gravity.numpy().reshape(-1, 3).astype(np.float64)
 
     def _vertex_gravity(self) -> np.ndarray:
-        """The gravity of every engine vertex, as the scene lays it out: a particle's world's on the particle, a
-        body's world's on its translation, none elsewhere (``SimEngine.set_gravity``)."""
+        """The gravity of every engine vertex, as the scene lays it out, from the gravity the solver took last
+        (``_gravity``): a particle's world's on the particle, a body's world's on its translation, none elsewhere
+        (``SimEngine.set_gravity``)."""
         layout = self._scene.layout()
-        g = self._world_gravity()
+        g = self._gravity
         out = np.zeros((layout.n, 3))
         if self.model.particle_count:
             out[: layout.n_fem] = g[self.model.particle_world.numpy()]
@@ -4700,6 +4703,10 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._engine = self._uipc_warp.make_engine(
             self._config, self._options, **inputs, device=device, capacity=capacity
         )
+        if not np.array_equal(self._gravity, self._layout_gravity):
+            # notify_model_changed changed gravity since the scene's parts were laid out with theirs: an engine built
+            # again with longer lists (_regrow) takes the gravity of now
+            self._engine.set_gravity(self._vertex_gravity())
         # the Newton and PCG iterations of the captured steps since the last graph_outdated()
         self._iterations = wp.zeros(2, dtype=wp.int64, device=device)
         # what the start check needs of the tabular, its two tables apart as the engine tests them: the contact
@@ -4838,7 +4845,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             thickness=np.where(elements.on_mesh, self._thickness, radius),
             contact_element=elements.particle,
             subscene_element=0 if self._worlds is None else self._worlds.subscene(model.particle_world.numpy()),
-            gravity=self._world_gravity()[model.particle_world.numpy()],
+            gravity=self._gravity[model.particle_world.numpy()],
         )
         own = _own_elements(model)[1]  # in a coupled solver's view, without another entry's tetrahedra
         if not own.any():
@@ -5226,7 +5233,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._posed_body = self._kinematic_body | placed
         body_com = model.body_com.numpy().astype(np.float64)
         body_mass = model.body_mass.numpy().astype(np.float64)
-        body_gravity = self._world_gravity()[model.body_world.numpy()]
+        body_gravity = self._gravity[model.body_world.numpy()]
         self._body_volume = np.zeros(model.body_count)
         for b in range(model.body_count):
             parts = meshes[b]
@@ -6561,7 +6568,8 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._build_engine()
             return
         if flags & ModelFlags.MODEL_PROPERTIES:
-            self._config.gravity = tuple(self._world_gravity()[-1])
+            self._gravity = self._world_gravity()
+            self._config.gravity = tuple(self._gravity[-1])
             self._engine.set_gravity(self._vertex_gravity())
         if flags & ModelFlags.BODY_INERTIAL_PROPERTIES and model.body_count:
             self._dyadic = dyadic

@@ -1,0 +1,1 @@
+Keep a gravity that ``SolverIPC.notify_model_changed`` took when the solver's contact lists grow: the solve built again with longer lists, by an eager step that overflowed or by ``grow()``, took the gravity the model had when the solver was built.
