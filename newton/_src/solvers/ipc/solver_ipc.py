@@ -1037,9 +1037,9 @@ class SolverIPC(SolverBase, CouplingInterface):
             )
 
     def _check_independent_options(self) -> None:
-        """``NotImplementedError`` for the options that independent worlds do not take yet (:ref:`ipc-worlds`), each
-        naming what to use instead, when two worlds or more hold unknowns: libuipc-warp solves the worlds apart from
-        each other with libuipc's barrier contact and the block-diagonal preconditioner."""
+        """``NotImplementedError`` for the options that independent worlds do not take yet (:ref:`ipc-worlds`), naming
+        what to use instead, when two worlds or more hold unknowns: libuipc-warp solves the worlds apart from each other
+        with libuipc's barrier contact only, under either preconditioner."""
         worlds = self._worlds.worlds
         which = f"the worlds {worlds.tolist()}" if len(worlds) <= 8 else f"{len(worlds)} worlds"
         instead = (
@@ -1051,12 +1051,6 @@ class SolverIPC(SolverBase, CouplingInterface):
                 "SolverIPC: contact_constitution='al-ipc' is not offered with independent worlds yet: libuipc-warp "
                 f"solves {which} apart from each other with libuipc's barrier contact only, AL-IPC's frame being one "
                 f"solve of the whole scene. Use contact_constitution='ipc', {instead}."
-            )
-        if self._config.fem_preconditioner == "mas":
-            raise NotImplementedError(
-                "SolverIPC: fem_preconditioner='mas' is not offered with independent worlds yet: MAS's clusters may "
-                f"join vertices of different worlds, whose linear solves are apart. Use fem_preconditioner='diag', "
-                f"{instead}."
             )
 
     def _forget_written(self) -> None:

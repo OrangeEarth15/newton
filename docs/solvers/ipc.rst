@@ -508,6 +508,13 @@ positions. The preconditioner is libuipc's on another partition: the PCG
 iterations differ from libuipc's, and the result is the same to the tolerance of
 the linear solve. Particles on no element keep their 3 x 3 blocks.
 
+With independent worlds (:ref:`ipc-worlds`) every world is preconditioned as the
+same world alone, so it takes the PCG iterations of its run alone. MAS groups
+the particles of each level sixteen to a bank in order; one set of levels for
+the whole model would put particles of several worlds into one bank and make a
+world's preconditioner depend on the others. libuipc-warp builds the levels once
+per world instead, from that world's own particles.
+
 .. _ipc-worlds:
 
 Worlds
@@ -571,9 +578,10 @@ with ``separate_worlds`` in the same way. A triangle, tetrahedron or spring that
 joins two worlds is refused too. Global static shapes and planes, kinematic
 particles and kinematic bodies that jump act in every world. Not offered with independent worlds yet, where two worlds or
 more move, and refused naming what to use instead:
-``contact_constitution="al-ipc"`` and ``fem_preconditioner="mas"`` (its clusters
-may join two worlds). The engine's Newton exit check, which independent worlds
-do not take either, is not used by the solver.
+``contact_constitution="al-ipc"``. ``fem_preconditioner="mas"`` is taken, every
+world preconditioned as the same world alone (:ref:`ipc-mas`). The engine's
+Newton exit check, which independent worlds do not take either, is not used by
+the solver.
 
 With ``coupled_worlds=True`` the worlds are one solve instead, with the same
 subscenes: one step length (the smallest time of impact over all worlds, and a

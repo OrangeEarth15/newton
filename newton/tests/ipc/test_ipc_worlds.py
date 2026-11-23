@@ -920,11 +920,12 @@ def _two_worlds(device, content, extra=None):
 def test_rejects_what_independent_worlds_do_not_take(test, device):
     """Content in several worlds is independent worlds by default: a model of two worlds builds without
     coupled_worlds, and one of a single world builds as before. Independent worlds refuse, naming coupled_worlds=True as
-    an alternative: AL-IPC contact and MAS, which libuipc-warp's independent worlds do not take yet; a free particle and
-    a dynamic body of the global world, which every world would push; a global kinematic body with
+    an alternative: AL-IPC contact, which libuipc-warp's independent worlds do not take yet; a free particle and a
+    dynamic body of the global world, which every world would push; a global kinematic body with
     kinematic_motion="aim", an unknown too (with the jump it is fixed and builds); and a spring between two worlds. With
     coupled_worlds=True every one of them builds. adaptive_kappa=True builds with independent worlds, every world in a
-    stiffness range of its own (test_independent_worlds_take_their_own_stiffness_range). Of two worlds, one of which
+    stiffness range of its own (test_independent_worlds_take_their_own_stiffness_range), and so does
+    fem_preconditioner="mas", every world preconditioned as alone (test_worlds_mas.py). Of two worlds, one of which
     holds a static shape alone, one world moves, and the options are taken as for one world."""
 
     def box(builder):
@@ -956,7 +957,6 @@ def test_rejects_what_independent_worlds_do_not_take(test, device):
     test.assertIsNone(one._worlds)
     cases = (
         ("AL-IPC", box, None, {"contact_constitution": "al-ipc"}, r"contact_constitution='al-ipc' is not offered"),
-        ("MAS", soft, None, {"fem_preconditioner": "mas"}, r"fem_preconditioner='mas' is not offered"),
         ("global particle", box, particle, {}, r"particle 0 of the global world -1 is free"),
         ("global body", box, global_box, {}, r"body 2 .*of the global world -1 is a dynamic body"),
         ("global aim", box, global_pusher, {"kinematic_motion": "aim"}, r"global world -1 is a kinematic body.*'jump'"),
@@ -973,6 +973,8 @@ def test_rejects_what_independent_worlds_do_not_take(test, device):
     adaptive = newton.solvers.SolverIPC(_two_worlds(device, box), adaptive_kappa=True, kappa=None)
     test.assertTrue(adaptive._independent)
     test.assertEqual(adaptive.contact_stiffness(0.01).shape, (2,))
+    mas = newton.solvers.SolverIPC(_two_worlds(device, soft), fem_preconditioner="mas")
+    test.assertTrue(mas._independent)
     # one world that moves, the other a static shape alone: solved as one world, which takes the options
     builder = newton.ModelBuilder()
     builder.add_ground_plane()

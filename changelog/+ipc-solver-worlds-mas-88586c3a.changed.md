@@ -1,0 +1,1 @@
+Accept ``fem_preconditioner="mas"`` in ``SolverIPC`` with independent worlds, instead of refusing it: every world is preconditioned as the same world alone, because libuipc-warp builds MAS's levels once per world from that world's own particles, so a world takes the Newton and PCG iterations of its run alone. Needs libuipc-warp's MAS with independent worlds.
