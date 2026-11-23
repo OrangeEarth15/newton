@@ -17,6 +17,7 @@ Runs:
 - `python -m newton.examples cloth_hanging --width 128 --height 16 --solver style3d`
 - `python -m newton.examples cloth_hanging --width 128 --height 16 --solver xpbd`
 - `python -m newton.examples cloth_hanging --width 128 --height 16 --solver vbd`
+- `python -m newton.examples cloth_hanging --width 128 --height 16 --solver ipc`
 """
 
 import warp as wp
@@ -105,7 +106,7 @@ class Example:
                 "spring_kd": 1.0e0,
             }
 
-        else:  # self.solver_type == "vbd"
+        else:  # self.solver_type in ("vbd", "ipc")
             solver_params = {
                 "tri_ke": 1.0e3,
                 "tri_ka": 1.0e3,
@@ -137,6 +138,8 @@ class Example:
                 model=self.model,
                 iterations=self.iterations,
             )
+        elif self.solver_type == "ipc":
+            self.solver = newton.solvers.SolverIPC(self.model)
         else:  # self.solver_type == "vbd"
             self.solver = newton.solvers.SolverVBD(
                 model=self.model,
@@ -217,7 +220,7 @@ class Example:
             "--solver",
             help="Type of solver",
             type=str,
-            choices=["semi_implicit", "style3d", "xpbd", "vbd"],
+            choices=["semi_implicit", "style3d", "xpbd", "vbd", "ipc"],
             default="vbd",
         )
         parser.add_argument("--width", type=int, default=64, help="Cloth resolution in x.")

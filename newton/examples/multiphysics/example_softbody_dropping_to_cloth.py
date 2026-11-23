@@ -13,6 +13,7 @@ Success criteria:
 
 Runs:
 - `python -m newton.examples softbody_dropping_to_cloth`
+- `python -m newton.examples softbody_dropping_to_cloth --solver ipc`
 """
 
 import numpy as np
@@ -34,8 +35,8 @@ class Example:
         self.sim_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        if self.solver_type not in {"vbd", "coupled"}:
-            raise ValueError("The softbody dropping to cloth example supports the vbd and coupled solvers.")
+        if self.solver_type not in {"vbd", "coupled", "ipc"}:
+            raise ValueError("The softbody dropping to cloth example supports the vbd, coupled and ipc solvers.")
 
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
@@ -100,6 +101,8 @@ class Example:
         }
         if self.solver_type == "vbd":
             self.solver = SolverVBD(model=self.model, **vbd_kwargs)
+        elif self.solver_type == "ipc":
+            self.solver = newton.solvers.SolverIPC(self.model)
         else:
 
             def configure_soft_view(view: ModelView) -> None:
@@ -204,7 +207,7 @@ class Example:
             "--solver",
             help="Type of solver",
             type=str,
-            choices=["vbd", "coupled"],
+            choices=["vbd", "coupled", "ipc"],
             default="vbd",
         )
         parser.add_argument(

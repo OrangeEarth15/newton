@@ -33,8 +33,8 @@ class Example:
         self.iterations = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        if self.solver_type != "vbd":
-            raise ValueError("The hanging softbody example only supports the VBD solver.")
+        if self.solver_type not in ("vbd", "ipc"):
+            raise ValueError("The hanging softbody example supports the VBD and IPC solvers.")
 
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
@@ -76,12 +76,15 @@ class Example:
         self.model.soft_contact_kd = 0
         self.model.soft_contact_mu = 1.0
 
-        self.solver = newton.solvers.SolverVBD(
-            model=self.model,
-            iterations=self.iterations,
-            particle_enable_self_contact=False,
-            particle_enable_tile_solve=False,
-        )
+        if self.solver_type == "ipc":
+            self.solver = newton.solvers.SolverIPC(self.model)
+        else:
+            self.solver = newton.solvers.SolverVBD(
+                model=self.model,
+                iterations=self.iterations,
+                particle_enable_self_contact=False,
+                particle_enable_tile_solve=False,
+            )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -147,7 +150,7 @@ class Example:
             "--solver",
             help="Type of solver (only 'vbd' supports volumetric soft bodies)",
             type=str,
-            choices=["vbd"],
+            choices=["vbd", "ipc"],
             default="vbd",
         )
         return parser

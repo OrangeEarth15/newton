@@ -18,6 +18,7 @@ Runs:
 - `python -m newton.examples basic_dzhanibekov --solver xpbd`
 - `python -m newton.examples basic_dzhanibekov --solver mujoco`
 - `python -m newton.examples basic_dzhanibekov --solver kamino`
+- `python -m newton.examples basic_dzhanibekov --solver ipc`
 """
 
 import numpy as np
@@ -128,6 +129,10 @@ class Example:
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
             self.collision_pipeline = None
             self.contacts = None
+        elif self.solver_type == "ipc":
+            self.solver = newton.solvers.SolverIPC(self.model)
+            self.collision_pipeline = None
+            self.contacts = None
         else:
             raise ValueError(
                 f"Unknown solver type: {self.solver_type}. Choose from 'vbd', 'xpbd', 'mujoco', or 'kamino'."
@@ -218,8 +223,8 @@ if __name__ == "__main__":
         "--solver",
         type=str,
         default="vbd",
-        choices=["vbd", "xpbd", "mujoco", "kamino"],
-        help="Solver type: vbd (default), xpbd, mujoco, or kamino.",
+        choices=["vbd", "xpbd", "mujoco", "kamino", "ipc"],
+        help="Solver type: vbd (default), xpbd, mujoco, kamino, or ipc.",
     )
     viewer, args = newton.examples.init(parser)
     newton.examples.run(Example(viewer, args), args)

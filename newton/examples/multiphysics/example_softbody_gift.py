@@ -147,8 +147,8 @@ class Example:
         self.iterations = 15
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        if self.solver_type != "vbd":
-            raise ValueError("The falling gift example only supports the VBD solver.")
+        if self.solver_type not in ("vbd", "ipc"):
+            raise ValueError("The falling gift example supports the VBD and IPC solvers.")
 
         # Simulation parameters
         self.base_height = 20.0
@@ -218,15 +218,18 @@ class Example:
         self.model.soft_contact_kd = 5.0e-1
         self.model.soft_contact_mu = 1.0
 
-        self.solver = newton.solvers.SolverVBD(
-            model=self.model,
-            iterations=self.iterations,
-            particle_enable_self_contact=True,
-            particle_self_contact_margin=0.04,
-            particle_self_contact_gap=0.02,
-            particle_topological_contact_filter_threshold=1,
-            particle_enable_tile_solve=False,
-        )
+        if self.solver_type == "ipc":
+            self.solver = newton.solvers.SolverIPC(self.model)
+        else:
+            self.solver = newton.solvers.SolverVBD(
+                model=self.model,
+                iterations=self.iterations,
+                particle_enable_self_contact=True,
+                particle_self_contact_margin=0.04,
+                particle_self_contact_gap=0.02,
+                particle_topological_contact_filter_threshold=1,
+                particle_enable_tile_solve=False,
+            )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -296,7 +299,7 @@ class Example:
             "--solver",
             help="Type of solver (only 'vbd' supports this example)",
             type=str,
-            choices=["vbd"],
+            choices=["vbd", "ipc"],
             default="vbd",
         )
         return parser

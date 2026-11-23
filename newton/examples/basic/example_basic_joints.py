@@ -19,6 +19,7 @@ Runs:
 - `python -m newton.examples basic_joints --solver xpbd`
 - `python -m newton.examples basic_joints --solver vbd`
 - `python -m newton.examples basic_joints --solver kamino`
+- `python -m newton.examples basic_joints --solver ipc`
 """
 
 import warp as wp
@@ -217,6 +218,8 @@ class Example:
             solver_config.scc.bilateral_solve_interval = 5
             solver_config.scc.inequality_sweeps_per_iteration = 1
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
+        elif self.solver_type == "ipc":
+            self.solver = newton.solvers.SolverIPC(self.model)
         else:
             self.solver = newton.solvers.SolverXPBD(self.model)
 
@@ -362,7 +365,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--solver",
         type=str,
-        choices=["xpbd", "vbd", "kamino"],
+        choices=["xpbd", "vbd", "kamino", "ipc"],
         default="xpbd",
         help="Solver backend to use.",
     )

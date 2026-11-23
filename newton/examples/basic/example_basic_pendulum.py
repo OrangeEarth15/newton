@@ -14,6 +14,7 @@ Runs:
 - `python -m newton.examples basic_pendulum`
 - `python -m newton.examples basic_pendulum --solver xpbd`
 - `python -m newton.examples basic_pendulum --solver kamino`
+- `python -m newton.examples basic_pendulum --solver ipc`
 """
 
 import warp as wp
@@ -95,6 +96,8 @@ class Example:
             solver_config.scc.max_alternating_iterations = 8
             solver_config.scc.bilateral_solve_interval = 8
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
+        elif self.solver_type == "ipc":
+            self.solver = newton.solvers.SolverIPC(self.model)
         else:
             self.solver = newton.solvers.SolverXPBD(self.model)
 
@@ -184,7 +187,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--solver",
         type=str,
-        choices=["xpbd", "kamino"],
+        choices=["xpbd", "kamino", "ipc"],
         default="xpbd",
         help="Solver backend to use.",
     )

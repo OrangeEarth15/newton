@@ -34,8 +34,9 @@ SUBSTEPS = {
     "mujoco": 10,
     "featherstone": 50,
     "kamino": 5,
+    "ipc": 10,
 }
-SOLVER_CHOICES = ("xpbd", "vbd", "mujoco", "featherstone", "kamino")
+SOLVER_CHOICES = ("xpbd", "vbd", "mujoco", "featherstone", "kamino", "ipc")
 NATIVE_CONTACT_SOLVERS = {"mujoco", "kamino"}
 
 
@@ -154,6 +155,8 @@ class Example:
             solver_config = newton.solvers.SolverKamino.Config.from_model(self.model)
             solver_config.use_collision_detector = True
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
+        elif self.solver_name == "ipc":
+            self.solver = newton.solvers.SolverIPC(self.model)
         else:
             raise ValueError(f"Unknown solver: {self.solver_name}")
         self.state_0 = self.model.state()
