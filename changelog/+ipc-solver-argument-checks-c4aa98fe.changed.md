@@ -1,0 +1,1 @@
+Check SolverIPC's thickness, cloth_strain_rate and joint_strength_ratio as kinematic_strength_ratio is checked, finite and not negative, and shape_segments as a whole number of at least 3; ValueError names the argument. A negative strain rate made the membrane's energy unbounded below, and 0 segments failed deep in the triangulation.

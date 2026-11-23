@@ -350,6 +350,36 @@ def test_rejects_body_variants(test, device):
             )
 
 
+def test_rejects_invalid_arguments(test, device):
+    """Refuse the constructor's arguments that no simulation takes, naming each: a thickness, a cloth strain rate or
+    a strength ratio of joints or kinematic aims that is negative or not finite (a negative strain rate makes the
+    membrane's energy unbounded below), and fewer than 3 segments around a round shape, or a fraction of one. Their
+    smallest valid values are taken."""
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity()))
+    builder.add_shape_sphere(body, radius=0.1)
+    _cloth(builder, 4, 0.05, 1.0)
+    model = builder.finalize(device=device)
+    for name, values in (
+        ("thickness", (-0.01, float("nan"))),
+        ("cloth_strain_rate", (-5.0, float("inf"))),
+        ("joint_strength_ratio", (-1.0, float("nan"))),
+        ("kinematic_strength_ratio", (-1.0, float("inf"))),
+    ):
+        for value in values:
+            with test.subTest(name=name, value=value):
+                with test.assertRaisesRegex(ValueError, f"{name} must be finite and not negative, got {value}"):
+                    newton.solvers.SolverIPC(model, **{name: value})
+    for value in (2, 0, 7.5):
+        with test.subTest(shape_segments=value):
+            with test.assertRaisesRegex(
+                ValueError, f"shape_segments must be a whole number of at least 3, got {value}"
+            ):
+                newton.solvers.SolverIPC(model, shape_segments=value)
+    newton.solvers.SolverIPC(model, thickness=0.0, cloth_strain_rate=0.0, joint_strength_ratio=0.0, shape_segments=3)
+
+
 def test_rejects_gradients(test, device):
     """Reject a model finalized with gradients, as SolverSteel does."""
     builder = _two_particles()
@@ -1202,6 +1232,7 @@ for name, func in (
     ("test_control_activations_refused_at_eager_steps", test_control_activations_refused_at_eager_steps),
     ("test_rejects_unsupported_joints", test_rejects_unsupported_joints),
     ("test_rejects_body_variants", test_rejects_body_variants),
+    ("test_rejects_invalid_arguments", test_rejects_invalid_arguments),
     ("test_rejects_gradients", test_rejects_gradients),
     ("test_warns_of_velocity_limits", test_warns_of_velocity_limits),
     ("test_rejects_surface_velocity", test_rejects_surface_velocity),

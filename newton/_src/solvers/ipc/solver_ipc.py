@@ -567,10 +567,16 @@ class SolverIPC(SolverBase, CouplingInterface):
         _check_choice("contact_constitution", contact_constitution, ("ipc", "al-ipc"))
         _check_choice("fem_preconditioner", fem_preconditioner, ("diag", "mas"))
         _check_choice("kinematic_motion", kinematic_motion, ("jump", "aim"))
-        if not (np.isfinite(kinematic_strength_ratio) and kinematic_strength_ratio >= 0.0):
-            raise ValueError(
-                f"SolverIPC: kinematic_strength_ratio must be finite and not negative, got {kinematic_strength_ratio}."
-            )
+        for name, value in (
+            ("thickness", thickness),
+            ("cloth_strain_rate", cloth_strain_rate),
+            ("joint_strength_ratio", joint_strength_ratio),
+            ("kinematic_strength_ratio", kinematic_strength_ratio),
+        ):
+            if not (np.isfinite(value) and value >= 0.0):
+                raise ValueError(f"SolverIPC: {name} must be finite and not negative, got {value}.")
+        if not (np.isfinite(shape_segments) and shape_segments >= 3 and shape_segments == int(shape_segments)):
+            raise ValueError(f"SolverIPC: shape_segments must be a whole number of at least 3, got {shape_segments}.")
         if kinematic_motion == "aim" and contact_constitution == "al-ipc":
             # libuipc's AL-IPC frame checks animated aims with a test of its own (animation_reach_target), which has
             # not been tested on this path
