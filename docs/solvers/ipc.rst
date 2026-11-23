@@ -107,8 +107,9 @@ Not supported, and rejected when the solver is constructed:
 :class:`NotImplementedError` for a damping, drag or lift coefficient that is
 not finite, a negative damping or drag, and a damped bending edge without a
 positive ``edge_rest_length`` (see :ref:`ipc-damping`), springs of a negative
-rest length or stiffness or that join a particle to itself, mimic constraints, enabled MuJoCo
-equality rows that no loop joint holds (see :ref:`ipc-joints`), tendons, muscles, body variants (:meth:`~newton.ModelBuilder.add_body_variants`:
+rest length or stiffness or that join a particle to itself, mimic relations and
+tendons that :ref:`ipc-joint-terms` refuses, enabled MuJoCo equality rows that
+no loop joint or mimic relation holds (see :ref:`ipc-joints`), muscles, body variants (:meth:`~newton.ModelBuilder.add_body_variants`:
 the solver triangulates the shapes when it builds the solve and finds its own
 contacts, so it cannot follow a variant row's shape), non-zero triangle or
 tetrahedron activations, the joint types
@@ -980,6 +981,99 @@ distances, or a single bound, is an inequality, which a stitch, a spring about
 one rest length, cannot hold: rejected, and so are drives on a distance joint
 (SolverXPBD reads its gains as the compliance of the distance).
 
+.. _ipc-joint-terms:
+
+Mimic joints, fixed tendons and joint friction
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Three inputs act on joint coordinates rather than on one joint's bodies: a mimic
+relation, MuJoCo's fixed tendon and the friction of a joint. libuipc's joints
+have none of them. The solver gives each to libuipc-warp as a potential of a
+linear combination :math:`L = c_0 + \sum_t c_t q_t` of the coordinates of
+revolute and prismatic joints (and of D6 joints of one axis), which are
+Newton's ``joint_q``:
+
+- A mimic relation, :attr:`~newton.Model.joint_mimic_joint` with
+  :attr:`~newton.Model.joint_mimic_coeffs`
+  (:meth:`~newton.ModelBuilder.set_joint_mimic`) or a row of the deprecated
+  ``constraint_mimic_*``, is the penalty :math:`\tfrac{K}{2} L^2` of
+  :math:`L = q_f - c_1 q_r - c_0`, with a joint's :math:`K`:
+  ``joint_strength_ratio`` times the mass of the dynamic bodies the two joints
+  join. Like a joint it gives under a load: a torque :math:`\tau` on the
+  follower moves it off the relation by :math:`\tau \Delta t^2 / K`. It acts
+  while both joints (and its row) are enabled. It holds the multi-turn
+  coordinates, so a gear follows its reference through any number of turns. A
+  follower keeps its own drive, which adds to the relation, as in Newton's
+  solvers but Featherstone, which drops it.
+- A fixed tendon of MuJoCo (``model.mujoco.tendon_*``, which the MJCF and USD
+  importers fill) is :math:`L = \sum_i c_i q_i` over its joints. Its
+  ``stiffness`` is a spring toward its ``springlength``, with no force inside
+  the length's range when it is one (the length at ``model.joint_q`` for -1), as
+  SolverMuJoCo reads it. Its ``damping``, ``armature`` and ``frictionloss`` act
+  on :math:`L` as a joint's do on its coordinate. Its limit (``limited``,
+  ``range``) is a joint's limit (:ref:`ipc-joints`) with the limit's stiffness
+  in force space: ``tendon_limit_ke`` where it is given so, else what Newton's
+  MuJoCo solver reports for its ``solreflimit`` :math:`(T, \zeta)` and
+  ``solimplimit``, :math:`1 / (T^2 \zeta^2 w)` with :math:`w` the tendon's
+  inverse inertia at ``model.joint_q`` times one less the impedance's width,
+  and its damping :math:`2 / (T w)` past a bound with
+  ``enable_joint_limit_damping``. ``solreffriction`` and ``solimpfriction`` are
+  not read: the friction is smoothed below ``eps_velocity`` instead.
+- The friction of a revolute or prismatic joint, the ``joint_friction`` of its
+  degree of freedom, is a force against the joint's motion of magnitude
+  ``joint_friction`` (MuJoCo's ``frictionloss``): libuipc's smoothed friction
+  on the step's increment of the coordinate. Below ``eps_velocity`` it is
+  viscous, so a joint under a load below its friction creeps, at about
+  ``eps_velocity`` times the load over twice the friction.
+
+**Friction and the Newton tolerances.** The Newton loop ends when its step,
+by its largest component, is below ``newton_velocity_tol`` :math:`\Delta t`
+(for the rotation of a rigid body, ``newton_transrate_tol`` :math:`\Delta t`).
+Within its smoothing band the friction is stiff, :math:`2 F / (\epsilon_v
+\Delta t)` on the coordinate with :math:`\epsilon_v` = ``eps_velocity``, so
+Newton's steps there are short: from rest the first moves a joint under a load
+:math:`f` above its friction :math:`F` at about :math:`f / (2 F)` times
+``eps_velocity``, and for a load near :math:`F` the later ones in the band are
+shorter still. At SolverIPC's default tolerances (0.05 m/s and 0.1 per second,
+against 0.01) the loop would end inside the band, and a joint loaded beyond its
+friction would creep instead of sliding: a box on a hinge with a friction of
+2 N m under 3 N m would turn at 7.5e-3 rad/s instead of speeding up. A model
+with friction on any joint, a ``joint_friction`` other than 0 on any degree of
+freedom whatever the joint's type, or on a fixed tendon, therefore takes both
+tolerances at 0.4 ``eps_velocity`` (4e-3 by default) where they are left at
+their default. That is the largest at which a hinge or a slider under 1.5 times
+its friction slides at :math:`(f - F) / I` to 1% whatever its axis: measured, up
+to 0.7 ``eps_velocity`` with the axis along a coordinate axis and up to 0.4 with
+it along a diagonal, where a step's largest component is the smallest part of
+it. A load nearer the friction needs a lower tolerance: 1.2 :math:`F` slides at
+0.25 ``eps_velocity`` whatever the axis, 1.1 :math:`F` at 0.1. The cost is
+Newton iterations: a chain of four hinged links with friction falling next to a
+box resting on the ground takes 5.5 per step instead of 4.0, a hinge sliding
+under 1.5 :math:`F` takes 4.4 (instead of the one in which it creeps), and a
+hinge its friction holds takes one, as before. A tolerance given is kept, and
+one above 0.4 ``eps_velocity`` gets a :class:`~newton.NewtonWarning`; a
+tolerance passed at its default value counts as left at its default.
+
+The terms' forces through each joint are part of the joint's
+``BODY_PARENT_F`` (:ref:`ipc-body-observables`). New coefficients of the mimic
+relations and tendons (``CONSTRAINT_PROPERTIES``, ``TENDON_PROPERTIES``), and
+the mimic penalties of new masses, take effect in place at
+``notify_model_changed``, also in graphs captured before; a change of which
+joints they hold, or of which joints have friction, builds the solve again.
+
+MuJoCo's JOINT equality rows that the importers turned into mimic relations
+are held by those relations where a row repeats its relation: the same two
+joints and the same linear coefficients. A row with terms of higher order, or
+with other coefficients than its mimic row, is refused as an equality row that
+no joint holds.
+
+Refused (:class:`NotImplementedError`): Newton's own tendons
+(:meth:`~newton.ModelBuilder.add_tendon`, routed through space), MuJoCo's
+spatial tendons and actuators that drive a tendon, a tendon over a joint that is
+no revolute or prismatic joint, a tendon's limit ``margin`` other than 0, a
+mimic relation of a joint of more than one coordinate, and the friction of free
+and distance joints.
+
 .. _ipc-refused-joints:
 
 Refused joints
@@ -994,8 +1088,8 @@ ball joint has neither (its ball driving term, constitution 27, is only
 registered); a negative ``joint_armature``, and one other than 0 on a ball or
 free joint, an inertia about three axes or a mass without weight, which
 libuipc's driving term of one coordinate cannot hold; ``joint_friction`` other
-than 0, since libuipc's joints have no friction and dry friction, a bounded
-force, is no quadratic potential; a negative ``joint_effort_limit`` on a driven
+than 0 on a ball, free or distance joint (that of revolute and prismatic joints
+is :ref:`ipc-joint-terms`); a negative ``joint_effort_limit`` on a driven
 degree of freedom, and with ``enable_joint_effort_limit=False`` one below
 Newton's default 1e6, since the quadratic drive cannot bound its force.
 
@@ -1296,7 +1390,8 @@ Tolerances
 A step ends once the Newton update moves no vertex by more than
 ``newton_velocity_tol * dt``. When a body should gain less velocity per step
 than ``newton_velocity_tol`` (slow sliding against friction, for example), lower
-the tolerance, or the body creeps at about ``eps_velocity`` instead.
+the tolerance, or the body creeps at about ``eps_velocity`` instead. A model with
+friction on its joints or tendons takes lower defaults (:ref:`ipc-joint-terms`).
 
 .. _ipc-d-hat:
 

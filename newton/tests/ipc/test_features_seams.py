@@ -106,9 +106,11 @@ def _muscle(builder, x):
         builder.add_muscle([a, b], [wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0)], 1.0, 0.5, 0.1, 1.0, 0.0)
 
 
-def _mimic(builder, x):
+def _vector_mimic(builder, x):
+    """A mimic of two D6 joints of two linear axes each, which SolverIPC refuses (one coordinate per relation)."""
     a, b = _link(builder, x), _link(builder, x + 0.3)
-    joints = [builder.add_joint_revolute(-1, link, axis=newton.Axis.Y) for link in (a, b)]
+    axes = [D(axis=newton.Axis.X), D(axis=newton.Axis.Y)]
+    joints = [builder.add_joint_d6(-1, link, linear_axes=axes) for link in (a, b)]
     builder.add_articulation(joints)
     builder.set_joint_mimic(joints[1], joints[0])
 
@@ -179,23 +181,22 @@ _MOVED = (
     (
         "tendons (joint_terms)",
         (_tendon,),
-        "SolverIPC: the model has 1 tendons; remove them. SolverIPC does not simulate tendons.",
+        "SolverIPC: the model has 1 tendons of Newton's own (ModelBuilder.add_tendon); remove them. SolverIPC simulates "
+        "MuJoCo's fixed tendons, whose length is a linear combination of joint coordinates, and no tendon routed "
+        "through space.",
     ),
     (
-        "mimic constraints (joint_terms)",
-        (_mimic,),
-        "SolverIPC: the model has 1 mimic constraints; remove them. SolverIPC does not enforce mimic constraints.",
-    ),
-    (
-        "friction of a revolute joint (joint_terms)",
-        (_revolute(friction=0.5),),
-        "SolverIPC: DOF 0 of the REVOLUTE joint 0 has joint_friction 0.5; set it to 0. libuipc's joints have no "
-        "friction.",
+        "a mimic of joints of several coordinates (joint_terms)",
+        (_vector_mimic,),
+        "SolverIPC: the follower of the mimic joint 1 is the D6 joint 1, which has more or other coordinates than one "
+        "angle or one distance; mimic revolute and prismatic joints (or D6 joints of one axis). SolverIPC holds a mimic "
+        "relation of one coordinate.",
     ),
     (
         "friction of a free joint (joint_terms)",
         (_free(3, friction=0.75),),
-        "SolverIPC: DOF 3 of the FREE joint 0 has joint_friction 0.75; set it to 0. libuipc's joints have no friction.",
+        "SolverIPC: DOF 3 of the FREE joint 0 has joint_friction 0.75; set it to 0. SolverIPC holds the friction of "
+        "revolute and prismatic joints only, as a force on one coordinate.",
     ),
     (
         "a universal joint (universal)",
@@ -271,7 +272,8 @@ _MOVED = (
 
 def test_moved_refusals_keep_their_messages(test, device):
     """Every refusal a feature module holds raises NotImplementedError with the message it had before the modules
-    held it, when the solver is built: tendons, mimic constraints and the friction of revolute and free joints
+    held it, when the solver is built: Newton's tendons, mimics of joints of several coordinates and the friction of
+    free joints
     (joint_terms), D6 joints of no libuipc joint and distance joints with a range (universal), the friction,
     armature, drives, damping, target mode and limits of ball and free joints (ball) and springs and attachments with a
     negative damping (damping). (contact_damping's is in test_contact_damping_takes_none_only.)"""
@@ -283,9 +285,9 @@ def test_moved_refusals_keep_their_messages(test, device):
 # (name, contents, options, the first message): models that trip two refusals, of which the one that fired before the
 # feature modules held them still fires first
 _ORDER = (
-    ("tendons before muscles", (_muscle, _tendon), {}, "the model has 1 tendons;"),
-    ("muscles before mimic constraints", (_mimic, _muscle), {}, "the model has 1 muscles;"),
-    ("mimic constraints before equality rows", (_equality, _mimic), {}, "the model has 1 mimic constraints;"),
+    ("tendons before muscles", (_muscle, _tendon), {}, "the model has 1 tendons of Newton's own"),
+    ("muscles before mimic constraints", (_vector_mimic, _muscle), {}, "the model has 1 muscles;"),
+    ("mimic constraints before equality rows", (_equality, _vector_mimic), {}, "the follower of the mimic joint 2"),
     (
         "the lowest DOF of a category, a ball joint's",
         (_ball(1, friction=0.25), _revolute(friction=0.5)),
@@ -293,16 +295,16 @@ _ORDER = (
         "DOF 1 of the BALL joint 0 has joint_friction 0.25;",
     ),
     (
-        "the lowest DOF of a category, a revolute joint's",
-        (_revolute(friction=0.5), _ball(1, friction=0.25)),
+        "the lowest DOF of a category, a free joint's",
+        (_free(0, friction=0.5), _ball(1, friction=0.25)),
         {},
-        "DOF 0 of the REVOLUTE joint 0 has joint_friction 0.5;",
+        "DOF 0 of the FREE joint 0 has joint_friction 0.5;",
     ),
     (
         "friction before armature",
-        (_ball(0, armature=0.5), _revolute(friction=0.5)),
+        (_ball(0, armature=0.5), _free(3, friction=0.5)),
         {},
-        "DOF 3 of the REVOLUTE joint 1 has joint_friction 0.5;",
+        "DOF 6 of the FREE joint 1 has joint_friction 0.5;",
     ),
     (
         "a negative armature before the drives of ball joints",
@@ -343,9 +345,9 @@ _ORDER = (
     ("joint types before D6 joints", (_d6("", "XY"), _rod()), {}, "joint 1 is a ROD joint;"),
     (
         "joints before springs",
-        (_spring(damping=0.5), _revolute(friction=0.5)),
+        (_spring(damping=0.5), _free(3, friction=0.5)),
         {},
-        "DOF 0 of the REVOLUTE joint 0 has joint_friction 0.5;",
+        "DOF 3 of the FREE joint 0 has joint_friction 0.5;",
     ),
     (
         "the damping of springs before their rest lengths",
@@ -400,13 +402,15 @@ def test_refusals_at_notify(test, device):
         test.assertEqual(str(caught.exception), message)
 
     mimic = model.joint_mimic_joint.numpy()  # the two hinges, and the free joints of the attachments' bodies
-    mimic[1] = 0
+    mimic[2] = 0
     model.joint_mimic_joint.assign(mimic)
     refused(
         flags.CONSTRAINT_PROPERTIES,
-        "SolverIPC: the model has 1 mimic constraints; remove them. SolverIPC does not enforce mimic constraints.",
+        "SolverIPC: the follower of the mimic joint 2 is the FREE joint 2, which has more or other coordinates than "
+        "one angle or one distance; mimic revolute and prismatic joints (or D6 joints of one axis). SolverIPC holds a "
+        "mimic relation of one coordinate.",
     )
-    mimic[1] = -1
+    mimic[2] = -1
     model.joint_mimic_joint.assign(mimic)
     model.attachment_particle_body_stiffness.assign(np.array([-1.0, 1.0e4], np.float32))
     model.attachment_particle_body_damping.assign(np.array([0.0, -2.0], np.float32))
@@ -423,12 +427,12 @@ def test_refusals_at_notify(test, device):
     model.attachment_particle_body_stiffness.assign(np.array([1.0e4, 1.0e4], np.float32))
     solver.notify_model_changed(flags.CONSTRAINT_PROPERTIES)
     friction = model.joint_friction.numpy()
-    friction[1] = 0.5
+    friction[5] = 0.5  # the fourth degree of freedom of the free joint 2
     model.joint_friction.assign(friction)
     refused(
         flags.JOINT_DOF_PROPERTIES,
-        "SolverIPC: DOF 1 of the REVOLUTE joint 1 has joint_friction 0.5; set it to 0. libuipc's joints have no "
-        "friction.",
+        "SolverIPC: DOF 5 of the FREE joint 2 has joint_friction 0.5; set it to 0. SolverIPC holds the friction of "
+        "revolute and prismatic joints only, as a force on one coordinate.",
     )
     model.joint_friction.assign(np.zeros_like(friction))
     model.spring_damping.assign(np.array([-0.5], np.float32))

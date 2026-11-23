@@ -181,8 +181,9 @@ def _unprojected_equality_rows(model: Model) -> np.ndarray:
     Newton's importers turn a CONNECT row into a BALL joint and a WELD row into a FIXED joint (a BALL joint when its
     torquescale is 0), outside every articulation and between the row's two bodies (or its body and the world), keep
     the row and link it to the joint (``equality_constraint_target_kind`` JOINT and ``equality_constraint_target``);
-    SolverIPC simulates the joint as every other. A row that names another joint, or none, is not held; neither is a
-    JOINT row, whose mimic constraint SolverIPC refuses."""
+    SolverIPC simulates the joint as every other. A JOINT row that repeats the mimic row the importers made of it is
+    held by that mimic relation (``features.joint_terms.held_equality_rows``). A row that names another joint, or none,
+    is not held, and neither is another JOINT row (a polynomial of higher order, other coefficients)."""
     mujoco = getattr(model, "mujoco", None)
     count = int(getattr(mujoco, "equality_constraint_count", 0) or 0) if mujoco is not None else 0
     if count == 0:
@@ -213,6 +214,7 @@ def _unprojected_equality_rows(model: Model) -> np.ndarray:
                 and child[j] >= 0
                 and {int(parent[j]), int(child[j])} == {int(body1[row]), int(body2[row])}
             )
+    projected |= features.joint_terms.held_equality_rows(model)  # JOINT rows that repeat a mimic relation
     return np.flatnonzero(enabled & ~projected)
 
 
@@ -229,7 +231,7 @@ def _check_constraints(model: Model, options: features.FeatureOptions) -> None:
             f"{' and more' if len(rows) > 8 else ''}); import CONNECT and WELD equalities with "
             "convert_mjc_equality_constraints=True, model the constraints with Newton's joints, or disable the rows "
             "(equality_constraint_enabled). SolverIPC enforces only the rows that Newton's importers turn into loop "
-            "joints, through those joints."
+            "joints, through those joints, and the JOINT rows that repeat a linear mimic relation it holds."
         )
 
 
@@ -370,9 +372,14 @@ class SolverIPC(SolverBase, CouplingInterface):
         newton_max_iter: Maximum Newton iterations per step.
         newton_velocity_tol: Newton convergence tolerance on ``max |dx| / dt``
             [m/s]. Default (``None``): 0.05, or 5e-4 for an entry of a coupled
-            solver with proxies (see :ref:`ipc-coupling`).
+            solver with proxies (see :ref:`ipc-coupling`), at most 0.4
+            ``eps_velocity`` for a model with friction on any joint or tendon,
+            so that a joint loaded beyond its friction slides, at a cost of
+            Newton iterations (5.5 per step instead of 4.0 on a chain of hinges
+            with friction; see :ref:`ipc-joint-terms`).
         newton_transrate_tol: Newton convergence tolerance on ``max |dA| / dt`` of
-            rigid bodies [1/s]. Default (``None``): 0.1, or 1e-3 with proxies.
+            rigid bodies [1/s]. Default (``None``): 0.1, or 1e-3 with proxies, at
+            most 0.4 ``eps_velocity`` with friction on any joint or tendon.
         linear_tol_rate: Relative PCG tolerance on ``r^T M^-1 r``.
         line_search_max_iter: Maximum backtracking trials per Newton iteration.
         semi_implicit: Enable libuipc's semi-implicit early exit after

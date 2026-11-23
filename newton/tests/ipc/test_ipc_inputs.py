@@ -74,11 +74,18 @@ def _hinged_pair(builder):
 
 
 def test_rejects_mimic_constraints(test, device):
-    """Reject mimic relations, before the revolute joints they need."""
+    """Reject a mimic relation of joints of more than one coordinate (two D6 joints of two linear axes), before the
+    joints' own checks; a relation of revolute or prismatic joints is a joint coordinate term (test_joint_terms.py)."""
     builder = newton.ModelBuilder()
-    j0, j1 = _hinged_pair(builder)
-    builder.set_joint_mimic(j1, j0)
-    _rejects(test, builder, "mimic", device)
+    axes = [newton.ModelBuilder.JointDofConfig(axis=a) for a in (newton.Axis.X, newton.Axis.Y)]
+    joints = []
+    for i in range(2):
+        b = builder.add_link(xform=wp.transform(wp.vec3(0.5 * i, 0.0, 1.0), wp.quat_identity()))
+        builder.add_shape_box(b, hx=0.1, hy=0.1, hz=0.1)
+        joints.append(builder.add_joint_d6(-1, b, linear_axes=axes))
+    builder.add_articulation(joints)
+    builder.set_joint_mimic(joints[1], joints[0])
+    _rejects(test, builder, "the follower of the mimic joint 1 is the D6 joint 1", device)
 
 
 def _equality_row(enabled):
@@ -101,7 +108,7 @@ def _equality_row(enabled):
 def test_rejects_equality_constraints(test, device):
     """Reject an enabled MuJoCo equality row that no loop joint holds instead of letting the body fall through it;
     a row disabled when the solver is built and enabled later is refused when notify_model_changed reports
-    CONSTRAINT_PROPERTIES, and so is a mimic relation set later."""
+    CONSTRAINT_PROPERTIES; a mimic relation of two hinges set later builds the solve again with its term."""
     _rejects(test, _equality_row(True), "1 enabled equality rows that no loop joint holds \\(rows \\[0\\]\\)", device)
     model = _equality_row(False).finalize(device=device)
     solver = newton.solvers.SolverIPC(model)
@@ -113,9 +120,10 @@ def test_rejects_equality_constraints(test, device):
     _hinged_pair(builder)
     model = builder.finalize(device=device)
     solver = newton.solvers.SolverIPC(model)
+    test.assertIsNone(solver._joint_terms)
     model.joint_mimic_joint.assign(np.array([-1, 0], np.int32))
-    with test.assertRaisesRegex(NotImplementedError, "1 mimic constraints; remove them"):
-        solver.notify_model_changed(newton.ModelFlags.CONSTRAINT_PROPERTIES)
+    solver.notify_model_changed(newton.ModelFlags.CONSTRAINT_PROPERTIES)
+    test.assertEqual(len(solver._joint_terms.items), 1)
 
 
 # Newton's importers turn the weld into a FIXED joint between the boxes and the connect into a BALL joint from the world
@@ -282,7 +290,8 @@ def test_control_activations_refused_at_eager_steps(test, device):
 
 def test_rejects_unsupported_joints(test, device):
     """Reject the joints SolverIPC does not simulate, naming what libuipc lacks: rod joints, drives, passive springs,
-    limits and armature on ball and free joints, joint friction, and a negative effort limit on a driven joint."""
+    limits and armature on ball and free joints, the friction of a free joint, and a negative effort limit on a driven
+    joint."""
 
     def hinged(add, **dof):
         builder = newton.ModelBuilder()
@@ -305,13 +314,16 @@ def test_rejects_unsupported_joints(test, device):
     free = newton.ModelBuilder()
     _box_body(free, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
     free.joint_target_mode[0] = int(newton.JointTargetMode.POSITION)
+    free_friction = newton.ModelBuilder()
+    _box_body(free_friction, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
+    free_friction.joint_friction[3] = 0.5
     for name, builder, pattern in (
         ("rod", hinged(rod), "joint 0 is a ROD joint; use SolverVBD or SolverKamino for rods"),
         ("free drive", free, "FREE joint 0 has the target mode POSITION"),
         ("ball drive", hinged(ball, target_ke=10.0), "BALL joint 0 has target_ke 10.0.*; set the gains"),
         ("ball limit", hinged(ball, limit_lower=-0.5), "limits revolute and prismatic joints only"),
         ("ball armature", hinged(ball, armature=0.01), "armature of revolute and prismatic joints only"),
-        ("friction", hinged(revolute, friction=0.5), "joint_friction 0.5; set it to 0. libuipc's joints have no"),
+        ("free friction", free_friction, "DOF 3 of the FREE joint 0 has joint_friction 0.5; set it to 0"),
         ("effort limit", hinged(revolute, target_ke=100.0, effort_limit=-5.0), "joint_effort_limit -5.0"),
     ):
         with test.subTest(name):

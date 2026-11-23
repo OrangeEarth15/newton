@@ -249,12 +249,12 @@ def test_notify_rebuilds_for_new_joints(test, device):
 def test_notify_checks_the_joints_again(test, device):
     """Each of the four flags of the joints' degrees of freedom (JOINT_DOF_PROPERTIES, JOINT_DOF_FORCE_PROPERTIES,
     JOINT_DOF_INERTIAL_PROPERTIES, JOINT_REFERENCE_POSE_PROPERTIES) checks the joints again against what SolverIPC
-    rejects: joint friction given to the hinge in place is refused by name, and once it is 0 again the same
+    rejects: a negative armature given to the hinge in place is refused by name, and once it is 0 again the same
     notification is taken and keeps the solve. The other flags do not check the joints."""
     model = _pendulum(device)
     solver = newton.solvers.SolverIPC(model, **_OPTIONS)
     engine = solver._engine
-    friction = _set("joint_friction", 0, 0.5)
+    armature = _set("joint_armature", 0, -0.5)
     for flag in (
         newton.ModelFlags.JOINT_DOF_PROPERTIES,
         newton.ModelFlags.JOINT_DOF_FORCE_PROPERTIES,
@@ -262,13 +262,13 @@ def test_notify_checks_the_joints_again(test, device):
         newton.ModelFlags.JOINT_REFERENCE_POSE_PROPERTIES,
     ):
         with test.subTest(flag=flag.name):
-            friction(model)
-            with test.assertRaisesRegex(NotImplementedError, "DOF 0 of the REVOLUTE joint 0 has joint_friction 0.5"):
+            armature(model)
+            with test.assertRaisesRegex(NotImplementedError, "DOF 0 of the REVOLUTE joint 0 has joint_armature -0.5"):
                 solver.notify_model_changed(flag)
-            _set("joint_friction", 0, 0.0)(model)
+            _set("joint_armature", 0, 0.0)(model)
             solver.notify_model_changed(flag)
             test.assertIs(solver._engine, engine)
-    friction(model)
+    armature(model)
     solver.notify_model_changed(newton.ModelFlags.BODY_INERTIAL_PROPERTIES | newton.ModelFlags.SHAPE_PROPERTIES)
 
 
