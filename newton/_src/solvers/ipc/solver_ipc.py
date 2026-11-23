@@ -699,6 +699,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._aims = False
         self._kinematic_strength_ratio = float(kinematic_strength_ratio)
         self._dt = self._config.dt  # of the last step, which grow() solves again
+        self._observables = None  # the observables container of the last step (None: none), which prepare reads
         self._clamp_checked_dt = None  # the step size whose stiffness the clamp warning was last checked for
         self._clamp_reported = False
         self._engine = None
@@ -757,6 +758,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         if observables.is_requested(SolverBase.ObservableKind.CONTACT_F) and not self._contact_output:
             self._contact_output = True
             _make_contact_export(self)
+        features.observables.allocate(self, observables)  # what the observables module needs for the kinds
         return observables
 
     def _contact_term_capacity(self) -> int:
@@ -1165,7 +1167,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             control = self._control_of_model()
         if not self.model.device.is_capturing:
             self._check_activations(control)
-        self._dt, self._control = dt, control
+        self._dt, self._control, self._observables = dt, control, observables
         self._report_clamp(dt)
         self._load(state_in)
         if self._start_unchecked:

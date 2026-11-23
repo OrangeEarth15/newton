@@ -35,14 +35,17 @@ nothing:
   into the groups of an engine before into those of the new one.
 - ``prepare(solver, state_in, control, dt)``: in every step, after the solver has written the step's inputs (external
   forces, joint terms, stitch and body stiffness) and before the frame is enqueued; inside a graph capture too, so a
-  module only enqueues device work there.
+  module only enqueues device work there. ``solver._observables`` is then the observables container the step was
+  given (None for none).
 - ``finish(solver, state_out, observables)``: in every step whose ``state_out`` is written (a step that fails in some
   independent worlds alone among them), after ``state_out`` and the observables.
 - ``notify(solver, flags)``: in ``notify_model_changed``, after the solver's own checks and before it decides whether
   to build the solve again: returns whether the solve must be built again.
 
 The universal module is also offered the joints that ``joints._map_joints`` cannot map onto a libuipc joint
-(``universal.take_d6``, ``universal.take_distance``).
+(``universal.take_d6``, ``universal.take_distance``), and the observables module gives the supported observables
+(``observables.supported``) and allocates, in ``SolverIPC.observables`` after Newton's allocation and outside any graph
+capture, what the kinds a container requests need of it (``observables.allocate``).
 """
 
 from __future__ import annotations

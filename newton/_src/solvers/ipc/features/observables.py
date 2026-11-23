@@ -5,8 +5,8 @@
 (``SOLVER_RESIDUAL``) and its contacts and their forces (``CONTACT_F``).
 
 The solver's ``SUPPORTED_OBSERVABLES`` holds ``KINDS`` and ``STATUS``, and its ``supported_observables`` is
-``supported(solver)``; Newton's ``SolverBase`` refuses an observable outside it. The hooks are those of ``features``
-(its docstring).
+``supported(solver)``; Newton's ``SolverBase`` refuses an observable outside it. ``SolverIPC.observables`` calls
+``allocate`` for every container it allocates. The hooks are those of ``features`` (its docstring).
 """
 
 from __future__ import annotations
@@ -35,6 +35,12 @@ def supported(solver: SolverIPC) -> frozenset[str]:
     if config is not None and config.contact_constitution == "al-ipc":
         return frozenset({solver.ObservableKind.STATUS})
     return solver.SUPPORTED_OBSERVABLES
+
+
+def allocate(solver: SolverIPC, observables: SolverBase.Observables) -> None:
+    """Nothing: what a container requests is allocated by ``SolverBase.observables`` and, for ``CONTACT_F``, by the
+    solver. ``SolverIPC.observables`` calls this for every container it allocates, after them and outside any graph
+    capture, with the container (``observables.is_requested`` gives what it asks for)."""
 
 
 def check(model: Model, options: FeatureOptions, at: str) -> None:

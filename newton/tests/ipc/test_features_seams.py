@@ -3,8 +3,8 @@
 
 """The points at which SolverIPC meets the features libuipc has no term for (``newton._src.solvers.ipc.features``):
 the refusals the feature modules hold, with their messages and in their order, the joints the universal module is
-offered, the modules' hooks at build, step and notify, the supported observables and the ``contact_damping``
-option."""
+offered, the modules' hooks at build, step and notify, the supported observables and their allocation, the step's
+observables a module reads, and the ``contact_damping`` option."""
 
 import contextlib
 import types
@@ -678,6 +678,62 @@ def test_supported_observables_come_from_the_observables_module(test, device):
     supported.assert_called_with(solver)
 
 
+def test_observables_module_allocates_for_every_container(test, device):
+    """SolverIPC.observables() calls the observables module's allocate once for every container it allocates, with the
+    solver and the container, after Newton's allocation (the arrays of the kinds the container requests exist then)
+    and after the solver's own (the contact records of CONTACT_F), also for a container that requests nothing."""
+    model = _falling_box(device)
+    solver = newton.solvers.SolverIPC(model)
+    kind = solver.ObservableKind
+    calls = []
+
+    def allocate(owner, observables):
+        allocated = (observables.status is not None, observables.contact_f is not None)
+        calls.append((owner, observables, allocated, solver._contact_export is not None))
+
+    contacts = newton.Contacts(16, 4, device=device)
+    with mock.patch.object(features.observables, "allocate", side_effect=allocate):
+        status = solver.observables({kind.STATUS})
+        test.assertEqual(calls, [(solver, status, (True, False), False)])
+        forces = solver.observables({kind.STATUS, kind.CONTACT_F}, contacts=contacts)
+        nothing = solver.observables(set())
+    test.assertEqual(
+        calls,
+        [
+            (solver, status, (True, False), False),
+            (solver, forces, (True, True), True),
+            (solver, nothing, (False, False), True),
+        ],
+    )
+
+
+def test_prepare_reads_the_steps_observables(test, device):
+    """When the feature modules' prepare runs, solver._observables is the observables container the step was given,
+    or None for a step given none: in eager steps and in captured ones (at their capture), whatever the step before
+    was given; and None before the first step."""
+    model = _falling_box(device)
+    solver = newton.solvers.SolverIPC(model)
+    test.assertIsNone(solver._observables)
+    first = solver.observables({solver.ObservableKind.STATUS})
+    second = solver.observables({solver.ObservableKind.STATUS})
+    seen = []
+    s0, s1 = model.state(), model.state()
+    with mock.patch.object(
+        features.observables, "prepare", side_effect=lambda owner, *args: seen.append(owner._observables)
+    ):
+        for given in (first, None, second, first):
+            solver.step(s0, s1, None, None, 0.01, observables=given)
+            s0, s1 = s1, s0
+        for given in (None, second):
+            with wp.ScopedCapture(device=device) as capture:
+                solver.step(s0, s1, None, None, 0.01, observables=given)
+            wp.capture_launch(capture.graph)
+            s0, s1 = s1, s0
+    test.assertEqual(
+        [id(o) if o is not None else None for o in seen], [id(first), None, id(second), id(first), None, id(second)]
+    )
+
+
 def _falling_box(device):
     """A box 0.4 m above the ground."""
     builder = newton.ModelBuilder()
@@ -723,6 +779,8 @@ for name, func in (
         "test_supported_observables_come_from_the_observables_module",
         test_supported_observables_come_from_the_observables_module,
     ),
+    ("test_observables_module_allocates_for_every_container", test_observables_module_allocates_for_every_container),
+    ("test_prepare_reads_the_steps_observables", test_prepare_reads_the_steps_observables),
     ("test_contact_damping_takes_none_only", test_contact_damping_takes_none_only),
 ):
     add_function_test(TestSolverIPCFeatureSeams, name, func, devices=devices)
