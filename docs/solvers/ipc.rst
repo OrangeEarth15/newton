@@ -373,7 +373,8 @@ and one that contact holds back ends the step short of its pose and goes on
 toward it in the next. The first step after the solver is built, the step after
 a :meth:`~newton.solvers.SolverIPC.reset` that selects its world and the step
 after a failed one place it at its pose instead, without a sweep. ``kappa`` is
-not used, and ``adaptive_kappa`` is refused. The step ends on AL-IPC's own
+not used: a ``kappa`` other than the default and ``adaptive_kappa`` are
+refused. The step ends on AL-IPC's own
 criterion, the paper's progress weight, which has no Newton residual:
 ``SOLVER_RESIDUAL`` is not offered, and without contact a step takes
 ``semi_implicit_k_min`` Newton iterations (the paper's ``K_min``), and one with

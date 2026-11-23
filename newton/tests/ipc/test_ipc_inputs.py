@@ -380,6 +380,33 @@ def test_rejects_invalid_arguments(test, device):
     newton.solvers.SolverIPC(model, thickness=0.0, cloth_strain_rate=0.0, joint_strength_ratio=0.0, shape_segments=3)
 
 
+def test_rejects_arguments_the_options_do_not_read(test, device):
+    """Refuse a value other than the default of an argument that the other options leave unread, as adaptive_kappa is
+    refused under AL-IPC: kappa under contact_constitution="al-ipc", which has no barrier, and
+    kinematic_strength_ratio under kinematic_motion="jump", which has no aims. Their defaults are taken, and so are
+    the values where they are read."""
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    _box_body(builder, (0.0, 0.0, 0.5), (0.1, 0.1, 0.1))
+    model = builder.finalize(device=device)
+    al = {"contact_constitution": "al-ipc"}
+    for kwargs, pattern in (
+        (
+            {**al, "kappa": 1.0e8},
+            "kappa sets the stiffness of the barrier, which contact_constitution='al-ipc' does not",
+        ),
+        ({**al, "kappa": None}, "kappa sets the stiffness of the barrier"),
+        ({**al, "adaptive_kappa": True}, "adaptive_kappa sets the stiffness of the barrier"),
+        ({"kinematic_strength_ratio": 50.0}, "kinematic_strength_ratio sets the strength of the aims of"),
+    ):
+        with test.subTest(**{k: str(v) for k, v in kwargs.items()}):
+            with test.assertRaisesRegex(ValueError, pattern):
+                newton.solvers.SolverIPC(model, **kwargs)
+    newton.solvers.SolverIPC(model, **al)
+    newton.solvers.SolverIPC(model, kappa=1.0e8)
+    newton.solvers.SolverIPC(model, kinematic_motion="aim", kinematic_strength_ratio=50.0)
+
+
 def test_rejects_gradients(test, device):
     """Reject a model finalized with gradients, as SolverSteel does."""
     builder = _two_particles()
@@ -1233,6 +1260,7 @@ for name, func in (
     ("test_rejects_unsupported_joints", test_rejects_unsupported_joints),
     ("test_rejects_body_variants", test_rejects_body_variants),
     ("test_rejects_invalid_arguments", test_rejects_invalid_arguments),
+    ("test_rejects_arguments_the_options_do_not_read", test_rejects_arguments_the_options_do_not_read),
     ("test_rejects_gradients", test_rejects_gradients),
     ("test_warns_of_velocity_limits", test_warns_of_velocity_limits),
     ("test_rejects_surface_velocity", test_rejects_surface_velocity),

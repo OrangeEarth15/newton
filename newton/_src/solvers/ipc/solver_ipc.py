@@ -124,6 +124,10 @@ _UIPC_WARP_INSTALL = "pip install git+https://github.com/OrangeEarth15/libuipc-w
 _MAX_REGROWS = 8
 # libuipc's strength ratio of a joint (the default of its joints' apply_to): the default joint_strength_ratio
 _JOINT_STRENGTH_RATIO = 100.0
+# the default barrier stiffness kappa [Pa], and libuipc's strength ratio of a soft transform constraint, the default
+# kinematic_strength_ratio
+_KAPPA = 1.0e9
+_KINEMATIC_STRENGTH_RATIO = 100.0
 # MuJoCo's CONNECT and WELD equality types (mjtEq), and the target kind with which Newton's importers link an equality
 # row to the loop joint they turned it into (MjcEqualityTargetKind.JOINT); neither has a public name in Newton
 _EQ_CONNECT, _EQ_WELD = 0, 1
@@ -341,7 +345,8 @@ class SolverIPC(SolverBase, CouplingInterface):
             libuipc's contact resistance, which libuipc and its pyuipc front
             end would clamp into libuipc's range (see ``adaptive_kappa``).
             ``None``, with ``adaptive_kappa``, takes the range's lower bound,
-            libuipc's default. Not used with ``contact_constitution="al-ipc"``.
+            libuipc's default. Not used with ``contact_constitution="al-ipc"``,
+            which refuses a value other than the default.
         adaptive_kappa: Take the contact stiffness as libuipc and its pyuipc
             front end do: inside libuipc's scene-adaptive range, which
             follows each step's ``dt`` (see :ref:`ipc-contact`); with independent
@@ -398,7 +403,8 @@ class SolverIPC(SolverBase, CouplingInterface):
             ``state_in`` before the step) or ``"aim"`` (it moves inside the
             step toward the pose prescribed for its end; see :ref:`ipc-kinematic-bodies`).
         kinematic_strength_ratio: The strength ratio of the aims of
-            ``kinematic_motion="aim"`` (libuipc's soft transform constraint).
+            ``kinematic_motion="aim"`` (libuipc's soft transform constraint);
+            ``"jump"`` refuses a value other than the default.
         enable_joint_limit_damping: Damp a revolute or prismatic joint that
             starts a step past one of its limits with ``joint_limit_kd``, as
             Featherstone and SemiImplicit do (see :ref:`ipc-joints`); with False
@@ -513,7 +519,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         self,
         model: Model,
         *,
-        kappa: float | None = 1.0e9,
+        kappa: float | None = _KAPPA,
         adaptive_kappa: bool = False,
         d_hat: float | None = None,
         thickness: float = 0.0,
@@ -535,7 +541,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         contact_constitution: str = "ipc",
         fem_preconditioner: str = "diag",
         kinematic_motion: str = "jump",
-        kinematic_strength_ratio: float = 100.0,
+        kinematic_strength_ratio: float = _KINEMATIC_STRENGTH_RATIO,
         enable_joint_limit_damping: bool = True,
         enable_joint_effort_limit: bool = True,
     ):
@@ -583,10 +589,22 @@ class SolverIPC(SolverBase, CouplingInterface):
             raise NotImplementedError(
                 "SolverIPC: kinematic_motion='aim' is not offered with contact_constitution='al-ipc'."
             )
+        # a value other than the default of an argument that the other options leave unread
         if adaptive_kappa and contact_constitution == "al-ipc":
             raise ValueError(
                 "SolverIPC: adaptive_kappa sets the stiffness of the barrier, which contact_constitution='al-ipc' "
-                "does not use."
+                "does not use; leave it False."
+            )
+        if kappa != _KAPPA and contact_constitution == "al-ipc":
+            raise ValueError(
+                f"SolverIPC: kappa sets the stiffness of the barrier, which contact_constitution='al-ipc' does not use; "
+                f"leave it at its default {_KAPPA:g}, got {kappa}."
+            )
+        if kinematic_strength_ratio != _KINEMATIC_STRENGTH_RATIO and kinematic_motion == "jump":
+            raise ValueError(
+                "SolverIPC: kinematic_strength_ratio sets the strength of the aims of kinematic_motion='aim', which "
+                f"kinematic_motion='jump' does not use; leave it at its default {_KINEMATIC_STRENGTH_RATIO:g}, got "
+                f"{kinematic_strength_ratio}."
             )
         if kappa is None and not adaptive_kappa:
             raise ValueError("SolverIPC: kappa=None, libuipc's default stiffness, needs adaptive_kappa=True.")
