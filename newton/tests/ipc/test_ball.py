@@ -465,7 +465,7 @@ def test_refusals(test, device):
     body = builder.add_body(xform=wp.transform((0.0, 0.0, 1.0), wp.quat_identity()))
     builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
     builder.joint_armature[3] = 0.5
-    with test.assertRaisesRegex(NotImplementedError, "armature of revolute, prismatic and ball joints only"):
+    with test.assertRaisesRegex(NotImplementedError, "armature of revolute, prismatic, ball and universal joints only"):
         newton.solvers.SolverIPC(builder.finalize(device=device))
 
 

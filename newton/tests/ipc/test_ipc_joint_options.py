@@ -232,7 +232,8 @@ def test_distance_joint_swings_as_a_pendulum(test, device):
     """A distance joint of one length L is libuipc's soft vertex stitch of rest length L between its joint frames'
     origins: a sphere hanging 1 m from the world on it at its centre swings 0.02 rad as implicit Euler integrates the
     linearized point-mass pendulum, step by step to 1e-3 of its amplitude, and stays at L within the ball joint's
-    penalty. A distance joint with a range or a single bound is refused."""
+    penalty. A distance joint with a range or a single bound is no stitch: the universal module takes it
+    (test_universal_range), and refuses one whose lower bound is above its upper."""
     L, theta0, g, h = 1.0, 0.02, 10.0, 1.0e-3
     model = _distance_pendulum(device, L, theta0, L, L, gravity=g)
     solver = newton.solvers.SolverIPC(model, **_CONVERGED)
@@ -249,8 +250,11 @@ def test_distance_joint_swings_as_a_pendulum(test, device):
     np.testing.assert_allclose(np.linalg.norm(offset, axis=1), L, rtol=0.0, atol=1e-6)
     for lower, upper in ((0.5, 1.0), (-1.0, 1.0), (0.5, -1.0)):
         with test.subTest(bounds=(lower, upper)):
-            with test.assertRaisesRegex(NotImplementedError, "give both bounds one value, or make both negative"):
-                newton.solvers.SolverIPC(_distance_pendulum(device, L, 0.0, lower, upper))
+            solver = newton.solvers.SolverIPC(_distance_pendulum(device, L, 0.0, lower, upper))
+            test.assertEqual(len(solver._distance_rows), 0)
+            np.testing.assert_array_equal(solver._ranges.joints, [0])
+    with test.assertRaisesRegex(NotImplementedError, "the lower bound above the upper"):
+        newton.solvers.SolverIPC(_distance_pendulum(device, L, 0.0, 1.0, 0.5))
 
 
 def test_distance_joint_between_bodies(test, device):
@@ -391,7 +395,7 @@ def test_armature_is_implicit_euler(test, device):
     builder = newton.ModelBuilder()
     _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
     builder.joint_armature[3] = 0.01  # the free joint's first angular degree of freedom
-    with test.assertRaisesRegex(NotImplementedError, "armature of revolute, prismatic and ball joints only"):
+    with test.assertRaisesRegex(NotImplementedError, "armature of revolute, prismatic, ball and universal joints only"):
         newton.solvers.SolverIPC(builder.finalize(device=device))
 
 
@@ -482,8 +486,10 @@ def test_joint_options_change_nothing_unused(test, device):
 
 
 def test_rejects_d6_joints_libuipc_lacks(test, device):
-    """The D6 joints that lock what no libuipc joint locks are refused, naming what they lock: two angular axes, three linear axes, one linear and one angular; and three angular axes that are not
-    orthonormal, and drives and limits on the D6 joints that become a ball joint or no joint."""
+    """The D6 joints that lock what no joint of SolverIPC locks are refused, naming what they lock: three linear axes,
+    one linear and one angular; and two or three angular axes that are not orthonormal, and drives and limits on the D6
+    joints that become a ball joint or no joint. (Two orthonormal angular axes are a universal joint, which the
+    universal module takes: test_universal_range.)"""
     D = newton.ModelBuilder.JointDofConfig
 
     def model(linear=(), angular=(), **dof):
@@ -497,7 +503,7 @@ def test_rejects_d6_joints_libuipc_lacks(test, device):
 
     skew = (1.0, 1.0, 0.0)
     for name, m, pattern in (
-        ("universal", model(angular="XY"), "has 0 linear and 2 angular axes.*lock 3 translations and 1 rotations"),
+        ("skew universal", model(angular=("X", skew)), "angular axes of the D6 joint 0 are not orthonormal"),
         ("translations", model(linear="XYZ"), "has 3 linear and 0 angular axes.*lock 0 translations and 3 rotations"),
         ("cylindrical", model(linear="X", angular="X"), "has 1 linear and 1 angular axes.*lock 2 translations"),
         ("skew axes", model(angular=("X", skew, "Z")), "angular axes of the D6 joint 0 are not orthonormal"),

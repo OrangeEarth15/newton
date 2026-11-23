@@ -84,7 +84,9 @@ The solver simulates:
   with drives, passive springs and damping, limits, armature and
   :attr:`~newton.Control.joint_f` (see :ref:`ipc-joints`); ``joint_q`` and
   ``joint_qd`` are written at every step. D6 joints that lock what one of these
-  locks, or nothing, and distance joints of one length or none.
+  locks, or nothing; universal joints (D6 joints of two angular axes, see
+  :ref:`ipc-universal-joints`); distance joints of one length, of a range of
+  lengths, or none.
 - external forces: :attr:`~newton.State.particle_f`,
   :attr:`~newton.State.body_f` and :attr:`~newton.Control.joint_f`, held
   constant over the step as libuipc holds its external forces (a constant
@@ -1073,11 +1075,49 @@ projections of the joint frames' offset. ``joint_f`` of a D6 joint of three
 angular axes is Featherstone's generalized force: a torque along the dual basis
 of the axes as the coordinates carry them, and with linear axes a force along
 them on the child's joint frame, the parent taking the reaction on the same
-line. Other D6 joints (two angular axes, which lock one rotation, or linear and
-angular axes together but three and three) lock what no libuipc joint locks, and
-three axes that are not orthonormal have no coordinates in Newton's
-decomposition: both are rejected, and so are drives, springs, damping and limits
-on the D6 joints that become a ball or no joint.
+line. Two orthonormal angular axes and no linear one are a universal joint
+(:ref:`ipc-universal-joints`). Other D6 joints (linear and angular axes together
+but three and three) lock what no joint of SolverIPC locks, and angular axes that
+are not orthonormal have no coordinates in Newton's decomposition: both are
+rejected, and so are drives, springs, damping and limits on the D6 joints that
+become a ball or no joint.
+
+.. _ipc-universal-joints:
+
+Universal joints
+~~~~~~~~~~~~~~~~
+
+A D6 joint of two angular axes and no linear one is a universal (Cardan) joint:
+the child turns about the parent's ``axis_0`` by the angle :math:`q_0`, then
+about the carried ``axis_1`` by :math:`q_1`. libuipc's joints lock no rotation,
+two or three; libuipc-warp's universal joint locks one. It holds the joint
+frames' origins together, as a ball joint does, and locks the child's
+``axis_1`` perpendicular to the parent's ``axis_0``, with the energy
+:math:`K (u_0 \cdot w_1)^2` of the two axes as the bodies carry them: against a
+turn about ``axis_0 x axis_1`` it is as stiff as a fixed joint. :math:`K` is a
+ball joint's, ``joint_strength_ratio`` times the mass of the dynamic bodies it
+joins. Its angles are
+:math:`q_0 = \operatorname{atan2}(M_{21}, M_{11})` and
+:math:`q_1 = \operatorname{atan2}(M_{02}, M_{00})`, :math:`M_{ab}` the cosine
+between the parent's axis :math:`a` and the child's axis :math:`b` of the basis
+``(axis_0, axis_1, axis_0 x axis_1)``: the angles :func:`newton.eval_ik`
+computes, also where the penalty lets the lock give a little.
+
+Each angle takes the terms of its degree of freedom as a revolute joint's angle
+takes them (:ref:`ipc-joints`): the drive, passive spring and damping, exact for
+the step's integrator; the armature; the effort limit, decided at the start of
+every step (where the drive's force exceeds it, a constant torque of that size
+replaces the drive for the step); the limits, libuipc's cubic penalty, with
+``joint_limit_kd`` while the angle starts a step past one; and ``joint_f``, a
+torque on the angle held over the step. ``joint_friction`` :math:`F` is
+libuipc's smoothed friction on the step's increment of the angle: it resists the
+angle's motion with the torque :math:`F` while the angle turns faster than the
+contact's ``eps_velocity`` (0.01 by default, taken in rad/s), and with less
+below it, so a joint under a smaller load creeps at about ``eps_velocity`` times
+the ratio of the load to :math:`F`. The angles are multi-turn, as a revolute
+joint's: ``joint_q`` holds them after every step and continues them past
+:math:`\pi`, and where ``state_in.joint_q`` is not what the solver wrote, it
+picks their turns. ``joint_qd`` is :func:`newton.eval_ik`'s.
 
 .. _ipc-distance-joints:
 
@@ -1091,11 +1131,25 @@ libuipc's soft vertex stitch (constitution 22) of rest length ``L`` between two
 anchors of the bodies there (the world's fixed body for a parent of -1): the
 penalty of a ball joint, ``K/2 (|x_c - x_p| - L)^2`` with the same ``K``, and
 nothing when the joint is disabled. One whose bounds are both negative holds
-nothing, as Featherstone and SemiImplicit take every distance joint. Either
-takes ``joint_q``, ``joint_qd`` and ``joint_f`` as a free joint does. A range of
-distances, or a single bound, is an inequality, which a stitch, a spring about
-one rest length, cannot hold: rejected, and so are drives on a distance joint
-(SolverXPBD reads its gains as the compliance of the distance).
+nothing, as Featherstone and SemiImplicit take every distance joint.
+
+A distance joint whose bounds are a range ``[lower, upper]``, or one bound (a
+negative bound is none: a lower bound of 0, an upper bound at
+``newton.MAXVAL``), leaves the distance between the origins free inside the
+range and pushes it back outside with libuipc's cubic joint limit, the limit of
+every SolverIPC joint (:ref:`ipc-joints`): of stiffness ``joint_limit_ke`` of
+the first degree of freedom at 1 mm past a bound, so a load :math:`F` rests
+:math:`\sqrt{F \cdot 10^{-3} / k_l}` m past it (Newton's default ``limit_ke``
+1e4 N/m lets a weight of 78 N rest 2.8 mm past), with ``joint_limit_kd`` while
+the distance starts a step outside the range. A ``joint_limit_ke`` of 0 holds
+nothing. A lower bound above the upper is rejected.
+
+Every distance joint takes ``joint_q``, ``joint_qd`` and ``joint_f`` as a free
+joint does. Drives on a distance joint are rejected (SolverXPBD reads its gains
+as the compliance of the distance). A change of the bounds that turns a range
+into one length or none, or back, builds the solve again
+(``notify_model_changed`` with a degree-of-freedom flag); a change within a
+range is read at the next step.
 
 .. _ipc-joint-terms:
 
@@ -1198,18 +1252,19 @@ Refused joints
 ~~~~~~~~~~~~~~
 
 Rejected (:class:`NotImplementedError`), each for the libuipc constitution it
-lacks: distance joints and D6 joints but those above, which libuipc does not
-have, and rod joints, which no libuipc constitution between two affine bodies
-represents; drives, springs, damping and limits on free joints and on D6 joints
-that become ball joints, since libuipc's driving term and limits act on one
-hinge angle or one distance and the ball terms on a ball joint's rotation
-vector, not on a D6 joint's angles; limits on ball joints, which Newton does not
-define; a negative ``joint_armature``, and one other than 0 on a free joint, a
-mass without weight, or on a D6 joint that becomes a ball joint;
-``joint_friction`` other than 0 on a free or distance joint or on a D6 joint
-that becomes a free or ball joint (that of revolute and prismatic joints is
-:ref:`ipc-joint-terms`, that of ball joints :ref:`ipc-ball`); a negative
-``joint_effort_limit`` on a driven degree of freedom, and with
+lacks: D6 joints but those above, which neither libuipc nor libuipc-warp has, a
+distance joint whose lower bound is above its upper, and rod joints, which no
+libuipc constitution between two affine bodies represents; drives, springs,
+damping and limits on free joints and on D6 joints that become ball joints,
+since libuipc's driving term and limits act on one hinge angle or one distance
+and the ball terms on a ball joint's rotation vector, not on a D6 joint's
+angles; limits on ball joints, which Newton does not define; a negative
+``joint_armature``, and one other than 0 on a free joint, a mass without weight,
+or on a D6 joint that becomes a ball joint; ``joint_friction`` other than 0 on a
+free or distance joint or on a D6 joint that becomes a free or ball joint (that
+of revolute and prismatic joints is :ref:`ipc-joint-terms`, that of ball joints
+:ref:`ipc-ball`, that of universal joints :ref:`ipc-universal-joints`); a
+negative ``joint_effort_limit`` on a driven degree of freedom, and with
 ``enable_joint_effort_limit=False`` one below Newton's default 1e6, since the
 quadratic drive cannot bound its force.
 
@@ -1386,8 +1441,9 @@ and with 94% with ``body_kappa=1e8``, where it is within 1e-4 of the weight
 from the sixth step on: the hinge first pulls on the box's affine stretch.
 Newton's ``test_parent_force``, which expects the weight from the first step,
 fails with SolverIPC for this reason. The joint's terms are those of the
-libuipc joint it maps onto (its penalty, drive and limit) or the stitch of a
-distance joint, and its ``joint_f``: libuipc's joint torque or force for a
+libuipc joint it maps onto (its penalty, drive and limit), of a universal joint
+(its anchor, lock and the terms of its angles, ``joint_f`` included) or the
+stitch of a distance joint, and its ``joint_f``: libuipc's joint torque or force for a
 revolute or prismatic joint, and for a free, ball or distance joint or a D6
 joint of three angular axes the wrench the solver applies to the child, taken
 at the step's start as the step applies it. A free joint holds nothing and

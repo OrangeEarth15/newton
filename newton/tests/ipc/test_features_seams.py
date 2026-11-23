@@ -23,12 +23,13 @@ from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 D = newton.ModelBuilder.JointDofConfig
 _ARMATURE = (
-    "SolverIPC takes the armature of revolute, prismatic and ball joints only; that of a free joint, a mass without "
-    "weight and an inertia, has no term"
+    "SolverIPC takes the armature of revolute, prismatic, ball and universal joints only; that of a free joint, a "
+    "mass without weight and an inertia, has no term"
 )
 _DRIVE = (
     "set the gains, stiffness and damping to 0 and the target mode to NONE, and apply forces through Control.joint_f, "
-    "which acts on every joint. SolverIPC drives, springs and damps revolute, prismatic and ball joints only"
+    "which acts on every joint. SolverIPC drives, springs and damps revolute, prismatic, ball and universal joints "
+    "only"
 )
 _D6_BALL = (
     "SolverIPC takes the drives, springs, damping, armature and friction of a BALL joint, on the rotation vector of its "
@@ -203,29 +204,27 @@ _MOVED = (
         "friction of a free joint (joint_terms)",
         (_free(3, friction=0.75),),
         "SolverIPC: DOF 3 of the FREE joint 0 has joint_friction 0.75; set it to 0. SolverIPC holds the friction of "
-        "revolute, prismatic and ball joints only, as a force on one coordinate or a torque about each axis of a ball "
-        "joint.",
+        "revolute, prismatic, ball and universal joints only, as a force on one coordinate or a torque about each axis "
+        "of a ball joint or each angle of a universal joint.",
     ),
     (
-        "a universal joint (universal)",
-        (_d6("", "XY"),),
-        "SolverIPC: the D6 joint 0 has 0 linear and 2 angular axes; give it no axis, one axis, three angular axes, or "
-        "three linear and three angular axes. Its axes lock 3 translations and 1 rotations, which no libuipc joint "
-        "locks.",
+        "a universal joint of axes that are not orthonormal (universal)",
+        (_d6("", ("X", (1.0, 1.0, 0.0))),),
+        "SolverIPC: the angular axes of the D6 joint 0 are not orthonormal; make them orthonormal. Newton's "
+        "coordinates of a universal joint assume they are.",
     ),
     (
         "a cylindrical D6 joint (universal)",
         (_d6("X", "X"),),
-        "SolverIPC: the D6 joint 0 has 1 linear and 1 angular axes; give it no axis, one axis, three angular axes, or "
-        "three linear and three angular axes. Its axes lock 2 translations and 2 rotations, which no libuipc joint "
-        "locks.",
+        "SolverIPC: the D6 joint 0 has 1 linear and 1 angular axes; give it no axis, one axis, two or three angular "
+        "axes, or three linear and three angular axes. Its axes lock 2 translations and 2 rotations, which no joint of "
+        "SolverIPC locks.",
     ),
     (
-        "a distance with a range (universal)",
-        (_distance(0.4, 0.6),),
-        "SolverIPC: the DISTANCE joint 0 bounds its distance to [0.4000000059604645, 0.6000000238418579] (a negative "
-        "bound is none); give both bounds one value, or make both negative. libuipc's stitch, which holds the "
-        "distance, has one rest length and no range.",
+        "a distance whose lower bound is above its upper (universal)",
+        (_distance(0.6, 0.4),),
+        "SolverIPC: the DISTANCE joint 0 bounds its distance to [0.6000000238418579, 0.4000000059604645], the lower "
+        "bound above the upper; make the lower bound at most the upper, or negative for none.",
     ),
     (
         "friction of a D6 joint that becomes a ball joint (ball)",
@@ -288,10 +287,10 @@ _MOVED = (
 def test_moved_refusals_keep_their_messages(test, device):
     """Every refusal a feature module holds raises NotImplementedError with the message it had before the modules
     held it, when the solver is built: Newton's tendons, mimics of joints of several coordinates and the friction of
-    free joints (joint_terms), D6 joints of no libuipc joint and distance joints with a range (universal), the
-    armature, drives and target mode of free joints, the friction, armature, damping and limits of D6 joints that
-    become ball joints and the limits of ball joints (ball), and springs and attachments with a negative damping
-    (damping)."""
+    free joints (joint_terms), D6 joints that lock what no joint of SolverIPC locks, universal joints of axes that are
+    not orthonormal and distance joints whose lower bound is above the upper (universal), the armature, drives and
+    target mode of free joints, the friction, armature, damping and limits of D6 joints that become ball joints and
+    the limits of ball joints (ball), and springs and attachments with a negative damping (damping)."""
     for name, contents, message in _MOVED:
         with test.subTest(name):
             test.assertEqual(_refusal(test, _model(device, *contents)), message)
@@ -340,24 +339,24 @@ _ORDER = (
         "DOF 3 of the FREE joint 1 has target_ke 10.0,",
     ),
     (
-        "the axes of a D6 joint before a later universal joint",
-        (_d6("", ("X", (1.0, 1.0, 0.0), "Z")), _d6("", "XY")),
+        "the axes of a D6 joint before a later cylindrical one",
+        (_d6("", ("X", (1.0, 1.0, 0.0), "Z")), _d6("X", "X")),
         {},
         "the angular axes of the D6 joint 0 are not orthonormal;",
     ),
     (
-        "a universal joint before the axes of a later D6 joint",
-        (_d6("", "XY"), _d6("", ("X", (1.0, 1.0, 0.0), "Z"))),
+        "a cylindrical D6 joint before the axes of a later D6 joint",
+        (_d6("X", "X"), _d6("", ("X", (1.0, 1.0, 0.0), "Z"))),
         {},
-        "the D6 joint 0 has 0 linear and 2 angular axes;",
+        "the D6 joint 0 has 1 linear and 1 angular axes;",
     ),
     (
         "D6 joints before distance joints",
-        (_distance(0.4, 0.6), _d6("", "XY")),
+        (_distance(0.6, 0.4), _d6("X", "X")),
         {},
-        "the D6 joint 1 has 0 linear and 2 angular axes;",
+        "the D6 joint 1 has 1 linear and 1 angular axes;",
     ),
-    ("joint types before D6 joints", (_d6("", "XY"), _rod()), {}, "joint 1 is a ROD joint;"),
+    ("joint types before D6 joints", (_d6("X", "X"), _rod()), {}, "joint 1 is a ROD joint;"),
     (
         "joints before springs",
         (_spring(damping=0.5), _free(3, friction=0.5)),
@@ -447,8 +446,8 @@ def test_refusals_at_notify(test, device):
     refused(
         flags.JOINT_DOF_PROPERTIES,
         "SolverIPC: DOF 5 of the FREE joint 2 has joint_friction 0.5; set it to 0. SolverIPC holds the friction of "
-        "revolute, prismatic and ball joints only, as a force on one coordinate or a torque about each axis of a ball "
-        "joint.",
+        "revolute, prismatic, ball and universal joints only, as a force on one coordinate or a torque about each axis "
+        "of a ball joint or each angle of a universal joint.",
     )
     model.joint_friction.assign(np.zeros_like(friction))
     model.spring_damping.assign(np.array([-0.5], np.float32))
@@ -463,7 +462,7 @@ def test_taken_joints_are_left_to_their_module(test, device):
     joint of no libuipc joint maps onto no libuipc joint (kind D6) and is stored by nobody (FIXED), the solver lays
     out the libuipc joints of the others only and leaves the taken joint's joint_q as it was, and the joints' checks
     give the module its degrees of freedom (kind D6) without refusing its drive; a distance joint with a range is no
-    stitch. Their stubs take nothing (test_moved_refusals_keep_their_messages)."""
+    stitch. The universal module stores its joints' joint_q itself (test_universal_range), which is left out here."""
     import uipc_warp.arrays  # noqa: PLC0415
 
     model = _model(device, _revolute(target_ke=10.0), _d6("", "XY", 0, target_ke=10.0), _distance(0.4, 0.6))
@@ -476,6 +475,7 @@ def test_taken_joints_are_left_to_their_module(test, device):
         mock.patch.object(features.universal, "take_d6", side_effect=lambda *args: offered.append(args[1:])),
         mock.patch.object(features.universal, "take_distance", side_effect=lambda *args: offered.append(args[1:2])),
         mock.patch.object(features.universal, "joint_refusal", side_effect=record),
+        mock.patch.object(features.universal, "finish"),
     ):
         mapping = _map_joints(model)
         test.assertEqual(offered, [(1, 0, 2), (2,)])

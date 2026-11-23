@@ -86,8 +86,8 @@ def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
             dofs.refusal(
                 np.flatnonzero((armature != 0.0) & free),
                 what,
-                "set it to 0. SolverIPC takes the armature of revolute, prismatic and ball joints only; that of a free "
-                "joint, a mass without weight and an inertia, has no term",
+                "set it to 0. SolverIPC takes the armature of revolute, prismatic, ball and universal joints "
+                "only; that of a free joint, a mass without weight and an inertia, has no term",
             ),
             dofs.refusal(np.flatnonzero((armature != 0.0) & d6_ball), what, f"set it to 0. {_D6}"),
         )
@@ -115,8 +115,8 @@ def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
                 np.flatnonzero(free & driven),
                 drive,
                 "set the gains, stiffness and damping to 0 and the target mode to NONE, and apply forces through "
-                "Control.joint_f, which acts on every joint. SolverIPC drives, springs and damps revolute, prismatic "
-                "and ball joints only",
+                "Control.joint_f, which acts on every joint. SolverIPC drives, springs and damps revolute, prismatic, "
+                "ball and universal joints only",
             ),
             dofs.refusal(
                 np.flatnonzero(d6_ball & driven),
