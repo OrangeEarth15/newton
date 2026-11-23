@@ -1,0 +1,1 @@
+Take materials, rest shapes and particle flags changed in place in SolverIPC: notify_model_changed compares tet_materials, tri_materials, edge_bending_properties, tet_poses, tri_poses, edge_rest_angle and particle_flags at every notification, whatever its flags, and builds the solve again when one changed, where the solve kept the values it was built with.

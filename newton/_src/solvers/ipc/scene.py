@@ -915,6 +915,23 @@ def _scene_inputs_now(solver: SolverIPC) -> tuple:
     return (*materials, *(a.numpy().copy() for a in arrays))
 
 
+def _element_inputs_now(solver: SolverIPC) -> tuple:
+    """What the solve's elements were built from that Newton has no flag of its own for: the materials and rest
+    shapes of the tetrahedra, triangles and bending edges, and the particles' flags (which particles are fixed and
+    which elements the solver simulates). ``notify_model_changed`` compares them at every notification."""
+    model = solver.model
+    arrays = (
+        model.tet_materials,
+        model.tet_poses,
+        model.tri_materials,
+        model.tri_poses,
+        model.edge_bending_properties,
+        model.edge_rest_angle,
+        model.particle_flags,
+    )
+    return tuple(None if a is None else a.numpy().copy() for a in arrays)
+
+
 def _add_shapes_and_bodies(
     solver: SolverIPC, scene, elements: _ContactElements
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

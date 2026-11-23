@@ -22,6 +22,7 @@ from newton.tests.ipc._fixtures import (
     _run,
     _soft_cube,
     _stacking_cubes,
+    _steps,
 )
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
@@ -635,6 +636,76 @@ def test_notify_new_particle_masses(test, device):
     np.testing.assert_allclose(z, 1.0 + (10.0 / 2.0 - 9.81) * 0.01**2 * k * (k + 1) / 2.0, atol=1e-5)
 
 
+def _beam_cloth_particle(device):
+    """A soft beam of four 5 cm cells fixed at its left face, a 6 x 6 cloth of 1 cm cells fixed at its left edge and a
+    free particle, apart and without contact, sagging and falling under gravity."""
+    builder = newton.ModelBuilder()
+    builder.add_soft_grid(
+        pos=wp.vec3(0.0, 0.0, 1.0), rot=wp.quat_identity(), vel=wp.vec3(0.0, 0.0, 0.0), dim_x=4, dim_y=1, dim_z=1,
+        cell_x=0.05, cell_y=0.05, cell_z=0.05, density=1000.0, k_mu=3.4e4, k_lambda=1.6e5, k_damp=0.0, fix_left=True,
+    )  # fmt: skip
+    builder.add_cloth_grid(
+        pos=wp.vec3(0.0, 1.0, 1.0), rot=wp.quat_identity(), vel=wp.vec3(0.0, 0.0, 0.0), dim_x=6, dim_y=6,
+        cell_x=0.01, cell_y=0.01, mass=1.0e-4, tri_ke=1.0e2, tri_ka=1.0e2, tri_kd=0.0, edge_ke=1.0e-3, edge_kd=0.0,
+        fix_left=True,
+    )  # fmt: skip
+    builder.add_particle(wp.vec3(2.0, 0.0, 1.0), wp.vec3(0.0, 0.0, 0.0), mass=1.0e-2, radius=0.01)
+    return builder.finalize(device=device)
+
+
+def test_notify_takes_element_arrays_changed_in_place(test, device):
+    """The materials and rest shapes of tetrahedra, triangles and hinges and the particles' flags, which Newton has no
+    flag of its own for, are compared at every notification: each changed in place (stiffer tetrahedra and hinges, a
+    softer membrane, smaller rest shapes, other rest angles, a particle no longer ACTIVE), a notification of an
+    unrelated flag builds the solve again, and the next steps equal those of a new solver on the changed model, where
+    they leave the steps of the unchanged one; with nothing changed the notification keeps the solve."""
+
+    def scaled(factor, columns=None):
+        def change(values):
+            if columns is None:
+                return values * factor
+            values[:, columns] *= factor
+            return values
+
+        return change
+
+    def inactive(flags):
+        flags[-1] &= ~int(newton.ParticleFlags.ACTIVE)
+        return flags
+
+    changes = {
+        "tet_materials": scaled(100.0, [0, 1]),
+        "tet_poses": scaled(1.1),
+        "tri_materials": scaled(0.01, [0, 1]),
+        "tri_poses": scaled(1.1),
+        "edge_bending_properties": scaled(1.0e3, [0]),
+        "edge_rest_angle": lambda angles: angles + 0.3,
+        "particle_flags": inactive,
+    }
+    options = {"newton_velocity_tol": 1e-5, "linear_tol_rate": 1e-12, "semi_implicit": False}
+
+    def run(model, solver):
+        return _steps(model, solver, model.state(), 15, 0.01, None, lambda s: s.particle_q.numpy().copy())[0]
+
+    unchanged = _beam_cloth_particle(device)
+    before = run(unchanged, newton.solvers.SolverIPC(unchanged, **options))
+    for name, change in changes.items():
+        with test.subTest(name):
+            model = _beam_cloth_particle(device)
+            solver = newton.solvers.SolverIPC(model, **options)
+            engine = solver._engine
+            solver.notify_model_changed(newton.ModelFlags.BODY_PROPERTIES)
+            test.assertIs(solver._engine, engine)  # nothing changed: the same solve
+            array = getattr(model, name)
+            array.assign(change(array.numpy()))
+            solver.notify_model_changed(newton.ModelFlags.BODY_PROPERTIES)
+            test.assertIsNot(solver._engine, engine)
+            notified = run(model, solver)
+            fresh = run(model, newton.solvers.SolverIPC(model, **options))
+            np.testing.assert_allclose(notified, fresh, rtol=0.0, atol=1e-7)
+            test.assertGreater(np.abs(fresh - before).max(), 1e-4)
+
+
 def test_gravity_per_world(test, device):
     """A global particle and body fall with the global world's gravity (the last entry of Model.gravity) and a
     particle and body of world 0 with world 0's, as implicit Euler from rest. New gravities of both worlds, set with
@@ -702,6 +773,7 @@ for name, func in (
     ("test_notify_updates_gravity_and_inertia_in_place", test_notify_updates_gravity_and_inertia_in_place),
     ("test_notify_new_masses_without_joints", test_notify_new_masses_without_joints),
     ("test_notify_new_particle_masses", test_notify_new_particle_masses),
+    ("test_notify_takes_element_arrays_changed_in_place", test_notify_takes_element_arrays_changed_in_place),
     ("test_gravity_per_world", test_gravity_per_world),
     ("test_graph_outdated_after_long_solves", test_graph_outdated_after_long_solves),
     ("test_graph_outdated_takes_the_engines_guesses", test_graph_outdated_takes_the_engines_guesses),

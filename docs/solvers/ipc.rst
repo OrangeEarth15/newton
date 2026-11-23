@@ -204,6 +204,14 @@ lengths and areas of ``particle_q`` (libuipc's :math:`L_0` and :math:`\bar h`)
 where Newton's VBD takes ``edge_rest_length``; for a rest shape equal to the
 start the two agree.
 
+The solve holds copies of the materials and rest shapes of the tetrahedra,
+triangles and hinges (``tet_materials``, ``tri_materials``,
+``edge_bending_properties``, ``tet_poses``, ``tri_poses``, ``edge_rest_angle``)
+and of :attr:`~newton.Model.particle_flags`. Newton has no flag of its own for
+them, so :meth:`~newton.solvers.SolverIPC.notify_model_changed` compares them at
+every notification, whatever its flags, and builds the solve again when one
+changed in place.
+
 .. _ipc-contact:
 
 Contact

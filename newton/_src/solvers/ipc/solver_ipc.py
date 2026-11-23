@@ -80,6 +80,7 @@ from .scene import (
     _check_springs,
     _collect_planes,
     _default_d_hat,
+    _element_inputs_now,
     _engine_dyadic,
     _find_body_stiffness,
     _mass_inverse,
@@ -819,6 +820,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             scene.add_soft_transform_constraints(self._aim_bodies, (ratio, ratio))
         self._scene = scene
         self._scene_inputs = _scene_inputs_now(self)
+        self._element_inputs = _element_inputs_now(self)
         self._joint_inputs = _joint_inputs_now(self)
         self._control = None  # of the last step, whose joint terms a redone frame takes again
 
@@ -1880,7 +1882,10 @@ class SolverIPC(SolverBase, CouplingInterface):
         ``CONSTRAINT_PROPERTIES`` also checks the mimic constraints and MuJoCo's equality rows again, so that a row
         enabled since the solver was built that no loop joint holds is refused (:ref:`ipc-joints`). With
         ``kinematic_motion="aim"`` a change of a kinematic body's mass properties builds the solve again too, since its
-        soft transform constraint follows the masses it was built with. Copies from the host: not inside a graph
+        soft transform constraint follows the masses it was built with. Every notification, whatever its flags, compares
+        the arrays the elements were built from that Newton has no flag of its own for: ``tet_materials``,
+        ``tri_materials``, ``edge_bending_properties``, the rest shapes ``tet_poses``, ``tri_poses`` and
+        ``edge_rest_angle``, and ``particle_flags``; a change of any builds the solve again. Copies from the host: not inside a graph
         capture. With ``contact_constitution="al-ipc"`` new masses build the solve again too, since the AL-IPC penalty
         follows the masses it was built with.
         """
@@ -1890,6 +1895,11 @@ class SolverIPC(SolverBase, CouplingInterface):
             return
         model = self.model
         rebuild = bool(flags & ModelFlags.SHAPE_TYPE_AND_SOURCE)
+        # the elements' materials and rest shapes and the particles' flags, which no flag names, at every notification
+        rebuild |= any(
+            (a is None) != (b is None) or (a is not None and not np.array_equal(a, b))
+            for a, b in zip(_element_inputs_now(self), self._element_inputs, strict=True)
+        )
         if flags & (ModelFlags.SHAPE_PROPERTIES | ModelFlags.MODEL_PROPERTIES):
             now = _scene_inputs_now(self)
             rebuild |= len(now) != len(self._scene_inputs) or any(
