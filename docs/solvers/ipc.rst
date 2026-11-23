@@ -1073,9 +1073,13 @@ With a stiff barrier (large ``kappa``) a resting contact settles just inside
 ``d_hat``, so objects rest up to ``d_hat`` apart; lower ``d_hat`` for tighter
 contact. Without a ``d_hat`` argument the solver keeps it at or below a quarter
 of the smallest half-size of a colliding shape (a sphere's or capsule's radius,
-a box's smallest half extent, half of a mesh's thinnest extent) and half the
-median rest length of the edges of the cloth triangles and tetrahedra, chosen
-whenever the solve is built. A ``d_hat`` that spans a small shape lets it rest
+a box's smallest half extent, half of a mesh's thinnest extent) and of the
+smallest radius of a free particle that collides (an active particle on no cloth
+or tetrahedron, in a model whose shapes collide with particles or whose particles
+collide with each other), and half the median rest length of the edges of the
+cloth triangles and tetrahedra, chosen whenever the solve is built: a free
+particle of radius 1 mm rests less than 0.25 mm above the ground, where libuipc's
+0.01 m would rest it ten radii above. A ``d_hat`` that spans a small shape lets it rest
 up to its own size away and puts more contact pairs inside ``d_hat`` than the
 contact lists reserve, which a captured step reports as
 :attr:`~newton.solvers.SolverIPC.StatusBits.OVERFLOW`; one as long as the edges

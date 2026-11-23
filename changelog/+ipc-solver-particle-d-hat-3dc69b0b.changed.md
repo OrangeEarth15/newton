@@ -1,0 +1,1 @@
+Keep SolverIPC's default d_hat at or below a quarter of the smallest radius of a free particle that collides, as it does for small shapes: particles of radius 1 mm rested 9.95 mm, ten radii, above the ground with libuipc's 0.01 m, and rest less than 0.25 mm above it now. Pass d_hat to keep another value.

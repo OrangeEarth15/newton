@@ -29,8 +29,9 @@ if TYPE_CHECKING:
 
 
 # libuipc's barrier activation distance (contact/d_hat) [m]. The default d_hat stays below the shares of the smallest
-# colliding shape's half-size and of the median edge of the cloth and tetrahedral meshes at which the barrier spans the
-# feature: a contact list overflows from about half the radius of a small sphere, a mesh stretches from one edge length
+# colliding shape's half-size or free particle's radius and of the median edge of the cloth and tetrahedral meshes at
+# which the barrier spans the feature: a contact list overflows from about half the radius of a small sphere, a mesh
+# stretches from one edge length, and a free particle rests up to d_hat above what it rests on
 _D_HAT = 0.01
 _D_HAT_SHAPE_SHARE = 0.25
 _D_HAT_MESH_SHARE = 0.5
@@ -55,8 +56,10 @@ def _colliding_shapes(model: Model) -> np.ndarray:
 def _default_d_hat(model: Model) -> float:
     """libuipc's d_hat, or less when the model has smaller colliding features [m]: a quarter of the smallest half-size of
     a colliding shape other than a plane (a sphere's or capsule's radius, the smaller of a cylinder's or cone's radius
-    and half height, a box's or ellipsoid's smallest half extent, half of a mesh's thinnest extent that is not zero),
-    and half the median rest length of the edges of the cloth triangles and tetrahedra the solver simulates
+    and half height, a box's or ellipsoid's smallest half extent, half of a mesh's thinnest extent that is not zero) and
+    of the smallest radius of a free particle that collides (an ACTIVE particle on no cloth triangle or tetrahedron the
+    solver simulates, in a model whose shapes collide with particles or whose particles collide with each other), and
+    half the median rest length of the edges of the cloth triangles and tetrahedra the solver simulates
     (``_own_elements``)."""
     size = np.inf
     if model.shape_count:
@@ -77,9 +80,23 @@ def _default_d_hat(model: Model) -> float:
                 continue
             if half > 0.0:
                 size = min(size, float(half))
+    own_tris, own_tets, _ = _own_elements(model)
+    if model.particle_count:
+        meets_shapes = model.shape_count and np.any(
+            _colliding_shapes(model) & ((model.shape_flags.numpy() & int(ShapeFlags.COLLIDE_PARTICLES)) != 0)
+        )
+        if meets_shapes or (model.particle_count > 1 and model.particle_grid is not None):
+            on_mesh = np.zeros(model.particle_count, bool)
+            for cells, own, k in ((model.tri_indices, own_tris, 3), (model.tet_indices, own_tets, 4)):
+                if own.any():
+                    on_mesh[cells.numpy().reshape(-1, k)[own].reshape(-1)] = True
+            active = (model.particle_flags.numpy() & int(ParticleFlags.ACTIVE)) != 0
+            radius = model.particle_radius.numpy().astype(np.float64)[~on_mesh & active]
+            radius = radius[radius > 0.0]
+            if len(radius):
+                size = min(size, float(radius.min()))
     d_hat = min(_D_HAT, _D_HAT_SHAPE_SHARE * size)
     edges = []
-    own_tris, own_tets, _ = _own_elements(model)
     if own_tris.any():
         t = model.tri_indices.numpy().reshape(-1, 3)[own_tris]
         edges.append(np.concatenate([t[:, [0, 1]], t[:, [1, 2]], t[:, [2, 0]]]))

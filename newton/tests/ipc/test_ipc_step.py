@@ -184,6 +184,41 @@ def test_default_d_hat_follows_small_features(test, device):
     test.assertEqual(newton.solvers.SolverIPC(builder.finalize(device=device))._config.d_hat, 0.01)
 
 
+def test_default_d_hat_follows_small_free_particles(test, device):
+    """Without a d_hat argument the solver also keeps d_hat at or below a quarter of the smallest radius of a free
+    particle that collides: 25 free particles of radius 1 mm, falling 3 cm onto the ground in eager steps of 1/120 s,
+    get 0.25 mm and rest less than 0.3 mm above it, where libuipc's 0.01 m rested them ten radii above. Particles that
+    meet nothing (no shape that collides with particles, no particle grid) and inactive ones leave d_hat as it is."""
+
+    def particles(ground=True, grid=True, flags=int(newton.ParticleFlags.ACTIVE)):
+        builder = newton.ModelBuilder()
+        if ground:
+            builder.add_ground_plane()
+        xs = np.linspace(-0.12, 0.12, 5)
+        for x in xs:
+            for y in xs:
+                builder.add_particle(
+                    wp.vec3(x, y, 0.03), wp.vec3(0.0, 0.0, 0.0), mass=1.0e-3, radius=1.0e-3, flags=flags
+                )
+        model = builder.finalize(device=device)
+        if not grid:
+            model.particle_grid = None
+        return model
+
+    model = particles()
+    solver = newton.solvers.SolverIPC(model)
+    test.assertAlmostEqual(solver._config.d_hat, 2.5e-4)
+    s0, s1 = model.state(), model.state()
+    for _ in range(72):
+        solver.step(s0, s1, None, None, 1.0 / 120.0)
+        s0, s1 = s1, s0
+    gap = s0.particle_q.numpy()[:, 2].astype(np.float64) - 1.0e-3
+    test.assertGreater(gap.min(), 0.0)
+    test.assertLess(gap.max(), 3.0e-4)
+    for kwargs in ({"ground": False, "grid": False}, {"flags": 0}):
+        test.assertEqual(newton.solvers.SolverIPC(particles(**kwargs))._config.d_hat, 0.01, kwargs)
+
+
 def test_overflow_grows(test, device):
     """Contact lists that overflow grow: at once in an eager step, after grow() when the step is captured.
 
@@ -766,6 +801,7 @@ for name, func in (
     ("test_check_status", test_check_status),
     ("test_status_bits_of_a_later_libuipc_warp", test_status_bits_of_a_later_libuipc_warp),
     ("test_default_d_hat_follows_small_features", test_default_d_hat_follows_small_features),
+    ("test_default_d_hat_follows_small_free_particles", test_default_d_hat_follows_small_free_particles),
     ("test_overflow_grows", test_overflow_grows),
     ("test_grown_lists_keep_a_changed_gravity", test_grown_lists_keep_a_changed_gravity),
     ("test_teleport_equals_fresh_solver", test_teleport_equals_fresh_solver),
