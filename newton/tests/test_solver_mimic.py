@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
 import unittest
 
 import numpy as np
@@ -8,7 +9,7 @@ import warp as wp
 
 import newton
 from newton._src.sim.joint_mimic import eval_joint_mimic_coordinate, eval_joint_mimic_velocity
-from newton.tests.unittest_utils import add_function_test, get_test_devices
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
 
 
 def _build_mimic_model(device, vectorized, *, kinematic_reference=False, small_mismatch=False):
@@ -69,9 +70,9 @@ def _assert_mimic_relation(model, joint_q, reference, follower, offset, multipli
     )
 
 
-def _test_solver_mimic(test, device, solver_name):
+def _test_solver_mimic(test, device, solver_name, vectorized_cases=(False, True)):
     """Enforce scalar and vectorized mimic relationships with one solver."""
-    for vectorized in (False, True):
+    for vectorized in vectorized_cases:
         with test.subTest(vectorized=vectorized):
             # VBD performs one local mimic projection per solver iteration. Keep
             # its initial pose within the projection's intended convergence basin;
@@ -108,12 +109,15 @@ def _test_solver_mimic(test, device, solver_name):
                     iterations=4,
                 )
                 generalized = False
+            elif solver_name == "ipc":
+                solver = newton.solvers.SolverIPC(model)
+                generalized = False
             else:
                 raise ValueError(f"Unknown solver {solver_name}")
 
             # Penalty and Baumgarte-stabilized mimics converge over many steps.
-            step_count = 240 if solver_name in ("semi_implicit", "steel") else 1
-            dt = 1.0 / 240.0 if solver_name in ("semi_implicit", "steel") else 1.0 / 60.0
+            step_count = 240 if solver_name in ("semi_implicit", "steel", "ipc") else 1
+            dt = 1.0 / 240.0 if solver_name in ("semi_implicit", "steel", "ipc") else 1.0 / 60.0
             for _ in range(step_count):
                 solver.step(state_in, state_out, None, None, dt)
                 state_in, state_out = state_out, state_in
@@ -194,6 +198,16 @@ def test_steel_mimic(test, device):
 def test_vbd_mimic(test, device):
     """Enforce scalar and vectorized mimic relationships in VBD."""
     _test_solver_mimic(test, device, "vbd")
+
+
+def test_ipc_mimic(test, device):
+    """Enforce the scalar mimic relationship in SolverIPC."""
+    _test_solver_mimic(test, device, "ipc", vectorized_cases=(False,))
+
+
+def test_ipc_mimic_vectorized(test, device):
+    """Enforce the vectorized mimic relationship in SolverIPC."""
+    _test_solver_mimic(test, device, "ipc", vectorized_cases=(True,))
 
 
 @wp.kernel
@@ -411,6 +425,18 @@ add_function_test(
     devices=devices,
 )
 add_function_test(TestSolverMimic, "test_steel_mimic", test_steel_mimic, devices=devices)
+add_function_test(
+    TestSolverMimic, "test_ipc_mimic", test_ipc_mimic, devices=get_cuda_test_devices(), requires=("uipc_warp",)
+)
+# SolverIPC (an expected failure): the vectorized case's follower is a D6 joint of two linear axes, and SolverIPC holds a
+# mimic relation of one coordinate only, so it refuses the model
+add_function_test(
+    TestSolverMimic,
+    "test_ipc_mimic_vectorized",
+    unittest.expectedFailure(functools.partial(test_ipc_mimic_vectorized)),
+    devices=get_cuda_test_devices(),
+    requires=("uipc_warp",),
+)
 
 
 if __name__ == "__main__":
