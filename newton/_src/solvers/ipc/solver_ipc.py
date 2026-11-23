@@ -3012,10 +3012,16 @@ class SolverIPC(SolverBase, CouplingInterface):
     selects its world and the step after a failed one place it at its pose
     instead, without a sweep.
     ``kappa`` is not used, and ``adaptive_kappa`` is refused. The step
-    ends on AL-IPC's own criterion, which has no Newton residual:
-    ``SOLVER_RESIDUAL`` is not offered. A change of the bodies' masses
-    (:meth:`notify_model_changed`) builds the solve again, since the penalty
-    follows the masses the solve was built with.
+    ends on AL-IPC's own criterion, the paper's progress weight, which has no
+    Newton residual: ``SOLVER_RESIDUAL`` is not offered, and without contact
+    a step takes ``semi_implicit_k_min`` Newton iterations (the paper's
+    ``K_min``), and one with ``semi_implicit=False``, which solves the
+    barrier's steps to the tolerance but makes AL-IPC's the least converged
+    (with libuipc's body stiffness a free cube spinning at 1.08 rad/s keeps
+    6% of its spin after 100 steps of 0.01 s). A larger
+    ``semi_implicit_k_min`` converges AL-IPC's steps further. A change of the
+    bodies' masses (:meth:`notify_model_changed`) builds the solve again,
+    since the penalty follows the masses the solve was built with.
 
     **MAS.** ``fem_preconditioner="mas"`` is libuipc's multilevel additive
     Schwarz preconditioner (its ``linear_system/fem_preconditioner``) on the
@@ -3642,7 +3648,11 @@ class SolverIPC(SolverBase, CouplingInterface):
         linear_tol_rate: Relative PCG tolerance on ``r^T M^-1 r``.
         line_search_max_iter: Maximum backtracking trials per Newton iteration.
         semi_implicit: Enable libuipc's semi-implicit early exit after
-            ``semi_implicit_k_min`` iterations of full feasible steps.
+            ``semi_implicit_k_min`` iterations of full feasible steps. Under
+            ``contact_constitution="al-ipc"``, whose step has no Newton
+            tolerance, it enables the delay of AL-IPC's progress weight
+            instead: without contact a step takes ``semi_implicit_k_min``
+            Newton iterations, and one when False (see **AL-IPC contact**).
         semi_implicit_k_min: Newton iterations before the early exit applies.
         eps_velocity: Friction smoothing velocity [m/s]; below it static friction becomes a stiff spring.
         cloth_strain_rate: Strain-limiting coefficient :math:`\\eta` of the cloth
