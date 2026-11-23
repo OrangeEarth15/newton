@@ -299,11 +299,16 @@ def test_near_parts_forms_no_pair_of_two_worlds(test, device):
 
 
 def _attached_world():
-    """One world: a box 30 cm up with a particle attached 10 cm under its centre, over the global ground."""
+    """One world: a box 30 cm up with a particle attached 10 cm under it, over the global ground. The box comes down on
+    the particle, which rests on the ground, while the stitch pulls it up from below: a balance that is not stable. The
+    particle is 0.1 mm off the centre of the box's bottom face, which lies on the diagonal that splits the face into two
+    triangles: there, rounding at 1e-18 m would decide whether the particle's contact with the face takes the
+    point-triangle term of one triangle or of both, and so whether the box starts to tip (by 1.96e-6 m at step 40 in
+    about one coupled world of four, never in the world alone)."""
     world = newton.ModelBuilder()
     box = _box_body(world, (0.0, 0.0, 0.3), (0.05, 0.05, 0.05))
-    world.add_particle(wp.vec3(0.0, 0.0, 0.2), wp.vec3(0.0, 0.0, 0.0), 0.05, radius=0.005)
-    world.add_attachment_particle_body(0, box, body_point=(0.0, 0.0, -0.1), stiffness=500.0)
+    world.add_particle(wp.vec3(1.0e-4, 0.0, 0.2), wp.vec3(0.0, 0.0, 0.0), 0.05, radius=0.005)
+    world.add_attachment_particle_body(0, box, body_point=(1.0e-4, 0.0, -0.1), stiffness=500.0)
     return world
 
 
