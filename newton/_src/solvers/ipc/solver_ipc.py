@@ -285,6 +285,39 @@ def _store_bodies(
 
 
 @wp.kernel
+def _store_body_momentum(
+    x: wp.array[wp.vec3d],
+    v: wp.array[wp.vec3d],
+    base: wp.array[wp.int32],
+    kinematic: wp.array[wp.int32],
+    spread: wp.array[wp.mat33d],
+    body_qd: wp.array[wp.spatial_vector],
+    written_qd: wp.array[wp.spatial_vector],
+):
+    """``body_rotation="rigid"`` (class docstring, **Rigid bodies**): the angular velocity of ``body_qd`` (and of
+    ``written_qd``) that carries the body's angular momentum about its centre of mass with its rigid inertia,
+    w = (R I R^T)^-1 L, with L = vee(A_dot S_c A^T - A S_c A_dot^T), I = tr(S_c) 1 - S_c and ``spread`` the second
+    moment S_c about the centre of mass in the body frame; written over what ``_store_bodies`` wrote."""
+    b = wp.tid()
+    if kinematic[b] != 0:
+        return
+    o = base[b]
+    A = wp.matrix_from_rows(x[o + 1], x[o + 2], x[o + 3])
+    A_dot = wp.matrix_from_rows(v[o + 1], v[o + 2], v[o + 3])
+    Sc = spread[b]
+    M = A_dot * Sc * wp.transpose(A)
+    L = wp.vec3d(M[2, 1] - M[1, 2], M[0, 2] - M[2, 0], M[1, 0] - M[0, 1])
+    R = _nearest_rotation(A)
+    S = R * Sc * wp.transpose(R)
+    inertia = wp.trace(S) * wp.identity(n=3, dtype=wp.float64) - S
+    if not (wp.determinant(inertia) > wp.float64(0.0)):
+        return
+    tw = wp.spatial_vector(wp.spatial_top(body_qd[b]), _to32(wp.inverse(inertia) * L))
+    body_qd[b] = tw
+    written_qd[b] = tw
+
+
+@wp.kernel
 def _forget_kinematic_written(
     kinematic: wp.array[wp.int32],
     written_q: wp.array[wp.transform],
@@ -3207,6 +3240,21 @@ class SolverIPC(SolverBase, CouplingInterface):
     orthogonality potential pulls it back onto the rotations, so under implicit
     Euler a free spin at :math:`\\omega` loses about :math:`(\\omega \\Delta t)^2`
     of its angular velocity per step: 1e-4 at 1 rad/s and :math:`\\Delta t` = 0.01 s.
+    With ``body_rotation="rigid"`` (libuipc-warp's ``affine_rotation="rigid"``)
+    every free body is predicted instead by the flight of a rigid body, which
+    keeps its angular momentum :math:`L` about the centre of mass and turns
+    it at the implicit midpoint of the free rigid body, and its velocity after
+    the step carries that momentum plus the angular impulse of the step's
+    contact and joint forces. A free body then keeps its angular momentum and
+    kinetic energy, and a spin about a principal axis, or of a body with
+    equal moments, is the exact motion; a pendulum on a hinge away from its
+    centre of mass keeps implicit Euler's loss of its centre of mass's
+    circular motion. The body's twist then holds the angular velocity that
+    carries its angular momentum,
+    :math:`\\omega = (R I R^T)^{-1} L`, rather than the skew part of
+    :math:`\\dot A A^{-1}`, which also counts the spin of the body's strain.
+    The option takes ``integrator="bdf1"``: BDF2's prediction from the step
+    before would have to turn with the body.
 
     The stiffness is ``body_kappa`` at every step when it is given. By default
     it is libuipc's 1e8 Pa, lowered for a body and a step to
@@ -3671,6 +3719,11 @@ class SolverIPC(SolverBase, CouplingInterface):
             in which no world collides with another, where by default every
             world is solved apart from the others (see **Worlds**).
         integrator: ``"bdf1"`` (implicit Euler) or ``"bdf2"`` (see **BDF2**).
+        body_rotation: ``"linear"``, libuipc's step, in which a rigid body
+            moves along a straight line in its 12 coordinates and a spin loses
+            about :math:`(\\omega \\Delta t)^2` per step, or ``"rigid"``, the
+            rotation integrated as a rigid body's (see **Rigid bodies**);
+            ``"rigid"`` takes ``integrator="bdf1"``.
         contact_constitution: ``"ipc"`` (barrier contact) or ``"al-ipc"`` (see
             **AL-IPC contact**).
         fem_preconditioner: ``"diag"`` (block diagonal) or ``"mas"`` for
@@ -3859,6 +3912,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         shape_segments: int = 24,
         coupled_worlds: bool = False,
         integrator: str = "bdf1",
+        body_rotation: str = "linear",
         contact_constitution: str = "ipc",
         fem_preconditioner: str = "diag",
         kinematic_motion: str = "jump",
@@ -3882,6 +3936,13 @@ class SolverIPC(SolverBase, CouplingInterface):
         )
         _check_supported(model, self._joint_options)
         _check_choice("integrator", integrator, ("bdf1", "bdf2"))
+        _check_choice("body_rotation", body_rotation, ("linear", "rigid"))
+        if body_rotation == "rigid" and integrator == "bdf2":
+            # libuipc-warp's rigid flight replaces the implicit Euler prediction; BDF2 predicts from the step before too
+            raise ValueError(
+                "SolverIPC: body_rotation='rigid' integrates the rigid bodies with implicit Euler (integrator='bdf1'); "
+                "BDF2 predicts from the step before as well, which the rigid flight does not turn."
+            )
         _check_choice("contact_constitution", contact_constitution, ("ipc", "al-ipc"))
         _check_choice("fem_preconditioner", fem_preconditioner, ("diag", "mas"))
         _check_choice("kinematic_motion", kinematic_motion, ("jump", "aim"))
@@ -3930,6 +3991,15 @@ class SolverIPC(SolverBase, CouplingInterface):
         options = {"bdf2_start": "bdf1"} if integrator == "bdf2" else {}
         if self._sweep:
             options["al_sweep_kinematic"] = True
+        # body_rotation="rigid": the rigid bodies' rotation as a rigid body's flight (class docstring, **Rigid bodies**)
+        self._rigid_rotation = body_rotation == "rigid"
+        if self._rigid_rotation:
+            if "affine_rotation" not in uipc_warp.EngineOptions.names():
+                raise NotImplementedError(
+                    "SolverIPC: body_rotation='rigid' needs libuipc-warp's option affine_rotation (libuipc-warp 0.4.4 or "
+                    f"later); the installed libuipc-warp is {uipc_warp.__version__}."
+                )
+            options["affine_rotation"] = "rigid"
         self._options = uipc_warp.EngineOptions(**options) if options else None
         self._adaptive_kappa = bool(adaptive_kappa)
         self._thickness = float(thickness)
@@ -3947,6 +4017,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._worlds = None
         self._independent = False
         self._ortho = None  # the engine's orthogonality potentials, whose stiffness follows dt (default body_kappa)
+        self._body_spread = None  # body_rotation="rigid": the bodies' second moments about their centres of mass
         self._default_control = None  # the Control of a step given none, built once (_control_of_model)
         # CONTACT_F: whether a container requested it, and libuipc-warp's ContactForces of the engine then
         # (allocated with the request and with every engine built after it, outside any capture)
@@ -4268,6 +4339,11 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._body_q_written = wp.empty(nb, dtype=wp.transform, device=device)
             self._body_qd_written = wp.empty(nb, dtype=wp.spatial_vector, device=device)
             self._forget_written()
+            # body_rotation="rigid": the second moment about the centre of mass of every body, from which the stored
+            # angular velocity is that of the body's angular momentum (_store_body_momentum)
+            self._body_spread = None
+            if self._rigid_rotation:
+                self._body_spread = wp.array(self._spreads(self._dyadic), dtype=wp.mat33d, device=device)
         if self._proxy_body.any():  # the body of every surface vertex, for the proxy feedback (-1 elsewhere)
             vertex_body = np.full(layout.n, -1, np.int32)
             for b in range(nb):
@@ -5235,6 +5311,16 @@ class SolverIPC(SolverBase, CouplingInterface):
             mass[b], first[b], second[b] = m, mx, S
         return mass, first, second
 
+    @staticmethod
+    def _spreads(dyadic: tuple) -> np.ndarray:
+        """The second moment of mass about the centre of mass, in the body frame, of every body of ``dyadic``:
+        ``sum m x_bar x_bar^T - (sum m x_bar)(sum m x_bar)^T / m``, zero for a body without mass."""
+        mass, first, second = dyadic
+        out = np.zeros((len(mass), 3, 3))
+        heavy = mass > 0.0
+        out[heavy] = second[heavy] - np.einsum("bi,bj->bij", first[heavy], first[heavy]) / mass[heavy, None, None]
+        return out
+
     def _mass_inverse(self, mass: np.ndarray, first: np.ndarray, second: np.ndarray) -> np.ndarray:
         """The inverse of the 4 x 4 block ``[[m, (sum m x_bar)^T], [sum m x_bar, sum m x_bar x_bar^T]]`` of every
         dynamic body's dyadic mass, which maps a force on ``(p_k, row k of A)`` to its acceleration."""
@@ -6071,6 +6157,14 @@ class SolverIPC(SolverBase, CouplingInterface):
                 outputs=[body_q, body_qd, self._body_q_written, self._body_qd_written],
                 device=model.device,
             )
+            if self._body_spread is not None:  # body_rotation="rigid": the angular velocity of the angular momentum
+                wp.launch(
+                    _store_body_momentum,
+                    model.body_count,
+                    inputs=[vm.x, vm.v, self._body_base, self._body_passthrough, self._body_spread],
+                    outputs=[body_qd, self._body_qd_written],
+                    device=model.device,
+                )
             if self._sweep:
                 wp.launch(
                     _forget_kinematic_written,
@@ -6703,6 +6797,8 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._dyadic = dyadic
             self._engine.set_dyadic_mass(*self._engine_dyadic(dyadic))
             self._body_mass_inv.assign(self._mass_inverse(*dyadic))
+            if self._body_spread is not None:  # and the angular velocity that body_rotation="rigid" stores
+                self._body_spread.assign(self._spreads(dyadic))
             for kind in self._joint_bodies:  # the joints' penalties follow the masses
                 self._joint_strength[kind].assign(self._joint_strengths(kind, dyadic[0])[1])
             self._attachment_hard.assign(self._attachment_penalties(dyadic[0]))  # and so do the hard attachments'

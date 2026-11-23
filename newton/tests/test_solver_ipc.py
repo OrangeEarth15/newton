@@ -4129,6 +4129,126 @@ def test_body_stiffness_takes_a_turn_in_one_iteration(test, device):
             newton.solvers.SolverIPC(model, body_kappa=kappa)
 
 
+def test_rigid_body_rotation(test, device):
+    """With body_rotation="rigid" (libuipc-warp's affine_rotation="rigid") a rigid body's prediction is a rigid body's
+    flight that keeps its angular momentum, and its twist holds the angular velocity that carries that momentum.
+
+    At converged Newton tolerances a cube spinning about any axis keeps its angular velocity over 200 steps of 0.01 s,
+    where libuipc's straight-line step keeps atan2(sin t, 2 - cos t) of a turn t per step, and a box tumbling about no
+    principal axis keeps the angular momentum Newton computes from its state. At the solver's default tolerances the
+    Newton loop's displacement test leaves a little of each turn behind, which the twist reports: the cube loses less
+    than a tenth of what libuipc's step loses. Newton's cases at the default tolerances: a torque and a force on a cube
+    whose centre of mass is off its frame (the combined force-and-torque test) give tau / I and f / m per second, also
+    captured; a 0.5 x 1 x 2 m box that a torque starts turning in one 0.1 s step reports the rigid 0.24 rad/s (the skew
+    part of A_dot A^-1 counts the shear of its soft default stiffness); the undamped hinge of test_joint_damping keeps
+    its spin. BDF2 refuses the option."""
+    tight = {"newton_velocity_tol": 1e-9, "newton_transrate_tol": 1e-9, "linear_tol_rate": 1e-14, "semi_implicit": False,
+             "newton_max_iter": 256}  # fmt: skip
+
+    def body(builder, half, rot=None, com=None):
+        b = _box_body(builder, (0.0, 0.0, 1.0), half, rot)
+        if com is not None:
+            builder.body_com[b] = wp.vec3(*com)
+        return b
+
+    def run(model, steps, dt, w=None, wrench=None, captured=False, **kwargs):
+        solver = newton.solvers.SolverIPC(model, **kwargs)
+        s0, s1 = model.state(), model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
+        if w is not None:
+            s0.body_qd.assign(np.array([[0.0, 0.0, 0.0, *w]], np.float32))
+        if wrench is not None:
+            s0.body_f.assign(np.array([wrench], np.float32))
+            s1.body_f.assign(np.array([wrench], np.float32))
+        if captured:  # one eager step, then pairs of steps captured once and replayed
+            solver.step(s0, s1, None, None, dt)
+            with wp.ScopedCapture(device=device) as capture:
+                solver.step(s1, s0, None, None, dt)
+                solver.step(s0, s1, None, None, dt)
+            for _ in range((steps - 1) // 2):
+                wp.capture_launch(capture.graph)
+            return s1
+        for _ in range(steps):
+            solver.step(s0, s1, None, None, dt)
+            s0, s1 = s1, s0
+        return s0
+
+    # a 20 cm cube spinning at 2.06 rad/s about (0.3, -0.4, 1): 200 steps of 0.01 s
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    body(builder, (0.1, 0.1, 0.1))
+    model = builder.finalize(device=device)
+    w = np.array([0.6, -0.8, 2.0], np.float32)
+
+    def kept(**kwargs):
+        return float(np.linalg.norm(run(model, 200, 0.01, w=w, **kwargs).body_qd.numpy()[0, 3:]) / np.linalg.norm(w))
+
+    s = run(model, 200, 0.01, w=w, body_rotation="rigid", **tight)
+    np.testing.assert_allclose(s.body_qd.numpy()[0, 3:], w, rtol=0, atol=1e-6 * np.linalg.norm(w))
+    t = np.arctan(np.linalg.norm(w) * 0.01)
+    for _ in range(199):
+        t = np.arctan2(np.sin(t), 2.0 - np.cos(t))
+    linear = kept(**tight)
+    test.assertAlmostEqual(linear, np.sin(t) / 0.01 / np.linalg.norm(w), delta=1e-4)
+    test.assertLess(1.0 - kept(body_rotation="rigid"), 0.1 * (1.0 - kept()))
+
+    # Newton's combined force-and-torque test: 10 N and 10 N m for ten steps of 0.01 s, the centre of mass off the frame
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    body(
+        builder, (0.1, 0.1, 0.1), wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.pi * 0.5), com=(0.05, -0.03, 0.02)
+    )
+    model = builder.finalize(device=device)
+    inertia = model.body_inertia.numpy()[0].astype(np.float64)
+    mass = float(model.body_mass.numpy()[0])
+    wrench = [10.0, 0.0, 0.0, 0.0, 0.0, 10.0]
+    eager = run(model, 11, 0.01, wrench=wrench, body_rotation="rigid").body_qd.numpy()[0]
+    captured = run(model, 11, 0.01, wrench=wrench, captured=True, body_rotation="rigid").body_qd.numpy()[0]
+    np.testing.assert_allclose(captured, eager, rtol=0, atol=1e-5)
+    test.assertAlmostEqual(eager[5], 10.0 / inertia[2, 2] * 0.11, delta=2e-3 * 10.0 / inertia[2, 2] * 0.11)
+    test.assertAlmostEqual(eager[0], 10.0 / mass * 0.11, delta=1e-5)
+    np.testing.assert_allclose(eager[[1, 2, 3, 4]], 0.0, atol=1e-4)
+    test.assertLess(run(model, 10, 0.01, wrench=wrench).body_qd.numpy()[0, 5], 0.95 * 10.0 / inertia[2, 2] * 0.1)
+
+    # a 0.3 x 0.2 x 0.1 m box tumbling at 5 rad/s about (1, 2, 3) for 300 steps of 1/60 s
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    body(builder, (0.15, 0.1, 0.05))
+    model = builder.finalize(device=device)
+    inertia = model.body_inertia.numpy()[0].astype(np.float64)
+    w = (5.0 * np.array([1.0, 2.0, 3.0]) / np.sqrt(14.0)).astype(np.float32)
+
+    def momentum(state):
+        q = state.body_q.numpy()[0].astype(np.float64)
+        R = np.array(wp.quat_to_matrix(wp.quat(*q[3:7])), np.float64).reshape(3, 3)
+        return R @ inertia @ R.T @ state.body_qd.numpy()[0, 3:].astype(np.float64)
+
+    L0 = inertia @ w.astype(np.float64)
+    s = run(model, 300, 1.0 / 60.0, w=w, body_rotation="rigid", **tight)
+    np.testing.assert_allclose(momentum(s), L0, rtol=0, atol=1e-5 * np.linalg.norm(L0))
+    s = run(model, 300, 1.0 / 60.0, w=w, **tight)
+    test.assertLess(np.linalg.norm(momentum(s)), 0.9 * np.linalg.norm(L0))
+
+    # Newton's D6 angular case on a free joint: 1000 N m about x on a 0.5 x 1 x 2 m box for one step of 0.1 s
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    body(builder, (0.25, 0.5, 1.0))
+    model = builder.finalize(device=device)
+    s = run(model, 1, 0.1, wrench=[0.0, 0.0, 0.0, 1000.0, 0.0, 0.0], body_rotation="rigid")
+    test.assertAlmostEqual(s.body_qd.numpy()[0, 3], 0.24, delta=2e-5)
+
+    # test_joint_damping's undamped hinge: a body of unit mass and inertia on a revolute joint about z at 1 rad/s
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Y)
+    link = builder.add_link(mass=1.0, inertia=wp.mat33(np.eye(3)), lock_inertia=True)
+    joint = builder.add_joint_revolute(parent=-1, child=link, axis=newton.Axis.Z, limit_lower=-1.0e6, limit_upper=1.0e6)
+    builder.add_articulation([joint])
+    builder.joint_qd[0] = 1.0
+    model = builder.finalize(device=device)
+    test.assertAlmostEqual(float(run(model, 8, 0.01, body_rotation="rigid").joint_qd.numpy()[0]), 1.0, delta=1e-5)
+    test.assertLess(float(run(model, 8, 0.01).joint_qd.numpy()[0]), 1.0 - 5.0e-4)
+
+    with test.assertRaisesRegex(ValueError, "body_rotation must be one of"):
+        newton.solvers.SolverIPC(model, body_rotation="exact")
+    with test.assertRaisesRegex(ValueError, "body_rotation='rigid' integrates the rigid bodies with implicit Euler"):
+        newton.solvers.SolverIPC(model, body_rotation="rigid", integrator="bdf2")
+
+
 def test_kappa_is_taken_as_given(test, device):
     """By default every pair takes kappa as given, at every step size, also outside libuipc's range, without a
     warning; kappa=None, libuipc's default, needs adaptive_kappa."""
@@ -7501,6 +7621,7 @@ class TestSolverIPCCoupling(unittest.TestCase):
 
 devices = get_cuda_test_devices()
 add_function_test(TestSolverIPC, "test_drop_on_ground", test_drop_on_ground, devices=devices)
+add_function_test(TestSolverIPC, "test_rigid_body_rotation", test_rigid_body_rotation, devices=devices)
 add_function_test(
     TestSolverIPC, "test_free_fall_matches_implicit_euler", test_free_fall_matches_implicit_euler, devices=devices
 )
