@@ -371,7 +371,8 @@ def test_al_ipc_sweeps_kinematic_bodies(test, device):
         probe = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity()), mass=1.0)
         builder.add_shape_sphere(probe, radius=0.05)
         model = builder.finalize(device=device)
-        return model, newton.solvers.SolverIPC(model, contact_constitution="al-ipc"), kinematic, probe
+        solver = newton.solvers.SolverIPC(model, contact_constitution="al-ipc", kinematic_motion="jump")
+        return model, solver, kinematic, probe
 
     def place(state, body, x, vx=0.0):
         q, qd = state.body_q.numpy(), state.body_qd.numpy()

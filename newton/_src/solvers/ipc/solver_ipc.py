@@ -316,9 +316,11 @@ class SolverIPC(SolverBase, CouplingInterface):
     - contact between all of these, with friction, between the pairs that
       Newton's collision groups, worlds, collide flags and filter pairs let
       collide (:ref:`ipc-contact`);
-    - kinematic particles and bodies, which follow ``state_in``, or with
-      ``kinematic_motion="aim"`` move inside the step toward the pose it
-      prescribes (:ref:`ipc-kinematic-bodies`);
+    - kinematic particles, which take the positions of ``state_in`` before
+      the step, and kinematic bodies, which move inside the step toward the
+      pose it prescribes or, without mass or with
+      ``kinematic_motion="jump"``, take it before the step too
+      (:ref:`ipc-kinematic-bodies`);
     - revolute, prismatic, fixed and ball joints with drives, springs,
       damping, limits, armature and :attr:`~newton.Control.joint_f`, D6 joints
       that lock what one of them locks, and distance joints of one length
@@ -413,10 +415,11 @@ class SolverIPC(SolverBase, CouplingInterface):
             :ref:`ipc-al-ipc`).
         fem_preconditioner: ``"diag"`` (block diagonal) or ``"mas"`` for
             particles, cloth and tetrahedra (see :ref:`ipc-mas`).
-        kinematic_motion: ``"jump"`` (a kinematic body takes the pose of
-            ``state_in`` before the step, and a jump that meets a surface
-            fails the step) or ``"aim"`` (it moves inside the step toward the
-            pose prescribed for its end; see :ref:`ipc-kinematic-bodies`).
+        kinematic_motion: ``"aim"`` (a kinematic body with mass and colliding
+            shapes moves inside the step toward the pose prescribed for its
+            end) or ``"jump"`` (it takes the pose of ``state_in`` before the
+            step, and a jump that meets a surface fails the step); see
+            :ref:`ipc-kinematic-bodies`.
         kinematic_strength_ratio: The strength ratio of the aims of
             ``kinematic_motion="aim"`` (libuipc's soft transform constraint);
             ``"jump"`` refuses a value other than the default.
@@ -557,7 +560,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         body_rotation: str | None = None,
         contact_constitution: str = "ipc",
         fem_preconditioner: str = "diag",
-        kinematic_motion: str = "jump",
+        kinematic_motion: str = "aim",
         kinematic_strength_ratio: float = _KINEMATIC_STRENGTH_RATIO,
         enable_joint_limit_damping: bool = True,
         enable_joint_effort_limit: bool = True,

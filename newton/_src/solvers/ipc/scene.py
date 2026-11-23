@@ -489,11 +489,11 @@ def _closed_volume(v: np.ndarray, f: np.ndarray) -> float:
 def _check_independent_content(solver: SolverIPC) -> None:
     """With independent worlds: ``NotImplementedError`` for an unknown of the global world -1, which every world
     would push and so join (a particle with mass that is ACTIVE, a dynamic body, a coupled solver's proxy, or with
-    ``kinematic_motion="aim"`` a kinematic body with colliding shapes), as Newton's implicit MPM refuses global
-    colliders backed by dynamic bodies with ``separate_worlds``, and for a triangle, tetrahedron or spring that
-    joins two worlds. Then ``_status_entries``: the worlds that hold unknowns, in increasing order, which are
-    libuipc-warp's independent worlds in their order (its worlds are the subscenes from 1 on that hold unknowns,
-    in subscene order, and subscene k + 1 is the k-th local world with content, ``_Worlds``)."""
+    ``kinematic_motion="aim"``, the default, a kinematic body with mass and colliding shapes), as Newton's implicit
+    MPM refuses global colliders backed by dynamic bodies with ``separate_worlds``, and for a triangle, tetrahedron
+    or spring that joins two worlds. Then ``_status_entries``: the worlds that hold unknowns, in increasing order,
+    which are libuipc-warp's independent worlds in their order (its worlds are the subscenes from 1 on that hold
+    unknowns, in subscene order, and subscene k + 1 is the k-th local world with content, ``_Worlds``)."""
     model = solver.model
     world = model.particle_world.numpy() if model.particle_count else np.zeros(0, np.int64)
     free = ~solver._fixed_particle
@@ -518,8 +518,8 @@ def _check_independent_content(solver: SolverIPC) -> None:
         more = f" ({len(lost) - 1} more global bodies are too)" if len(lost) > 1 else ""
         if solver._kinematic_body[b]:
             what, fix = (
-                "a kinematic body with colliding shapes, which kinematic_motion='aim' moves toward its aim as an "
-                "unknown of the step",
+                "a kinematic body with colliding shapes, which kinematic_motion='aim', the default, moves toward its "
+                "aim as an unknown of the step",
                 "Use kinematic_motion='jump', under which it is a fixed body that acts in every world, give it a world",
             )
         else:
@@ -1019,7 +1019,8 @@ def _add_shapes_and_bodies(
         if np.linalg.eigvalsh(0.5 * (inertia[b] + inertia[b].T)).min() <= 0.0:
             raise ValueError(
                 f"SolverIPC needs a positive-definite inertia for the kinematic body {b}, which "
-                "kinematic_motion='aim' moves with its mass."
+                "kinematic_motion='aim', the default, moves with its mass; give it one, or pass "
+                "kinematic_motion='jump'."
             )
     body_q, body_qd, placed = _start_bodies(solver)
     # a kinematic body, whose pose the caller writes at every step, and a link the model leaves at the identity,

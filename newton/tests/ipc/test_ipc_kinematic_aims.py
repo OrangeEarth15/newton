@@ -167,7 +167,7 @@ def _platform(device, kinematic_motion, steps, speed=0.5, dt=0.01, load_density=
 
 def test_kinematic_platform_carries_a_box(test, device):
     """A platform sliding at 0.5 m/s under a resting box carries it by friction with kinematic_motion="aim": after
-    40 steps the box moves within eps_velocity of the platform's speed. With the default jump friction never sees the
+    40 steps the box moves within eps_velocity of the platform's speed. With the jump friction never sees the
     platform's motion, and the box stays behind (below 0.05 m/s)."""
     for mode, check in (("aim", lambda v: abs(v - 0.5) < 0.01), ("jump", lambda v: abs(v) < 0.05)):
         _, _, _, box, state = _platform(device, mode, 40)
@@ -243,10 +243,10 @@ def test_reset_teleports_a_kinematic_body(test, device):
 
 
 def test_jump_mode_builds_the_engine_of_before(test, device):
-    """The default kinematic_motion="jump" builds a kinematic body as before: fixed, without a soft transform
-    constraint, with the contact elements of before, its state_out a copy of state_in; "aim" builds it free, with the
-    constraint and the kinematic and static shapes in elements of their own. Invalid options and AL-IPC with aims are
-    refused."""
+    """kinematic_motion="jump" builds a kinematic body as before: fixed, without a soft transform constraint, with the
+    contact elements of before, its state_out a copy of state_in; "aim", the default, builds it free, with the
+    constraint and the kinematic and static shapes in elements of their own. Invalid options and AL-IPC with aims,
+    the default's included, are refused."""
     from newton._src.solvers.ipc.contacts import _contact_elements  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
@@ -280,8 +280,10 @@ def test_jump_mode_builds_the_engine_of_before(test, device):
         newton.solvers.SolverIPC(model, kinematic_motion="slide")
     with test.assertRaisesRegex(ValueError, "kinematic_strength_ratio"):
         newton.solvers.SolverIPC(model, kinematic_motion="aim", kinematic_strength_ratio=-1.0)
-    with test.assertRaisesRegex(NotImplementedError, "al-ipc"):
-        newton.solvers.SolverIPC(model, kinematic_motion="aim", contact_constitution="al-ipc")
+    for kwargs in ({"kinematic_motion": "aim"}, {}):
+        with test.assertRaisesRegex(NotImplementedError, "the default, would move the kinematic body"):
+            newton.solvers.SolverIPC(model, contact_constitution="al-ipc", **kwargs)
+    test.assertTrue(newton.solvers.SolverIPC(model)._aims)
 
 
 @requires("uipc_warp")

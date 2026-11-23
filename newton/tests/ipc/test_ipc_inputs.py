@@ -397,14 +397,17 @@ def test_rejects_arguments_the_options_do_not_read(test, device):
         ),
         ({**al, "kappa": None}, "kappa sets the stiffness of the barrier"),
         ({**al, "adaptive_kappa": True}, "adaptive_kappa sets the stiffness of the barrier"),
-        ({"kinematic_strength_ratio": 50.0}, "kinematic_strength_ratio sets the strength of the aims of"),
+        (
+            {"kinematic_motion": "jump", "kinematic_strength_ratio": 50.0},
+            "kinematic_strength_ratio sets the strength of the aims of",
+        ),
     ):
         with test.subTest(**{k: str(v) for k, v in kwargs.items()}):
             with test.assertRaisesRegex(ValueError, pattern):
                 newton.solvers.SolverIPC(model, **kwargs)
     newton.solvers.SolverIPC(model, **al)
     newton.solvers.SolverIPC(model, kappa=1.0e8)
-    newton.solvers.SolverIPC(model, kinematic_motion="aim", kinematic_strength_ratio=50.0)
+    newton.solvers.SolverIPC(model, kinematic_strength_ratio=50.0)
 
 
 def test_rejects_gradients(test, device):

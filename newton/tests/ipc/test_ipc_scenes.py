@@ -346,7 +346,8 @@ def test_cloth_on_rigid_box(test, device):
 
 
 def test_kinematic_body_lifts_cloth(test, device):
-    """A kinematic box follows the poses written to ``state_in`` and carries the cloth lying on it."""
+    """A kinematic box that jumps (``kinematic_motion="jump"``) follows the poses written to ``state_in`` and carries
+    the cloth lying on it."""
     from uipc_warp.validation import SurfaceChecker  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
@@ -356,7 +357,7 @@ def test_kinematic_body_lifts_cloth(test, device):
     # cloth, which moves up 2 mm against the box in every step, crumples at the 0.75 of Newton's default materials
     builder.add_shape_box(b, hx=0.1, hy=0.1, hz=0.1, cfg=newton.ModelBuilder.ShapeConfig(mu=0.5))
     model = builder.finalize(device=device)
-    solver = newton.solvers.SolverIPC(model)
+    solver = newton.solvers.SolverIPC(model, kinematic_motion="jump")
     checker = SurfaceChecker.from_engine(solver._engine)
     s0, s1 = model.state(), model.state()
     hits = 0

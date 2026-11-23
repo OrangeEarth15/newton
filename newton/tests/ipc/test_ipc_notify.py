@@ -277,7 +277,8 @@ def test_notify_rebuilds_for_another_kinematic_set(test, device):
     steps keeps the pose that state_in gives it (kinematic_motion="jump"), and made DYNAMIC again three steps later
     falls on; each time the next steps equal those of a new solver on the changed model from the same state."""
     model = _falling_box(device)
-    solver = newton.solvers.SolverIPC(model, **_OPTIONS)
+    options = {**_OPTIONS, "kinematic_motion": "jump"}
+    solver = newton.solvers.SolverIPC(model, **options)
     state = model.state()
     path, state = _run(model, solver, state, 3)
     for flags, steps in ((newton.BodyFlags.KINEMATIC, 3), (newton.BodyFlags.DYNAMIC, 4)):
@@ -287,7 +288,7 @@ def test_notify_rebuilds_for_another_kinematic_set(test, device):
             solver.notify_model_changed(newton.ModelFlags.BODY_PROPERTIES)
             test.assertIsNot(solver._engine, engine)
             notified, after = _run(model, solver, state, steps)
-            fresh, _ = _run(model, newton.solvers.SolverIPC(model, **_OPTIONS), state, steps)
+            fresh, _ = _run(model, newton.solvers.SolverIPC(model, **options), state, steps)
             np.testing.assert_allclose(notified, fresh, rtol=0.0, atol=1.0e-6)
             z = notified[:, 2]
             if flags == newton.BodyFlags.KINEMATIC:  # held where state_in puts it

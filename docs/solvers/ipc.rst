@@ -73,11 +73,12 @@ The solver simulates:
   :ref:`ipc-d-hat`). A rigid body does not collide with itself.
 - kinematic particles (zero mass or not :attr:`~newton.ParticleFlags.ACTIVE`)
   and kinematic bodies (:attr:`~newton.BodyFlags.KINEMATIC`, zero mass or zero
-  inverse mass, see :ref:`ipc-coupling`). By default they follow the poses
-  written to ``state_in`` every step, and a jump that meets a surface fails the
-  step. With ``kinematic_motion="aim"`` kinematic bodies move inside the
-  step toward the pose that ``state_in`` prescribes for its end, swept like
-  every other motion (see :ref:`ipc-kinematic-bodies`). A particle that is not
+  inverse mass, see :ref:`ipc-coupling`). By default a kinematic body moves
+  inside the step toward the pose that ``state_in`` prescribes for its end,
+  swept like every other motion; a kinematic particle, a body without mass or
+  colliding shapes, and with ``kinematic_motion="jump"`` every kinematic body
+  jump to the pose written to ``state_in`` before the step, and a jump that
+  meets a surface fails the step (see :ref:`ipc-kinematic-bodies`). A particle that is not
   active and on no cloth or tetrahedron collides with nothing, as in Newton.
 - revolute, prismatic, fixed and ball joints between bodies or to the world,
   with drives, passive springs and damping, limits, armature and
@@ -461,13 +462,14 @@ world's.
 
 The global entities do not move: a free particle (mass and
 :attr:`~newton.ParticleFlags.ACTIVE`), a dynamic body or a coupled solver's
-proxy of world -1, and with ``kinematic_motion="aim"`` a global kinematic body
-with colliding shapes, would be an unknown that every world pushes, and are
-refused with :class:`NotImplementedError`, as Newton's implicit MPM refuses
-global colliders backed by dynamic bodies with ``separate_worlds``; so is a
-triangle, tetrahedron or spring that joins two worlds. Global static shapes and
-planes, kinematic particles and kinematic bodies (``kinematic_motion="jump"``)
-act in every world. Not offered with independent worlds yet, where two worlds or
+proxy of world -1, and a global kinematic body with mass and colliding shapes,
+which aims make an unknown, would be an unknown that every world pushes, and are
+refused with :class:`NotImplementedError` (pass ``kinematic_motion="jump"`` for
+the kinematic body), as Newton's implicit MPM refuses global colliders backed by
+dynamic bodies with ``separate_worlds``; so is a triangle, tetrahedron or spring
+that joins two worlds. Global static shapes and planes, kinematic particles and
+the kinematic bodies that jump (see :ref:`ipc-kinematic-bodies`) act in every
+world. Not offered with independent worlds yet, where two worlds or
 more move, and refused naming what to use instead:
 ``contact_constitution="al-ipc"`` and ``fem_preconditioner="mas"`` (its clusters
 may join two worlds). The engine's Newton exit check, which independent worlds
@@ -501,9 +503,49 @@ no pair of parts of two worlds.
 Kinematic bodies
 ----------------
 
-By default (``kinematic_motion="jump"``) a kinematic body is a fixed affine body
-whose pose the solver writes from ``state_in`` before the step, as a kinematic
-particle takes its position. The step starts by sweeping these jumps with
+By default (``kinematic_motion="aim"``) every kinematic body with colliding
+shapes and a mass is built as libuipc builds an animated body: an affine body
+that is an unknown of the step, with no gravity and no external force, pulled by
+libuipc's soft transform constraint (constitution 16) toward its aim, the pose
+of ``state_in`` advanced by its twist over the step (the centre of mass by
+:math:`v \Delta t`, the rotation by the exponential of :math:`\omega \Delta t`).
+Its velocity is set so that the step's prediction is the aim, so its motion is
+part of the Newton direction: the CCD sweeps it, the line search keeps every
+surface apart, friction sees it (a platform sliding under a box carries it), and
+a body that contact blocks stops short of its aim. The aim is soft, with the
+strength ratio :math:`\eta` = ``kinematic_strength_ratio`` (libuipc's motors'
+100) for translation and rotation alike: under a load :math:`F` a body of mass
+:math:`m` lags its aim by about :math:`F \Delta t^2 / ((1 + \eta) m)`, 2.8e-5 m
+for 10 N on 1 kg at 1/60 s. A caller who writes consistent ``body_q`` and
+``body_qd`` every step gets the next pose as the aim, one who writes poses only
+the written pose, one who writes nothing motion at constant twist. A body that a
+notification makes kinematic (``notify_model_changed`` with ``BODY_PROPERTIES``)
+does not take the twist the solver wrote for it as a dynamic body, which
+``state_in`` holds until the caller writes another: it stays where it is, as
+Newton's other solvers leave such a body, until the caller writes a twist. The
+step starts from the pose the body reached, so the motion from there to the aim
+is swept, a jump included; the first step after the solver is built and the step
+after a :meth:`~newton.solvers.SolverIPC.reset` that selects the body's world
+take ``state_in`` instead, which is how a caller moves such a body without
+sweeping; a first step that the start check refuses (see :ref:`ipc-start`)
+leaves the next step the first. ``state_out`` holds the pose the body reached
+and the twist of ``state_in``, which the step passes through, as Newton's
+solvers pass a kinematic body's twist: the twist stays the caller's, 0 unless it
+wrote one, and never becomes the one the body reached. Pairs of two shapes that
+are each kinematic or static do not collide, in either mode, as Newton's
+collision pipeline can filter them (``include_static_kinematic_pairs=False``);
+the solver checks its pairs against :attr:`~newton.Model.shape_contact_pairs`
+less those pairs. Aims are refused, naming the body, with
+``contact_constitution="al-ipc"``, whose frame tests animated aims with a check
+of its own that the solver does not run (see :ref:`ipc-al-ipc`), and with
+independent worlds for a body of the global world, which every world would push
+(see :ref:`ipc-worlds`); pass ``kinematic_motion="jump"`` there.
+
+A kinematic body of mass 0, such as a link of density 0 that anchors joints,
+one without colliding shapes, every kinematic particle (a soft aim would make a
+pinned vertex sag) and, with ``kinematic_motion="jump"``, every kinematic body
+take a jump instead: a fixed vertex or affine body whose pose the solver writes
+from ``state_in`` before the step. The step starts by sweeping these jumps with
 continuous collision detection, from where the last step left them
 (libuipc-warp's ``EngineOptions(sweep_kinematic=True)``): a jump that meets a
 surface fails the step with
@@ -518,47 +560,8 @@ under a box does not carry it). The first step after the solver is built, the
 step after a :meth:`~newton.solvers.SolverIPC.reset` that selects the body's
 world and the step after a failed one take the poses as placements, without a
 sweep. Under AL-IPC the step's collision-free sweeps carry the jump instead and
-push what it meets (see :ref:`ipc-al-ipc`). With
-``kinematic_motion="aim"`` every kinematic body with colliding shapes is built
-as libuipc builds an animated body: an affine body that is an unknown of the
-step, with no gravity and no external force, pulled by libuipc's soft transform
-constraint (constitution 16) toward its aim, the pose of ``state_in`` advanced
-by its twist over the step (the centre of mass by :math:`v \Delta t`, the
-rotation by the exponential of :math:`\omega \Delta t`). Its velocity is set so
-that the step's prediction is the aim, so its motion is part of the Newton
-direction: the CCD sweeps it, the line search keeps every surface apart,
-friction sees it, and a body that contact blocks stops short of its aim. The aim
-is soft, with the strength ratio :math:`\eta` = ``kinematic_strength_ratio``
-(libuipc's motors' 100) for translation and rotation alike: under a load
-:math:`F` a body of mass :math:`m` lags its aim by about
-:math:`F \Delta t^2 / ((1 + \eta) m)`, 2.8e-5 m for 10 N on 1 kg at 1/60 s. A
-kinematic body moves with Newton's mass; one of mass 0, such as a link of
-density 0 that anchors joints, keeps the jump: there is no mass for the
-constraint to move, and a soft anchor would let the joints it holds sag. A
-caller who writes consistent ``body_q`` and ``body_qd`` every step gets the
-next pose as the aim, one who writes poses only the written pose, one who writes
-nothing motion at constant twist. A body that a
-notification makes kinematic (``notify_model_changed`` with
-``BODY_PROPERTIES``) does not take the twist the solver wrote for it as a
-dynamic body, which ``state_in`` holds until the caller writes another: it
-stays where it is, as Newton's other solvers leave such a body, until the
-caller writes a twist. The step starts from the pose the body reached, so the motion from there
-to the aim is swept, a jump included; the first step after the solver is built
-and the step after a :meth:`~newton.solvers.SolverIPC.reset` that selects the
-body's world take ``state_in`` instead, which is how a caller moves such a body
-without sweeping; a first step that the start check refuses (see
-:ref:`ipc-start`) leaves the next step the first. ``state_out`` holds the pose
-the body reached and the twist of ``state_in``, which the step passes through,
-as Newton's solvers pass a kinematic body's twist: the twist stays the caller's,
-0 unless it wrote one, and never becomes the one the body reached. Pairs of two shapes that are each kinematic or
-static do not collide, as Newton's collision pipeline can filter them
-(``include_static_kinematic_pairs=False``) and as they never collide in the
-default mode, where neither moves inside the step; the solver checks its pairs
-against :attr:`~newton.Model.shape_contact_pairs` less those pairs. Kinematic
-particles keep the jump (a soft aim would make a pinned vertex sag). With
-``contact_constitution="al-ipc"`` a model with a body that would move toward its
-aims is refused (pass ``kinematic_motion="jump"``, whose moves AL-IPC sweeps,
-see :ref:`ipc-al-ipc`); a model without one is taken.
+push what it meets (see :ref:`ipc-al-ipc`). Newton's suite gives the same 78
+outcomes with either mode, its four kinematic cases passing.
 
 .. _ipc-attachments:
 

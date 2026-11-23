@@ -43,13 +43,15 @@ def _set_inertia(model, body, moments):
 def test_inertia_checks(test, device):
     """A dynamic body needs a positive-definite inertia: one with a zero principal moment, given in place, is refused
     by name when the solver is built, and when notify_model_changed(BODY_INERTIAL_PROPERTIES) reports it. A kinematic
-    body may have none (forces do not move it), but not under kinematic_motion="aim", which moves it with its mass."""
+    body may have none under kinematic_motion="jump" (forces do not move it), but not under kinematic_motion="aim",
+    the default, which moves it with its mass."""
     flat = (1.0e-3, 1.0e-3, 0.0)
     model = _bodies(device, 2, kinematic=(1,))
     _set_inertia(model, 1, flat)
-    solver = newton.solvers.SolverIPC(model)
-    with test.assertRaisesRegex(ValueError, "needs a positive-definite inertia for the kinematic body 1"):
-        newton.solvers.SolverIPC(model, kinematic_motion="aim")
+    solver = newton.solvers.SolverIPC(model, kinematic_motion="jump")
+    for kwargs in ({}, {"kinematic_motion": "aim"}):
+        with test.assertRaisesRegex(ValueError, "needs a positive-definite inertia for the kinematic body 1"):
+            newton.solvers.SolverIPC(model, **kwargs)
     _set_inertia(model, 0, flat)
     with test.assertRaisesRegex(ValueError, "needs a positive-definite inertia for the dynamic body 0"):
         solver.notify_model_changed(newton.ModelFlags.BODY_INERTIAL_PROPERTIES)
