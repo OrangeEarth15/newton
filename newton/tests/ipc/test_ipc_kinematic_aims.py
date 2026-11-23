@@ -5,6 +5,7 @@
 
 import unittest
 import warnings
+from unittest import mock
 
 import numpy as np
 import warp as wp
@@ -439,15 +440,95 @@ def test_al_ipc_takes_aims_without_aiming_bodies(test, device):
         newton.solvers.SolverIPC(builder.finalize(device=device), contact_constitution="al-ipc", kinematic_motion="aim")
 
 
+def _lift(device, mode, steps=90, capture=False):
+    """R10's lift: a 0.2 m box of 8 kg resting 2 mm above a kinematic platform (1 x 1 x 0.1 m, friction 0.5) that after
+    60 steps of 1/120 s rises at 0.5 m/s, its pose and twist written into state_in before every step. Returns the gap
+    between the box's bottom and the platform's top at the end of every step, and the RuntimeError a step raised (an
+    eager step, or ``check_status`` after a captured one), or None."""
+    builder = newton.ModelBuilder()
+    builder.default_shape_cfg.mu = 0.5
+    platform = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity()), is_kinematic=True)
+    builder.add_shape_box(platform, hx=0.5, hy=0.5, hz=0.05)
+    box = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.652), wp.quat_identity()))
+    builder.add_shape_box(box, hx=0.1, hy=0.1, hz=0.1)
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model, kinematic_motion=mode)
+    observables = solver.observables({solver.ObservableKind.STATUS})
+    dt, s0, s1 = 1.0 / 120.0, model.state(), model.state()
+    gaps, graph = [], None
+    for k in range(steps):
+        rising = k >= 60
+        q, qd = s0.body_q.numpy(), s0.body_qd.numpy()
+        q[platform, 2] = 0.5 + 0.5 * dt * max(k - 59, 0)
+        qd[platform] = (0.0, 0.0, 0.5 if rising else 0.0, 0.0, 0.0, 0.0)
+        s0.body_q.assign(q)
+        s0.body_qd.assign(qd)
+        try:
+            if not capture or k == 0:
+                solver.step(s0, s1, None, None, dt, observables=observables)
+            else:
+                if graph is None:
+                    with wp.ScopedCapture(device=device) as cap:
+                        solver.step(s0, s1, None, None, dt, observables=observables)
+                    graph = cap.graph
+                wp.capture_launch(graph)
+                solver.check_status(observables)
+        except RuntimeError as e:
+            return np.array(gaps), e
+        s0.assign(s1)
+        q = s0.body_q.numpy()
+        gaps.append(float(q[box, 2] - 0.1 - (q[platform, 2] + 0.05)))
+    return np.array(gaps), None
+
+
+def test_jump_through_a_surface_fails_the_step(test, device):
+    """R10-1: a kinematic body's jump is swept at the step's start. In R10's lift, where the platform's jumps of
+    4.2 mm outrun the barrier and, unswept, took the box through the platform at the eighth jump with no status bit,
+    the step whose jump meets the box fails with INVALID_CCD_STEP, named as the kinematic sweep: an eager step raises,
+    a captured one sets the bit and check_status raises; no step before it ends with the box inside the platform. With
+    kinematic_motion="aim" the platform's motion is part of the step, and the box rides on it through every step."""
+    for capture in (False, True):
+        with test.subTest(capture=capture):
+            gaps, raised = _lift(device, "jump", capture=capture)
+            test.assertIsNotNone(raised, "a jump through the box was taken")
+            test.assertIn("INVALID_CCD_STEP", str(raised))
+            test.assertIn("the kinematic sweep", str(raised))
+            test.assertGreaterEqual(len(gaps), 60)  # while the platform rests, nothing fails
+            test.assertGreater(gaps.min(), 0.0)
+    gaps, raised = _lift(device, "aim")
+    test.assertIsNone(raised)
+    test.assertGreater(gaps.min(), 0.0)
+    test.assertLess(gaps[-1], 0.011)  # on the platform, within d_hat
+
+
+def test_import_requires_the_kinematic_sweep(test, device):
+    """The sweep of the jumps is libuipc-warp's (``EngineOptions(sweep_kinematic=)``), a capability that a development
+    build of the release SolverIPC asks for may lack: the import refuses a build without it, naming it."""
+    import uipc_warp  # noqa: PLC0415
+
+    imported = newton.solvers.SolverIPC._uipc_warp
+    without = tuple(name for name in uipc_warp.EngineOptions.names() if name != "sweep_kinematic")
+    try:
+        newton.solvers.SolverIPC._uipc_warp = None
+        with mock.patch.object(uipc_warp.EngineOptions, "names", return_value=without):
+            with test.assertRaisesRegex(ImportError, r"lacks EngineOptions\(sweep_kinematic=\)"):
+                newton.solvers.SolverIPC._import_uipc_warp()
+    finally:
+        newton.solvers.SolverIPC._uipc_warp = imported
+
+
 @requires("uipc_warp")
 class TestSolverIPCKinematicMotion(unittest.TestCase):
-    """Which kinematic bodies move toward their aims, and the twist of a body that becomes kinematic."""
+    """Which kinematic bodies move toward their aims, the twist of a body that becomes kinematic, and the sweep of the
+    jumps."""
 
 
 for name, func in (
     ("test_massless_kinematic_bodies_keep_the_jump", test_massless_kinematic_bodies_keep_the_jump),
     ("test_rekinematic_body_drops_its_twist", test_rekinematic_body_drops_its_twist),
     ("test_al_ipc_takes_aims_without_aiming_bodies", test_al_ipc_takes_aims_without_aiming_bodies),
+    ("test_jump_through_a_surface_fails_the_step", test_jump_through_a_surface_fails_the_step),
+    ("test_import_requires_the_kinematic_sweep", test_import_requires_the_kinematic_sweep),
 ):
     add_function_test(TestSolverIPCKinematicMotion, name, func, devices=devices)
 

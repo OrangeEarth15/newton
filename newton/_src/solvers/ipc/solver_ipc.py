@@ -153,12 +153,13 @@ def _release(version: str) -> tuple[int, ...]:
 def _capabilities(uipc_warp) -> dict[str, bool]:
     """Whether libuipc-warp has the capabilities SolverIPC calls that a build of ``_UIPC_WARP_MINIMUM`` may lack, a
     development build among them, by name: the rotation of rigid bodies as a rigid body's (``body_rotation="rigid"``,
-    the default), AL-IPC's sweep of kinematic moves (``contact_constitution="al-ipc"``) and the frame restart (an entry
-    of a coupler that restarts its steps)."""
+    the default), the sweeps of kinematic moves (the barrier's, ``sweep_kinematic``, and AL-IPC's) and the frame
+    restart (an entry of a coupler that restarts its steps)."""
     options = uipc_warp.EngineOptions.names()
     engine = uipc_warp.SimEngine
     return {
         "EngineOptions(affine_rotation=)": "affine_rotation" in options,
+        "EngineOptions(sweep_kinematic=)": "sweep_kinematic" in options,
         "EngineOptions(al_sweep_kinematic=) with SimEngine.place_kinematic": "al_sweep_kinematic" in options
         and hasattr(engine, "place_kinematic"),
         "the frame restart (SimEngine.enable_frame_restart)": hasattr(engine, "enable_frame_restart"),
@@ -413,8 +414,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         fem_preconditioner: ``"diag"`` (block diagonal) or ``"mas"`` for
             particles, cloth and tetrahedra (see :ref:`ipc-mas`).
         kinematic_motion: ``"jump"`` (a kinematic body takes the pose of
-            ``state_in`` before the step) or ``"aim"`` (it moves inside the
-            step toward the pose prescribed for its end; see :ref:`ipc-kinematic-bodies`).
+            ``state_in`` before the step, and a jump that meets a surface
+            fails the step) or ``"aim"`` (it moves inside the step toward the
+            pose prescribed for its end; see :ref:`ipc-kinematic-bodies`).
         kinematic_strength_ratio: The strength ratio of the aims of
             ``kinematic_motion="aim"`` (libuipc's soft transform constraint);
             ``"jump"`` refuses a value other than the default.
@@ -490,7 +492,9 @@ class SolverIPC(SolverBase, CouplingInterface):
 
         INVALID_CCD_STEP = 1 << 4
         """Continuous collision detection admitted no step (a fraction that is not positive), as for a vertex
-        that starts at or inside its contact thickness from a plane."""
+        that starts at or inside its contact thickness from a plane; or the sweep of a move written since the last
+        step (a kinematic body's or particle's jump, a coupled solver's proxy's new pose) met a surface, and the step
+        did not run (:ref:`ipc-kinematic-bodies`)."""
 
         THICKNESS_VIOLATED = 1 << 5
         """A contact pair started at or inside its contact thickness (surfaces in touching contact or
@@ -658,12 +662,13 @@ class SolverIPC(SolverBase, CouplingInterface):
         )
         # a BDF2 history starts with an implicit Euler step: at the first step, and at every step from a state the
         # solver did not write (docs/solvers/ipc.rst > "BDF2")
-        # AL-IPC sweeps the moves of kinematic bodies from where the last step left them (docs/solvers/ipc.rst >
-        # "AL-IPC contact")
-        self._sweep = contact_constitution == "al-ipc"
         options = {"bdf2_start": "bdf1"} if integrator == "bdf2" else {}
-        if self._sweep:
-            options["al_sweep_kinematic"] = True
+        # the moves of kinematic bodies and particles between steps, and of a coupled solver's proxies, are swept from
+        # where the last step left them: the barrier's step sweeps them at its start and fails on one that meets a
+        # surface (docs/solvers/ipc.rst > "Kinematic bodies"); AL-IPC's collision-free sweeps carry the kinematic
+        # bodies along and push what they meet (docs/solvers/ipc.rst > "AL-IPC contact")
+        self._al_sweep = contact_constitution == "al-ipc"
+        options["al_sweep_kinematic" if self._al_sweep else "sweep_kinematic"] = True
         # body_rotation="rigid": the rigid bodies' rotation as a rigid body's flight (docs/solvers/ipc.rst >
         # "Rigid bodies")
         self._rigid_rotation = body_rotation == "rigid"
@@ -1043,8 +1048,8 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._body_q_written.assign(np.full((nb, 7), np.nan, np.float32))
             self._body_qd_written.assign(np.full((nb, 6), np.nan, np.float32))
             self._body_hold.zero_()  # the kinematic bodies moving toward their aims take state_in too
-            if self._sweep and self._engine is not None:  # and the swept ones are placed there, not swept
-                self._engine.place_kinematic()
+        if self._engine is not None:  # and the kinematic bodies, particles and proxies are placed there, not swept
+            self._engine.place_kinematic()
         if self.model.joint_count:
             self._joint_q_written.fill_(np.nan)
 
@@ -1085,6 +1090,14 @@ class SolverIPC(SolverBase, CouplingInterface):
         if self.model.body_count and self._config.contact_constitution != "al-ipc":
             # notify_model_changed may have changed them since the scene was laid out (AL-IPC: it builds it again)
             self._engine.set_dyadic_mass(*_engine_dyadic(self, self._dyadic))
+        if self._proxies and self._engine.vm.swept is not None:
+            # a coupled solver's proxies: unknowns whose state the coupler writes at every step, whose moves the step
+            # sweeps as it sweeps the kinematic ones (docs/solvers/ipc.rst > "Coupling")
+            swept, layout = self._engine.vm.swept.numpy(), self._scene.layout()
+            swept[: self.model.particle_count][self._proxy_particle] = 1
+            for b in np.flatnonzero(self._proxy_body):
+                swept[layout.body_vertex_offsets[b] : layout.body_vertex_offsets[b + 1]] = 1
+            self._engine.vm.swept.assign(swept)
         self._joint_groups = self._uipc_warp.arrays.joint_groups(self._engine)
         self._aim_group = self._uipc_warp.arrays.constraint_groups(self._engine).transform  # None without aims
         # the stiffness of every stitch group and the attachment or spring of each of its rows (_stitch_stiffness);
@@ -1467,7 +1480,7 @@ class SolverIPC(SolverBase, CouplingInterface):
                     outputs=[body_qd, self._body_qd_written],
                     device=model.device,
                 )
-            if self._sweep:
+            if self._al_sweep:
                 wp.launch(
                     _forget_kinematic_written,
                     model.body_count,
@@ -1906,8 +1919,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         if world_mask is None:
             self._engine.discard_friction()
             self._engine.restart_history()
-            if self._sweep:  # the next step places the kinematic bodies at their state_in poses, without a sweep
-                self._engine.place_kinematic()
+            # the next step places the kinematic bodies and particles and the proxies at their state_in poses, without
+            # a sweep
+            self._engine.place_kinematic()
             if self.model.body_count:
                 self._body_hold.zero_()
             return
@@ -1937,8 +1951,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             )
         self._engine.discard_friction(where=self._selected)
         self._engine.restart_history(where=self._selected)
-        if self._sweep:
-            self._engine.place_kinematic(where=self._selected)
+        self._engine.place_kinematic(where=self._selected)
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:

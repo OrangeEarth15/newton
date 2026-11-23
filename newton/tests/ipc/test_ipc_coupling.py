@@ -968,12 +968,40 @@ def test_proxy_entry_takes_converged_steps(test, device):
     test.assertEqual((plain.newton_velocity_tol, plain.newton_transrate_tol, plain.semi_implicit), (0.05, 0.1, True))
 
 
+def test_late_proxy_fails_the_step(test, device):
+    """A proxy's new pose, written by the coupler before every step, is swept from where the last step left it, as a
+    kinematic body's jump: the proxy box 2 mm above a box (``_thrown_proxy``), written 0.5 mm lower, is taken without
+    a friction discard; written 3 cm lower, into the box, it fails the step with INVALID_CCD_STEP, named as the
+    kinematic sweep (an eager step raises), where the barrier would have pushed it further into the box."""
+    view, top = _thrown_proxy(device)
+    solver = newton.solvers.SolverIPC(view)
+    s0, s1 = view.state(), view.state()
+    dt = 1.0 / 240.0
+    solver.step(s0, s1, None, None, dt)  # the first step places the proxy
+    s0.assign(s1)
+    for drop, fails in ((5e-4, False), (0.03, True)):
+        q = s0.body_q.numpy()
+        q[top, 2] -= drop
+        s0.body_q.assign(q)
+        if fails:
+            with test.assertRaisesRegex(RuntimeError, "INVALID_CCD_STEP.*the kinematic sweep"):
+                solver.step(s0, s1, None, None, dt)
+        else:
+            solver.step(s0, s1, None, None, dt)
+            test.assertEqual(int(solver._changed.numpy()[0]), 0)  # a proxy's write keeps the friction
+            s0.assign(s1)
+
+
 @requires("uipc_warp")
 class TestSolverIPCProxyTolerances(unittest.TestCase):
-    """The Newton tolerances of an entry with proxies, whose feedback is as accurate as the step's convergence."""
+    """An entry with proxies: the Newton tolerances, at which a proxy's feedback is as accurate as the step's
+    convergence, and the sweep of a proxy's written pose."""
 
 
-for name, func in (("test_proxy_entry_takes_converged_steps", test_proxy_entry_takes_converged_steps),):
+for name, func in (
+    ("test_proxy_entry_takes_converged_steps", test_proxy_entry_takes_converged_steps),
+    ("test_late_proxy_fails_the_step", test_late_proxy_fails_the_step),
+):
     add_function_test(TestSolverIPCProxyTolerances, name, func, devices=devices)
 
 
