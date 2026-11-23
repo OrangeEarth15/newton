@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """SolverIPC's elastic energies against Newton's: the cloth membrane's stretch and shear moduli and the hinges'
-bending stiffness, measured by the oscillations of one free vertex."""
+bending stiffness, measured by the oscillations of one free vertex, and the Lame parameters of the tetrahedra,
+measured by the lateral contraction of a block under uniaxial stress."""
 
 import unittest
 
@@ -72,6 +73,58 @@ def test_membrane_and_hinge_follow_newtons_moduli(test, device):
             test.assertLess(np.abs(path[:, p, others]).max(), 2.0e-2 * delta)  # it moves along its own axis
 
 
+def _boundary_faces(tets):
+    """The faces of a tetrahedral mesh that only one tetrahedron has."""
+    faces = np.concatenate([tets[:, [0, 1, 2]], tets[:, [0, 1, 3]], tets[:, [0, 2, 3]], tets[:, [1, 2, 3]]])
+    keys, counts = np.unique(np.sort(faces, axis=1), axis=0, return_counts=True)
+    return keys[counts == 1]
+
+
+def test_tetrahedra_contract_by_poissons_ratio(test, device):
+    """k_mu and k_lambda are Lame parameters: a block of 4 x 2 x 2 cells stretched along x by a uniform traction on
+    its end faces (the consistent loads of linear tetrahedra, a third of each boundary triangle's share on each of its
+    corners) settles into homogeneous uniaxial stress, its axial strain sigma / E with E = mu (3 lambda + 2 mu) /
+    (lambda + mu) and its lateral strains -nu times that with nu = lambda / (2 (lambda + mu)), each within 1%: with
+    k_mu = k_lambda Poisson's ratio is 0.25, not 0 (libuipc's StableNeoHookean stores mu and lambda + mu, which
+    linearize to Hooke's law with these Lame parameters). Gravity off, the block free, its strain 1e-3."""
+    mu = lam = 1.0e4
+    E, nu = mu * (3.0 * lam + 2.0 * mu) / (lam + mu), lam / (2.0 * (lam + mu))
+    sigma = 1.0e-3 * E
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    builder.add_soft_grid(
+        pos=wp.vec3(0.0, 0.0, 1.0), rot=wp.quat_identity(), vel=wp.vec3(0.0), dim_x=4, dim_y=2, dim_z=2, cell_x=0.05,
+        cell_y=0.05, cell_z=0.05, density=10.0, k_mu=mu, k_lambda=lam, k_damp=0.0,
+    )  # fmt: skip
+    model = builder.finalize(device=device)
+    rest = model.particle_q.numpy().astype(np.float64)
+    force = np.zeros_like(rest)
+    for face in _boundary_faces(model.tet_indices.numpy().reshape(-1, 4)):
+        x = rest[face, 0]
+        for end, sign in ((rest[:, 0].min(), -1.0), (rest[:, 0].max(), 1.0)):
+            if np.allclose(x, end):
+                a, b, c = rest[face]
+                area = 0.5 * np.linalg.norm(np.cross(b - a, c - a))
+                force[face, 0] += sign * sigma * area / 3.0
+    np.testing.assert_allclose(force[force[:, 0] > 0.0, 0].sum(), sigma * 0.1 * 0.1, rtol=1.0e-6)  # float32 rest
+    solver = newton.solvers.SolverIPC(model, **_TIGHT)
+    s0, s1 = model.state(), model.state()
+    for s in (s0, s1):
+        s.particle_f.assign(force.astype(np.float32))
+    for _ in range(30):
+        solver.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+    x = solver._engine.positions()[: model.particle_count]
+    # the affine map that takes the rest positions to the settled ones, and how far the block is from it
+    design = np.hstack([rest, np.ones((len(rest), 1))])
+    fit, *_ = np.linalg.lstsq(design, x, rcond=None)
+    F = fit[:3].T
+    test.assertLess(np.abs(design @ fit - x).max(), 1.0e-3 * 1.0e-3 * 0.2)  # homogeneous within 0.1% of the stretch
+    strain = 0.5 * (F + F.T) - np.eye(3)
+    np.testing.assert_allclose(strain[0, 0], sigma / E, rtol=1.0e-2)
+    np.testing.assert_allclose([-strain[1, 1] / strain[0, 0], -strain[2, 2] / strain[0, 0]], [nu, nu], rtol=1.0e-2)
+    test.assertLess(np.abs(strain - np.diag(np.diag(strain))).max(), 1.0e-3 * sigma / E)
+
+
 devices = get_cuda_test_devices()
 
 
@@ -80,7 +133,10 @@ class TestSolverIPCElasticity(unittest.TestCase):
     pass
 
 
-for name, func in (("test_membrane_and_hinge_follow_newtons_moduli", test_membrane_and_hinge_follow_newtons_moduli),):
+for name, func in (
+    ("test_membrane_and_hinge_follow_newtons_moduli", test_membrane_and_hinge_follow_newtons_moduli),
+    ("test_tetrahedra_contract_by_poissons_ratio", test_tetrahedra_contract_by_poissons_ratio),
+):
     add_function_test(TestSolverIPCElasticity, name, func, devices=devices)
 
 

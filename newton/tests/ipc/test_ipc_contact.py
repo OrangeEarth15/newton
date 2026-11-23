@@ -485,35 +485,6 @@ def _newton_angles(model, x):
     return _dihedral_angles(x[e[:, 0]], x[e[:, 1]], x[e[:, 2]], x[e[:, 3]], x[e[:, 2]], x[e[:, 3]])
 
 
-def test_tet_lame_parameters_reach_the_engine_as_libuipc_stores_them(test, device):
-    """k_mu and k_lambda are Lame parameters. libuipc's StableNeoHookean.apply_to stores mu and lambda + mu, the SNK1
-    parameters that linearize to Hooke's law with those Lame parameters; the engine gets the same pair, so a block
-    with k_mu = k_lambda has Poisson's ratio 0.25, not 0."""
-    import uipc_warp.arrays  # noqa: PLC0415
-
-    builder = newton.ModelBuilder()
-    builder.add_soft_grid(
-        pos=wp.vec3(0.0, 0.0, 0.5),
-        rot=wp.quat_identity(),
-        vel=wp.vec3(0.0),
-        dim_x=2,
-        dim_y=2,
-        dim_z=2,
-        cell_x=0.1,
-        cell_y=0.1,
-        cell_z=0.1,
-        density=1000.0,
-        k_mu=2.0e5,
-        k_lambda=5.0e5,
-        k_damp=0.0,
-    )
-    with _scene_calls(uipc_warp.arrays.ArrayScene.add_tetrahedra) as calls:
-        newton.solvers.SolverIPC(builder.finalize(device=device))
-    [tetrahedra] = calls
-    np.testing.assert_allclose(tetrahedra["mu"], 2.0e5)
-    np.testing.assert_allclose(tetrahedra["lam"], 7.0e5)
-
-
 def _shell_inputs(model, **options):
     """The cloth SolverIPC gives the engine for ``model``: the arguments of its one call of libuipc-warp's
     ``ArrayScene.add_shell``."""
@@ -811,10 +782,6 @@ for name, func in (
     (
         "test_cloth_at_rest_takes_its_rest_triangles_from_particle_q",
         test_cloth_at_rest_takes_its_rest_triangles_from_particle_q,
-    ),
-    (
-        "test_tet_lame_parameters_reach_the_engine_as_libuipc_stores_them",
-        test_tet_lame_parameters_reach_the_engine_as_libuipc_stores_them,
     ),
 ):
     add_function_test(TestSolverIPCContact, name, func, devices=devices)
