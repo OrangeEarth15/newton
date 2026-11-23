@@ -2745,10 +2745,14 @@ class SolverIPC(SolverBase, CouplingInterface):
     ``contact_constitution="al-ipc"`` and ``fem_preconditioner="mas"`` take
     libuipc's BDF2, its augmented-Lagrangian contact and its MAS
     preconditioner instead (see **BDF2**, **AL-IPC contact** and **MAS**
-    below). The Newton loop, the PCG loop and the line search run on the
-    device under ``wp.capture_while``, so a step never synchronizes with the
-    host when it is captured in a CUDA graph. A step that is not captured
-    captures the solve itself and checks how it ended (see below).
+    below). Under implicit Euler the rotation of a rigid body is by default
+    integrated as a rigid body's, where libuipc's step moves the body along a
+    straight line in its affine coordinates and damps its spin
+    (``body_rotation``, see **Rigid bodies**). The Newton loop, the PCG loop
+    and the line search run on the device under ``wp.capture_while``, so a
+    step never synchronizes with the host when it is captured in a CUDA
+    graph. A step that is not captured captures the solve itself and checks
+    how it ended (see below).
 
     Supported model content:
 
@@ -3003,7 +3007,10 @@ class SolverIPC(SolverBase, CouplingInterface):
     coefficients assume one ``dt`` for consecutive steps: a step of another
     ``dt`` is taken as it is. The drives, passive springs and damping of
     joints take BDF2's velocity at the end of the step (see **Joints**); the
-    default body stiffness follows the rule of **Rigid bodies**.
+    default body stiffness follows the rule of **Rigid bodies**. Rigid bodies
+    take libuipc's straight-line step under BDF2: ``body_rotation`` is
+    ``"linear"`` there by default, and ``"rigid"``, whose flight replaces the
+    implicit Euler prediction, is refused (see **Rigid bodies**).
 
     **AL-IPC contact.** ``contact_constitution="al-ipc"`` is libuipc's
     augmented-Lagrangian contact (its ``contact/constitution``; the method of
@@ -3235,26 +3242,35 @@ class SolverIPC(SolverBase, CouplingInterface):
     orthogonality potential :math:`\\kappa V \\Delta t^2 \\|A A^T - I\\|_F^2` with
     the stiffness :math:`\\kappa` (below) and the volume :math:`V` of the body's
     collision meshes keeps :math:`A` within a small strain of a rotation; this
-    is libuipc's near-rigid body, not an exactly rigid one. Within a step a
-    turning body moves along a straight line in its 12 coordinates and the
-    orthogonality potential pulls it back onto the rotations, so under implicit
-    Euler a free spin at :math:`\\omega` loses about :math:`(\\omega \\Delta t)^2`
-    of its angular velocity per step: 1e-4 at 1 rad/s and :math:`\\Delta t` = 0.01 s.
-    With ``body_rotation="rigid"`` (libuipc-warp's ``affine_rotation="rigid"``)
-    every free body is predicted instead by the flight of a rigid body, which
-    keeps its angular momentum :math:`L` about the centre of mass and turns
-    it at the implicit midpoint of the free rigid body, and its velocity after
-    the step carries that momentum plus the angular impulse of the step's
-    contact and joint forces. A free body then keeps its angular momentum and
-    kinetic energy, and a spin about a principal axis, or of a body with
-    equal moments, is the exact motion; a pendulum on a hinge away from its
+    is libuipc's near-rigid body, not an exactly rigid one. In libuipc's step
+    (``body_rotation="linear"``) a turning body moves along a straight line in
+    its 12 coordinates within a step and the orthogonality potential pulls it
+    back onto the rotations, so under implicit Euler a free spin at
+    :math:`\\omega` loses about :math:`(\\omega \\Delta t)^2` of its angular
+    velocity per step: 1e-4 at 1 rad/s and :math:`\\Delta t` = 0.01 s, and a body
+    tumbling about no principal axis loses angular momentum and energy alike.
+    By default under implicit Euler (``body_rotation="rigid"``, libuipc-warp's
+    ``affine_rotation="rigid"``) every free body is predicted instead by the
+    flight of a rigid body, which keeps its angular momentum :math:`L` about
+    the centre of mass and turns it at the implicit midpoint of the free rigid
+    body, and its velocity after the step carries that momentum plus the
+    angular impulse of the step's contact and joint forces. A free body then
+    keeps its angular momentum and kinetic energy, and a spin about a
+    principal axis, or of a body with equal moments, is the exact motion; a
+    torque spins a body up by :math:`\\tau / I` per second, which libuipc's
+    step falls short of by the same loss. A pendulum on a hinge away from its
     centre of mass keeps implicit Euler's loss of its centre of mass's
-    circular motion. The body's twist then holds the angular velocity that
-    carries its angular momentum,
-    :math:`\\omega = (R I R^T)^{-1} L`, rather than the skew part of
+    circular motion, and the Newton loop's displacement test leaves a little
+    of each turn at the default tolerances (a 20 cm cube at 2.24 rad/s keeps
+    0.995 of its spin over 200 steps of 0.01 s, 0.910 in libuipc's step). The
+    body's twist then holds the angular velocity that carries its angular
+    momentum, :math:`\\omega = (R I R^T)^{-1} L`, rather than the skew part of
     :math:`\\dot A A^{-1}`, which also counts the spin of the body's strain.
-    The option takes ``integrator="bdf1"``: BDF2's prediction from the step
-    before would have to turn with the body.
+    Fixed, kinematic and massless bodies keep libuipc's prediction, and a
+    body whose rows of :math:`A` have no velocity steps bit for bit as in
+    libuipc's step. Under ``integrator="bdf2"`` the default is ``"linear"``:
+    BDF2 predicts from the step before as well, which the flight does not
+    turn, and ``body_rotation="rigid"`` with it raises ``ValueError``.
 
     The stiffness is ``body_kappa`` at every step when it is given. By default
     it is libuipc's 1e8 Pa, lowered for a body and a step to
@@ -3300,8 +3316,10 @@ class SolverIPC(SolverBase, CouplingInterface):
     :math:`S - 1` is of the order of the orthogonality strain. The body origin
     is placed so that the centre of mass stays where the affine map puts it,
     :math:`x_{com} = A c + p`; the linear velocity is that point's,
-    :math:`\\dot p + \\dot A c`, and the angular velocity is the axial vector of
-    the skew part of :math:`\\dot A A^{-1}`.
+    :math:`\\dot p + \\dot A c`, and the angular velocity is the one that
+    carries the body's angular momentum, :math:`(R I R^T)^{-1} L`, when its
+    rotation is a rigid body's flight (``body_rotation="rigid"``), and the
+    axial vector of the skew part of :math:`\\dot A A^{-1}` in libuipc's step.
 
     **Joints.** Revolute, prismatic, fixed and ball joints are libuipc's
     affine-body joints (constitutions 18, 20, 25 and 26), between the affine
@@ -3719,11 +3737,13 @@ class SolverIPC(SolverBase, CouplingInterface):
             in which no world collides with another, where by default every
             world is solved apart from the others (see **Worlds**).
         integrator: ``"bdf1"`` (implicit Euler) or ``"bdf2"`` (see **BDF2**).
-        body_rotation: ``"linear"``, libuipc's step, in which a rigid body
-            moves along a straight line in its 12 coordinates and a spin loses
-            about :math:`(\\omega \\Delta t)^2` per step, or ``"rigid"``, the
-            rotation integrated as a rigid body's (see **Rigid bodies**);
-            ``"rigid"`` takes ``integrator="bdf1"``.
+        body_rotation: ``"rigid"``, the rotation of rigid bodies integrated as
+            a rigid body's, or ``"linear"``, libuipc's step, in which a rigid
+            body moves along a straight line in its 12 coordinates and a spin
+            loses about :math:`(\\omega \\Delta t)^2` per step (see **Rigid
+            bodies**). ``None`` (the default) is ``"rigid"`` under
+            ``integrator="bdf1"`` and ``"linear"`` under ``"bdf2"``, which
+            refuses ``"rigid"``.
         contact_constitution: ``"ipc"`` (barrier contact) or ``"al-ipc"`` (see
             **AL-IPC contact**).
         fem_preconditioner: ``"diag"`` (block diagonal) or ``"mas"`` for
@@ -3912,7 +3932,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         shape_segments: int = 24,
         coupled_worlds: bool = False,
         integrator: str = "bdf1",
-        body_rotation: str = "linear",
+        body_rotation: str | None = None,
         contact_constitution: str = "ipc",
         fem_preconditioner: str = "diag",
         kinematic_motion: str = "jump",
@@ -3936,12 +3956,15 @@ class SolverIPC(SolverBase, CouplingInterface):
         )
         _check_supported(model, self._joint_options)
         _check_choice("integrator", integrator, ("bdf1", "bdf2"))
+        if body_rotation is None:  # the rigid flight under implicit Euler, libuipc's step under BDF2 (**Rigid bodies**)
+            body_rotation = "linear" if integrator == "bdf2" else "rigid"
         _check_choice("body_rotation", body_rotation, ("linear", "rigid"))
         if body_rotation == "rigid" and integrator == "bdf2":
             # libuipc-warp's rigid flight replaces the implicit Euler prediction; BDF2 predicts from the step before too
             raise ValueError(
                 "SolverIPC: body_rotation='rigid' integrates the rigid bodies with implicit Euler (integrator='bdf1'); "
-                "BDF2 predicts from the step before as well, which the rigid flight does not turn."
+                "BDF2 predicts from the step before as well, which the rigid flight does not turn. With "
+                "integrator='bdf2' leave body_rotation unset, or pass 'linear', libuipc's step."
             )
         _check_choice("contact_constitution", contact_constitution, ("ipc", "al-ipc"))
         _check_choice("fem_preconditioner", fem_preconditioner, ("diag", "mas"))
@@ -3996,8 +4019,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         if self._rigid_rotation:
             if "affine_rotation" not in uipc_warp.EngineOptions.names():
                 raise NotImplementedError(
-                    "SolverIPC: body_rotation='rigid' needs libuipc-warp's option affine_rotation (libuipc-warp 0.4.4 or "
-                    f"later); the installed libuipc-warp is {uipc_warp.__version__}."
+                    "SolverIPC: body_rotation='rigid', the default under integrator='bdf1', needs libuipc-warp's "
+                    "option affine_rotation (libuipc-warp 0.4.4 or later); the installed libuipc-warp is "
+                    f"{uipc_warp.__version__}. body_rotation='linear' takes libuipc's step without it."
                 )
             options["affine_rotation"] = "rigid"
         self._options = uipc_warp.EngineOptions(**options) if options else None

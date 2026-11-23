@@ -384,15 +384,17 @@ def test_rigid_box_free_fall_matches_implicit_euler(test, device):
 
 
 def test_rigid_spin_slows_as_implicit_euler_turns_an_affine_body(test, device):
-    """A box spinning freely about its axis of symmetry, without gravity: within a step the affine body moves along a
-    straight line in its 12 coordinates and back onto the rotations, so its angular velocity drops by about
-    (omega dt)^2 per step, as a rotation projected back after every step gives it: the increments
-    alpha_1 = atan(omega dt) and alpha_(n+1) = atan(sin alpha_n / (2 - cos alpha_n)), the angular velocity
+    """A box spinning freely about its axis of symmetry, without gravity, in libuipc's step (body_rotation="linear"):
+    within a step the affine body moves along a straight line in its 12 coordinates and back onto the rotations, so its
+    angular velocity drops by about (omega dt)^2 per step, as a rotation projected back after every step gives it: the
+    increments alpha_1 = atan(omega dt) and alpha_(n+1) = atan(sin alpha_n / (2 - cos alpha_n)), the angular velocity
     sin(alpha_n) / dt."""
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     b = _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.05))
     model = builder.finalize(device=device)
-    solver = newton.solvers.SolverIPC(model, newton_velocity_tol=1e-6, linear_tol_rate=1e-12, semi_implicit=False)
+    solver = newton.solvers.SolverIPC(
+        model, newton_velocity_tol=1e-6, linear_tol_rate=1e-12, semi_implicit=False, body_rotation="linear"
+    )
     omega, dt, steps = 1.0, 0.01, 8
     s0, s1 = model.state(), model.state()
     s0.body_qd.assign(np.array([[0.0, 0.0, 0.0, 0.0, 0.0, omega]], np.float32))
@@ -4134,14 +4136,14 @@ def test_rigid_body_rotation(test, device):
     flight that keeps its angular momentum, and its twist holds the angular velocity that carries that momentum.
 
     At converged Newton tolerances a cube spinning about any axis keeps its angular velocity over 200 steps of 0.01 s,
-    where libuipc's straight-line step keeps atan2(sin t, 2 - cos t) of a turn t per step, and a box tumbling about no
-    principal axis keeps the angular momentum Newton computes from its state. At the solver's default tolerances the
-    Newton loop's displacement test leaves a little of each turn behind, which the twist reports: the cube loses less
-    than a tenth of what libuipc's step loses. Newton's cases at the default tolerances: a torque and a force on a cube
-    whose centre of mass is off its frame (the combined force-and-torque test) give tau / I and f / m per second, also
-    captured; a 0.5 x 1 x 2 m box that a torque starts turning in one 0.1 s step reports the rigid 0.24 rad/s (the skew
-    part of A_dot A^-1 counts the shear of its soft default stiffness); the undamped hinge of test_joint_damping keeps
-    its spin. BDF2 refuses the option."""
+    where libuipc's straight-line step (body_rotation="linear") keeps atan2(sin t, 2 - cos t) of a turn t per step, and
+    a box tumbling about no principal axis keeps the angular momentum Newton computes from its state. At the solver's
+    default tolerances the Newton loop's displacement test leaves a little of each turn behind, which the twist reports:
+    the cube loses less than a tenth of what libuipc's step loses. Newton's cases at the default tolerances: a torque
+    and a force on a cube whose centre of mass is off its frame (the combined force-and-torque test) give tau / I and
+    f / m per second, also captured; a 0.5 x 1 x 2 m box that a torque starts turning in one 0.1 s step reports the
+    rigid 0.24 rad/s (the skew part of A_dot A^-1 counts the shear of its soft default stiffness); the undamped hinge of
+    test_joint_damping keeps its spin."""
     tight = {"newton_velocity_tol": 1e-9, "newton_transrate_tol": 1e-9, "linear_tol_rate": 1e-14, "semi_implicit": False,
              "newton_max_iter": 256}  # fmt: skip
 
@@ -4173,7 +4175,7 @@ def test_rigid_body_rotation(test, device):
             s0, s1 = s1, s0
         return s0
 
-    # a 20 cm cube spinning at 2.06 rad/s about (0.3, -0.4, 1): 200 steps of 0.01 s
+    # a 20 cm cube spinning at 2.24 rad/s about (0.3, -0.4, 1): 200 steps of 0.01 s
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     body(builder, (0.1, 0.1, 0.1))
     model = builder.finalize(device=device)
@@ -4187,9 +4189,9 @@ def test_rigid_body_rotation(test, device):
     t = np.arctan(np.linalg.norm(w) * 0.01)
     for _ in range(199):
         t = np.arctan2(np.sin(t), 2.0 - np.cos(t))
-    linear = kept(**tight)
+    linear = kept(body_rotation="linear", **tight)
     test.assertAlmostEqual(linear, np.sin(t) / 0.01 / np.linalg.norm(w), delta=1e-4)
-    test.assertLess(1.0 - kept(body_rotation="rigid"), 0.1 * (1.0 - kept()))
+    test.assertLess(1.0 - kept(body_rotation="rigid"), 0.1 * (1.0 - kept(body_rotation="linear")))
 
     # Newton's combined force-and-torque test: 10 N and 10 N m for ten steps of 0.01 s, the centre of mass off the frame
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -4206,7 +4208,8 @@ def test_rigid_body_rotation(test, device):
     test.assertAlmostEqual(eager[5], 10.0 / inertia[2, 2] * 0.11, delta=2e-3 * 10.0 / inertia[2, 2] * 0.11)
     test.assertAlmostEqual(eager[0], 10.0 / mass * 0.11, delta=1e-5)
     np.testing.assert_allclose(eager[[1, 2, 3, 4]], 0.0, atol=1e-4)
-    test.assertLess(run(model, 10, 0.01, wrench=wrench).body_qd.numpy()[0, 5], 0.95 * 10.0 / inertia[2, 2] * 0.1)
+    linear = run(model, 10, 0.01, wrench=wrench, body_rotation="linear").body_qd.numpy()[0]
+    test.assertLess(linear[5], 0.95 * 10.0 / inertia[2, 2] * 0.1)
 
     # a 0.3 x 0.2 x 0.1 m box tumbling at 5 rad/s about (1, 2, 3) for 300 steps of 1/60 s
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -4223,7 +4226,7 @@ def test_rigid_body_rotation(test, device):
     L0 = inertia @ w.astype(np.float64)
     s = run(model, 300, 1.0 / 60.0, w=w, body_rotation="rigid", **tight)
     np.testing.assert_allclose(momentum(s), L0, rtol=0, atol=1e-5 * np.linalg.norm(L0))
-    s = run(model, 300, 1.0 / 60.0, w=w, **tight)
+    s = run(model, 300, 1.0 / 60.0, w=w, body_rotation="linear", **tight)
     test.assertLess(np.linalg.norm(momentum(s)), 0.9 * np.linalg.norm(L0))
 
     # Newton's D6 angular case on a free joint: 1000 N m about x on a 0.5 x 1 x 2 m box for one step of 0.1 s
@@ -4241,12 +4244,54 @@ def test_rigid_body_rotation(test, device):
     builder.joint_qd[0] = 1.0
     model = builder.finalize(device=device)
     test.assertAlmostEqual(float(run(model, 8, 0.01, body_rotation="rigid").joint_qd.numpy()[0]), 1.0, delta=1e-5)
-    test.assertLess(float(run(model, 8, 0.01).joint_qd.numpy()[0]), 1.0 - 5.0e-4)
+    test.assertLess(float(run(model, 8, 0.01, body_rotation="linear").joint_qd.numpy()[0]), 1.0 - 5.0e-4)
 
     with test.assertRaisesRegex(ValueError, "body_rotation must be one of"):
         newton.solvers.SolverIPC(model, body_rotation="exact")
-    with test.assertRaisesRegex(ValueError, "body_rotation='rigid' integrates the rigid bodies with implicit Euler"):
+
+
+def test_body_rotation_defaults_to_rigid(test, device):
+    """body_rotation defaults to "rigid" under implicit Euler and to "linear", libuipc's step, under BDF2, which the
+    rigid flight does not take. By default a cube keeps its spin over 50 steps of 0.01 s at converged tolerances, as with
+    body_rotation="rigid", where libuipc's step keeps 0.976 of it; under BDF2 the default steps as body_rotation="linear"
+    does; body_rotation="rigid" with BDF2 is refused, naming what to pass instead; and a libuipc-warp without the rigid
+    flight is refused by default, naming body_rotation="linear", which takes it."""
+    import uipc_warp  # noqa: PLC0415
+
+    tight = {"newton_velocity_tol": 1e-9, "newton_transrate_tol": 1e-9, "linear_tol_rate": 1e-14, "semi_implicit": False,
+             "newton_max_iter": 256}  # fmt: skip
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
+    model = builder.finalize(device=device)
+    w = np.array([0.6, -0.8, 2.0], np.float32)
+    atol = 1e-6 * np.linalg.norm(w)
+
+    def spin(steps, **kwargs):
+        solver = newton.solvers.SolverIPC(model, **kwargs)
+        s0, s1 = model.state(), model.state()
+        s0.body_qd.assign(np.array([[0.0, 0.0, 0.0, *w]], np.float32))
+        for _ in range(steps):
+            solver.step(s0, s1, None, None, 0.01)
+            s0, s1 = s1, s0
+        return s0.body_qd.numpy()[0, 3:]
+
+    default = spin(50, **tight)
+    np.testing.assert_allclose(default, w, rtol=0, atol=atol)
+    np.testing.assert_allclose(default, spin(50, body_rotation="rigid", **tight), rtol=0, atol=atol)
+
+    bdf2 = spin(10, integrator="bdf2")
+    np.testing.assert_allclose(bdf2, spin(10, integrator="bdf2", body_rotation="linear"), rtol=0, atol=atol)
+
+    with test.assertRaisesRegex(
+        ValueError, r"body_rotation='rigid' integrates the rigid bodies with implicit Euler.* leave body_rotation unset"
+    ):
         newton.solvers.SolverIPC(model, body_rotation="rigid", integrator="bdf2")
+
+    names = tuple(name for name in uipc_warp.EngineOptions.names() if name != "affine_rotation")
+    with mock.patch.object(uipc_warp.EngineOptions, "names", return_value=names):
+        with test.assertRaisesRegex(NotImplementedError, r"body_rotation='linear' takes libuipc's step without it"):
+            newton.solvers.SolverIPC(model)
+        newton.solvers.SolverIPC(model, body_rotation="linear")
 
 
 def test_kappa_is_taken_as_given(test, device):
@@ -7622,6 +7667,9 @@ class TestSolverIPCCoupling(unittest.TestCase):
 devices = get_cuda_test_devices()
 add_function_test(TestSolverIPC, "test_drop_on_ground", test_drop_on_ground, devices=devices)
 add_function_test(TestSolverIPC, "test_rigid_body_rotation", test_rigid_body_rotation, devices=devices)
+add_function_test(
+    TestSolverIPC, "test_body_rotation_defaults_to_rigid", test_body_rotation_defaults_to_rigid, devices=devices
+)
 add_function_test(
     TestSolverIPC, "test_free_fall_matches_implicit_euler", test_free_fall_matches_implicit_euler, devices=devices
 )
