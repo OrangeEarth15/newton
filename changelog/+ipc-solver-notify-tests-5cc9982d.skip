@@ -1,0 +1,1 @@
+Test-only: tests of SolverIPC's notify_model_changed paths that build the solve again or check the joints again (R2-05); no user-facing change.
