@@ -581,7 +581,17 @@ the body origin. Its kinetic term uses libuipc's dyadic mass, built from
 :math:`c` and :attr:`~newton.Model.body_inertia` :math:`I` (which Newton
 computes from the shapes' densities): :math:`\sum m \bar x = m c` and
 :math:`\sum m \bar x \bar x^T = \tfrac{1}{2}\mathrm{tr}(I)\,1 - I + m c c^T`, so
-the affine kinetic energy equals the rigid one for every rigid motion. The
+the affine kinetic energy equals the rigid one for every rigid motion. That
+second moment about the centre of mass, :math:`\tfrac{1}{2}\mathrm{tr}(I)\,1 - I`,
+is positive definite where the largest principal moment of :math:`I` is below
+the sum of the other two. An inertia whose largest moment is at or above that
+sum (a mass distribution with no extent across a plane, or none at all, past
+the triangle inequality) takes the correction
+:meth:`~newton.ModelBuilder.finalize` makes by default past the inequality
+(:attr:`~newton.ModelBuilder.balance_inertia`): every principal moment raised by
+the difference and 1e-6 kg m², with a :class:`~newton.NewtonWarning`. A model
+holds such an inertia only when it was set in place, built without that
+correction, or flat. A dynamic body's inertia must be positive definite. The
 orthogonality potential :math:`\kappa V \Delta t^2 \|A A^T - I\|_F^2` with the
 stiffness :math:`\kappa` (below) and the volume :math:`V` of the body's
 collision meshes keeps :math:`A` within a small strain of a rotation; this is

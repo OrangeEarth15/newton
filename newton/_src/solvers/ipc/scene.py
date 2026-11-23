@@ -37,6 +37,9 @@ _D_HAT_SHAPE_SHARE = 0.25
 _D_HAT_MESH_SHARE = 0.5
 # libuipc's orthogonality stiffness of an affine body (AffineBodyConstitution's kappa, 100 MPa) [Pa]
 _BODY_KAPPA = 1.0e8
+# Newton's builder raises every principal moment of an inertia that violates the triangle inequality by the deficit and
+# this shift (ModelBuilder.inertia_correction's default) [kg m^2]
+_INERTIA_CORRECTION = 1.0e-6
 # the turn [rad] of a body in one step, about the axis of its largest principal moment of inertia, that the first Newton
 # iteration takes in full under the default body_kappa: libuipc's stiffness is lowered where the orthogonality term of
 # a step's incremental potential would exceed 1 / (4 _BODY_TURN^2) times that moment (docs/solvers/ipc.rst >
@@ -879,20 +882,25 @@ def _body_mass_moments(solver: SolverIPC, stacklevel: int) -> tuple[np.ndarray, 
     mass, first, second = np.zeros(nb), np.zeros((nb, 3)), np.zeros((nb, 3, 3))
     for b in range(nb):
         inertia = 0.5 * (body_inertia[b] + body_inertia[b].T)
-        if not solver._kinematic_body[b] and np.linalg.eigvalsh(inertia).min() <= 0.0:
+        moments = np.linalg.eigvalsh(inertia)
+        if not solver._kinematic_body[b] and moments[0] <= 0.0:
             raise ValueError(f"SolverIPC needs a positive-definite inertia for the dynamic body {b}.")
-        m, mx, S = solver._uipc_warp.arrays.dyadic_mass(body_mass[b], body_com[b], inertia)
-        # the second moment about the centre of mass must be PSD (the inertia's triangle inequality)
-        cov = S - m * np.outer(body_com[b], body_com[b])
-        lam, vec = np.linalg.eigh(cov)
-        if lam.min() < 0.0:
+        deficit = moments[2] - moments[0] - moments[1]
+        if moments[0] > 0.0 and deficit >= 0.0:
+            # the second moment about the centre of mass, tr(I)/2 - I, whose smallest eigenvalue is -deficit/2, would not
+            # be positive definite: the correction Newton's builder makes past the triangle inequality
+            # (ModelBuilder.balance_inertia), every moment raised by the deficit and ModelBuilder.inertia_correction
+            shift = deficit + _INERTIA_CORRECTION
             warnings.warn(
-                f"SolverIPC: the inertia of body {b} violates the triangle inequality; clamping its mass spread.",
+                f"SolverIPC: the inertia of body {b} has the principal moments {moments[0]:.6g}, {moments[1]:.6g} and "
+                f"{moments[2]:.6g}, the largest not below the sum of the others, so that its mass would have no extent "
+                f"across a plane; it takes Newton's correction of the triangle inequality, every moment raised by "
+                f"{shift:.6g} kg m^2 (ModelBuilder.balance_inertia).",
                 NewtonWarning,
                 stacklevel=stacklevel,
             )
-            S = (vec * np.maximum(lam, 0.0)) @ vec.T + m * np.outer(body_com[b], body_com[b])
-        mass[b], first[b], second[b] = m, mx, S
+            inertia = inertia + shift * np.eye(3)
+        mass[b], first[b], second[b] = solver._uipc_warp.arrays.dyadic_mass(body_mass[b], body_com[b], inertia)
     return mass, first, second
 
 

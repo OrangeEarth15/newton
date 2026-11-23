@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """What SolverIPC checks and assumes of bodies, and how it reports the ends of a step: an inertia that is not
-positive definite is refused, one that violates the triangle inequality is clamped with a warning, a body without a
+positive definite is refused, one that violates the triangle inequality takes Newton's correction, a body without a
 closed collision mesh takes the volume of water of its mass, and the status bits TRAVERSAL_EXHAUSTED and
 LINE_SEARCH_LIMIT fail a step or warn as documented."""
 
@@ -20,14 +20,14 @@ from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 _TIGHT = {"newton_velocity_tol": 1.0e-6, "linear_tol_rate": 1.0e-12, "semi_implicit": False}
 
 
-def _bodies(device, count, kinematic=(), gravity=-9.81):
-    """``count`` bodies of 1 kg and inertia 1e-3 kg m^2 a metre apart, 1 m up, each with a 10 cm box that adds no
-    mass; the bodies of ``kinematic`` KINEMATIC."""
+def _bodies(device, count, kinematic=(), gravity=-9.81, inertia=(1.0e-3, 1.0e-3, 1.0e-3)):
+    """``count`` bodies of 1 kg and the diagonal ``inertia`` [kg m^2] a metre apart, 1 m up, each with a 10 cm box that
+    adds no mass; the bodies of ``kinematic`` KINEMATIC."""
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, gravity))
     for b in range(count):
         builder.add_body(
             xform=wp.transform(wp.vec3(float(b), 0.0, 1.0), wp.quat_identity()), mass=1.0,
-            inertia=wp.mat33(np.eye(3) * 1.0e-3), is_kinematic=b in kinematic,
+            inertia=wp.mat33(np.diag(inertia)), is_kinematic=b in kinematic,
         )  # fmt: skip
         builder.add_shape_box(b, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
     return builder.finalize(device=device)
@@ -57,40 +57,48 @@ def test_inertia_checks(test, device):
         newton.solvers.SolverIPC(model)
 
 
-# A bug this test found (package N-B, reported, not fixed here): the clamp leaves the second moment with a zero
-# eigenvalue, and building the solver then raises numpy's LinAlgError ("Singular matrix") where it inverts the body's
-# 4 x 4 mass block (scene._mass_inverse). The test fails until that is fixed; then this mark goes.
-@unittest.expectedFailure
-def test_inertia_that_violates_the_triangle_inequality_is_clamped(test, device):
-    """An inertia diag(1, 1, 3) g m^2, whose largest moment exceeds the sum of the others, has no mass distribution:
-    its second moment about the centre of mass, tr(I)/2 - I = diag(1.5, 1.5, -0.5), is not positive semi-definite.
-    The solver warns and clamps the negative part to 0, which makes the inertia diag(1.5, 1.5, 3): over ten steps of
-    0.01 s without gravity a torque of 1e-4 N m about x spins the body at tau t / 1.5 g m^2, and one about z another
-    body at tau t / 3 g m^2, as implicit Euler has a rigid body spin up."""
-    dt, tau = 0.01, 1.0e-4
+def test_inertia_that_violates_the_triangle_inequality_is_corrected(test, device):
+    """An inertia diag(1, 1, 3) g m^2, whose largest moment exceeds the sum of the others, has no mass distribution: its
+    second moment about the centre of mass, tr(I)/2 - I = diag(1.5, 1.5, -0.5) g m^2, is not positive definite. Set in
+    place, it takes, with a warning, the correction Newton's builder makes when it is given that inertia
+    (ModelBuilder.balance_inertia): every moment raised by the deficit, 1 g m^2, and 1e-6 kg m^2, to diag(2.001, 2.001,
+    4.001) g m^2. Over ten steps of 0.01 s without gravity a torque of 1e-4 N m about x spins one body at tau t / 2.001
+    g m^2, and one about z another at tau t / 4.001 g m^2, as implicit Euler has a rigid body spin up; the bodies of the
+    model that Newton's builder corrected (with its own warning) take the same mass moments, without a warning of
+    SolverIPC, and spin the same."""
+    dt, tau, violating = 0.01, 1.0e-4, (1.0e-3, 1.0e-3, 3.0e-3)
+
+    def spin(model):
+        solver = newton.solvers.SolverIPC(model, **_TIGHT)
+        s0, s1 = model.state(), model.state()
+        wrench = np.zeros((2, 6), np.float32)
+        wrench[0, 3], wrench[1, 5] = tau, tau
+        for s in (s0, s1):
+            s.body_f.assign(wrench)
+        out = []
+        for _ in range(10):
+            solver.step(s0, s1, None, None, dt)
+            s0, s1 = s1, s0
+            out.append(s0.body_qd.numpy()[:, 3:].astype(np.float64))
+        return np.array(out), solver._dyadic[2]
+
     model = _bodies(device, 2, gravity=0.0)
     for b in (0, 1):
-        _set_inertia(model, b, (1.0e-3, 1.0e-3, 3.0e-3))
-    with test.assertWarnsRegex(
-        newton.NewtonWarning, "the inertia of body 0 violates the triangle inequality; clamping"
-    ):
-        solver = newton.solvers.SolverIPC(model, **_TIGHT)
-    s0, s1 = model.state(), model.state()
-    wrench = np.zeros((2, 6), np.float32)
-    wrench[0, 3], wrench[1, 5] = tau, tau
-    for s in (s0, s1):
-        s.body_f.assign(wrench)
+        _set_inertia(model, b, violating)
+    pattern = "the inertia of body 0 has the principal moments 0.001, 0.001 and 0.003.* raised by 0.001001 kg m"
+    with test.assertWarnsRegex(newton.NewtonWarning, pattern):
+        in_place, second = spin(model)
+    with test.assertWarnsRegex(newton.NewtonWarning, "Inertia validation corrected 2 bodies"):
+        built = _bodies(device, 2, gravity=0.0, inertia=violating)
+    np.testing.assert_allclose(built.body_inertia.numpy()[0], np.diag([2.001e-3, 2.001e-3, 4.001e-3]), rtol=1.0e-6)
+    by_newton, second_newton = spin(built)
+    np.testing.assert_allclose(second, second_newton, rtol=0.0, atol=1.0e-9)
+    np.testing.assert_allclose(in_place, by_newton, rtol=1.0e-5, atol=1.0e-9)
     k = np.arange(1, 11)
-    spin = []
-    for _ in range(10):
-        solver.step(s0, s1, None, None, dt)
-        s0, s1 = s1, s0
-        spin.append(s0.body_qd.numpy()[:, 3:].astype(np.float64))
-    spin = np.array(spin)
-    np.testing.assert_allclose(spin[:, 0, 0], tau * dt * k / 1.5e-3, rtol=1.0e-3)
-    np.testing.assert_allclose(spin[:, 1, 2], tau * dt * k / 3.0e-3, rtol=1.0e-3)
-    np.testing.assert_allclose(spin[:, 0, 1:], 0.0, atol=1.0e-6)
-    np.testing.assert_allclose(spin[:, 1, :2], 0.0, atol=1.0e-6)
+    np.testing.assert_allclose(in_place[:, 0, 0], tau * dt * k / 2.001e-3, rtol=1.0e-3)
+    np.testing.assert_allclose(in_place[:, 1, 2], tau * dt * k / 4.001e-3, rtol=1.0e-3)
+    np.testing.assert_allclose(in_place[:, 0, 1:], 0.0, atol=1.0e-6)
+    np.testing.assert_allclose(in_place[:, 1, :2], 0.0, atol=1.0e-6)
 
 
 def test_body_without_a_closed_mesh_takes_the_volume_of_water(test, device):
@@ -223,8 +231,8 @@ class TestSolverIPCChecks(unittest.TestCase):
 for name, func in (
     ("test_inertia_checks", test_inertia_checks),
     (
-        "test_inertia_that_violates_the_triangle_inequality_is_clamped",
-        test_inertia_that_violates_the_triangle_inequality_is_clamped,
+        "test_inertia_that_violates_the_triangle_inequality_is_corrected",
+        test_inertia_that_violates_the_triangle_inequality_is_corrected,
     ),
     (
         "test_body_without_a_closed_mesh_takes_the_volume_of_water",
