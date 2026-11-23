@@ -1154,7 +1154,14 @@ class SolverIPC(SolverBase, CouplingInterface):
         if self._start_unchecked:
             # the first step, not captured: the start of the pairs with a body whose start the caller writes, on the
             # state just loaded from state_in, before anything runs from it (_check_start)
-            _check_start(self, "the state of the first step (its state_in)")
+            try:
+                _check_start(self, "the state of the first step (its state_in)")
+            except ValueError:
+                if self.model.body_count:
+                    # nothing ran, and the next step is the first again: the kinematic bodies moving toward their
+                    # aims take its state_in too, not the poses this step loaded (_aim_kinematic_bodies held them)
+                    self._body_hold.zero_()
+                raise
             self._start_unchecked = False
         self._steps += 1
         self._write_forces(state_in, control)

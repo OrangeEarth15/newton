@@ -546,7 +546,8 @@ caller writes a twist. The step starts from the pose the body reached, so the mo
 to the aim is swept, a jump included; the first step after the solver is built
 and the step after a :meth:`~newton.solvers.SolverIPC.reset` that selects the
 body's world take ``state_in`` instead, which is how a caller moves such a body
-without sweeping. ``state_out`` holds the pose the body reached and its twist,
+without sweeping; a first step that the start check refuses (see
+:ref:`ipc-start`) leaves the next step the first. ``state_out`` holds the pose the body reached and its twist,
 not a copy of ``state_in``. Pairs of two shapes that are each kinematic or
 static do not collide, as Newton's collision pipeline can filter them
 (``include_static_kinematic_pairs=False``) and as they never collide in the

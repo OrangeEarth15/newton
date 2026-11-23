@@ -517,6 +517,30 @@ def test_import_requires_the_kinematic_sweep(test, device):
         newton.solvers.SolverIPC._uipc_warp = imported
 
 
+def test_refused_first_step_takes_state_in_again(test, device):
+    """With kinematic_motion="aim" a first step that the start check refuses, its state_in putting a kinematic box
+    through a body, leaves the next step the first: the step again from the model's state, where the box is clear,
+    takes the box's pose from its state_in and runs. The refused step held the box at the pose it had loaded, and the
+    step again failed on it."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
+    pusher = builder.add_body(xform=wp.transform(wp.vec3(1.0, 0.0, 1.0), wp.quat_identity()), is_kinematic=True)
+    builder.add_shape_box(pusher, hx=0.1, hy=0.1, hz=0.1)
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model, kinematic_motion="aim")
+    np.testing.assert_array_equal(solver._aim_bodies, [pusher])
+    through = model.state()
+    q = through.body_q.numpy()
+    q[pusher, 0] = 0.05
+    through.body_q.assign(q)
+    with test.assertRaisesRegex(ValueError, r"body 0 and body 1\b.*intersect in the state of the first step"):
+        solver.step(through, model.state(), None, None, 0.01)
+    s1 = model.state()
+    solver.step(model.state(), s1, None, None, 0.01)
+    test.assertEqual(solver._engine.frames, 1)
+    np.testing.assert_allclose(s1.body_q.numpy()[pusher, :3], [1.0, 0.0, 1.0], rtol=0.0, atol=1e-6)
+
+
 @requires("uipc_warp")
 class TestSolverIPCKinematicMotion(unittest.TestCase):
     """Which kinematic bodies move toward their aims, the twist of a body that becomes kinematic, and the sweep of the
@@ -529,6 +553,7 @@ for name, func in (
     ("test_al_ipc_takes_aims_without_aiming_bodies", test_al_ipc_takes_aims_without_aiming_bodies),
     ("test_jump_through_a_surface_fails_the_step", test_jump_through_a_surface_fails_the_step),
     ("test_import_requires_the_kinematic_sweep", test_import_requires_the_kinematic_sweep),
+    ("test_refused_first_step_takes_state_in_again", test_refused_first_step_takes_state_in_again),
 ):
     add_function_test(TestSolverIPCKinematicMotion, name, func, devices=devices)
 
