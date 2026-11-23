@@ -1,0 +1,1 @@
+Call SolverIPC's feature modules when the solve is built, when an engine is made, before and after every step and in notify_model_changed; the modules do nothing there yet.

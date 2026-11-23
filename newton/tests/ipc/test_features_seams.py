@@ -3,8 +3,10 @@
 
 """The points at which SolverIPC meets the features libuipc has no term for (``newton._src.solvers.ipc.features``):
 the refusals the feature modules hold, with their messages and in their order, the joints the universal module is
-offered, and the ``contact_damping`` option."""
+offered, the modules' hooks at build, step and notify, and the ``contact_damping`` option."""
 
+import contextlib
+import types
 import unittest
 import warnings
 from unittest import mock
@@ -13,9 +15,9 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.ipc import features
+from newton._src.solvers.ipc import features, solver_ipc
 from newton._src.solvers.ipc.joints import _map_joints
-from newton.tests.ipc._fixtures import _box_body, _scene_calls
+from newton.tests.ipc._fixtures import _TINY_LISTS, _box_body, _scene_calls, _stacking_cubes
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 D = newton.ModelBuilder.JointDofConfig
@@ -502,6 +504,156 @@ def test_taken_joints_are_left_to_their_module(test, device):
         np.testing.assert_array_equal(s1.joint_q.numpy()[1:3], [7.0, 7.0])
 
 
+# the hooks every feature module has besides its checks, and the modules' names in the order the solver calls them
+_HOOKS = ("build", "engine_inputs", "prepare", "finish", "notify")
+_NAMES = tuple(feature.__name__.rsplit(".", 1)[1] for feature in features.FEATURES)
+
+
+def _every(hook):
+    """``hook`` of every module, in the order the solver calls them."""
+    return [f"{name}.{hook}" for name in _NAMES]
+
+
+@contextlib.contextmanager
+def _recorded(solver=None, returns=None):
+    """Record, in the order they happen, the calls of every feature module's hooks (``"damping.build"``, ...), each
+    calling the module's own hook, and of the solver's points around them: its last write of a step's inputs
+    (``"inputs"``), the eager frame (``"_advance_eager"``), the engine's frame (``"advance"``), state_out
+    (``"_store"``) and the observables (``"_write_observables"``). Yields ``calls``, a list of ``(name, args, engine,
+    scene)``: whether the solver had an engine at the call, and its scene then. ``returns``: what a hook returns
+    instead of the module's answer, by name."""
+    calls = []
+
+    def recorder(name, function):
+        def call(*args, **kwargs):
+            owner = args[0] if name.split(".")[0] in _NAMES else solver
+            calls.append((name, args, getattr(owner, "_engine", None) is not None, getattr(owner, "_scene", None)))
+            result = function(*args, **kwargs)
+            return (returns or {}).get(name, result)
+
+        return call
+
+    with contextlib.ExitStack() as stack:
+        for name, module in zip(_NAMES, features.FEATURES, strict=True):
+            for hook in _HOOKS:
+                stack.enter_context(mock.patch.object(module, hook, recorder(f"{name}.{hook}", getattr(module, hook))))
+        stack.enter_context(
+            mock.patch.object(solver_ipc, "_write_body_stiffness", recorder("inputs", solver_ipc._write_body_stiffness))
+        )
+        if solver is not None:
+            for method in ("_advance_eager", "_store", "_write_observables"):
+                stack.enter_context(mock.patch.object(solver, method, recorder(method, getattr(solver, method))))
+            stack.enter_context(
+                mock.patch.object(solver._engine, "advance", recorder("advance", solver._engine.advance))
+            )
+        yield calls
+
+
+def _names(calls):
+    return [call[0] for call in calls]
+
+
+def test_hooks_are_called_at_their_points(test, device):
+    """The solver calls every feature module's hooks at their points, the modules in the order of FEATURES: build when
+    the solve is built, with the scene the solver laid out, before the scene is the solve's and the engine is made;
+    engine_inputs for every engine made from it, with the solver's external accelerations among the element groups,
+    before the engine is made (again when an eager step enlarges the contact lists); prepare in every step after the
+    solver's last input and before the frame, and finish after state_out and the observables, in an eager step and in
+    a captured one (at its capture: a replay calls nothing), and in a step that fails in some worlds alone, not in one
+    that fails; notify in notify_model_changed, where a module's True builds the solve again."""
+    import uipc_warp.arrays  # noqa: PLC0415
+
+    model = _falling_box(device)
+    with _recorded() as calls:
+        solver = newton.solvers.SolverIPC(model)
+    test.assertEqual(_names(calls), _every("build") + _every("engine_inputs"))
+    for name, args, engine, scene in calls:
+        test.assertIs(args[0], solver)
+        test.assertFalse(engine, name)  # before the engine is made
+        if name.endswith(".build"):
+            test.assertIsInstance(args[1], uipc_warp.arrays.ArrayScene)
+            test.assertIs(args[1], solver._scene)  # the solve's scene, which it was not yet
+            test.assertIsNone(scene)
+        else:
+            test.assertIs(scene, solver._scene)
+            test.assertIs(args[1]["elements"][-1], solver._forces)  # the solver's own groups come first
+    test.assertIsNotNone(solver._engine)
+
+    observables = solver.observables({solver.ObservableKind.STATUS})
+    s0, s1 = model.state(), model.state()
+    control = model.control()
+    with _recorded(solver) as calls:
+        solver.step(s0, s1, control, None, 0.01, observables=observables)
+        eager = len(calls)
+        with wp.ScopedCapture(device=device) as capture:
+            solver.step(s1, s0, None, None, 0.01, observables=observables)
+        captured = len(calls)
+        wp.capture_launch(capture.graph)
+    # the first eager frame of an engine captures the engine's frame into the solver's own graph
+    frame = ["_advance_eager", "advance", "_store", "_write_observables"]
+    test.assertEqual(_names(calls[:eager]), ["inputs", *_every("prepare"), *frame, *_every("finish")])
+    frame = ["advance", "_store", "_write_observables"]
+    test.assertEqual(_names(calls[eager:captured]), ["inputs", *_every("prepare"), *frame, *_every("finish")])
+    test.assertEqual(len(calls), captured)  # the replay calls nothing
+    for name, args, _, _ in calls[:eager]:
+        if name.endswith(".prepare"):
+            test.assertEqual(args[1:], (s0, control, 0.01))
+        if name.endswith(".finish"):
+            test.assertEqual(args[1:], (s1, observables))
+
+    # a step that fails in some independent worlds alone writes state_out and calls finish; one that fails does not
+    failed = types.SimpleNamespace(failed=True, overflowed=False, traversal_exhausted=False)
+    for alone in (True, False):
+        with test.subTest(alone=alone):
+            with (
+                _recorded(solver) as calls,
+                mock.patch.object(solver, "_advance_eager", return_value=failed),
+                mock.patch.object(solver, "_failed_alone", return_value=alone),
+                mock.patch.object(solver, "_failed_worlds", return_value={0: 1}),
+                mock.patch.object(solver, "_world_failure", return_value="failed alone"),
+                mock.patch.object(solver, "_failure", return_value="failed"),
+                test.assertRaisesRegex(RuntimeError, "failed alone" if alone else "failed"),
+            ):
+                solver.step(s0, s1, None, None, 0.01, observables=observables)
+            ends = ["_store", "_write_observables", *_every("finish")] if alone else ["_write_observables"]
+            test.assertEqual(_names(calls)[-len(ends) :], ends)
+
+    # notify: every module, after which a True builds the solve again
+    engine = solver._engine
+    with _recorded(solver) as calls:
+        solver.notify_model_changed(newton.ModelFlags.JOINT_PROPERTIES)
+    test.assertEqual(_names(calls), _every("notify"))
+    test.assertIs(solver._engine, engine)
+    with _recorded(solver, returns={"contact_damping.notify": True}) as calls:
+        solver.notify_model_changed(newton.ModelFlags.JOINT_PROPERTIES)
+    test.assertEqual(_names(calls), _every("notify") + _every("build") + _every("engine_inputs"))
+    test.assertIsNot(solver._engine, engine)
+    for name, args, _, _ in calls[: len(_NAMES)]:
+        test.assertEqual(args[1], newton.ModelFlags.JOINT_PROPERTIES, name)
+
+    # an eager step whose contact lists overflow makes an engine with longer lists: engine_inputs again, in the step
+    model = _stacking_cubes(device)
+    solver = newton.solvers.SolverIPC(model)
+    solver._make_engine(_TINY_LISTS)
+    s0, s1 = model.state(), model.state()
+    regrown = []
+    for _ in range(30):
+        with _recorded(solver) as calls:
+            solver.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+        names = _names(calls)
+        if "damping.engine_inputs" in names:
+            regrown.append(names)
+    test.assertGreater(len(regrown), 0)
+    for names in regrown:  # each longer engine: the modules' inputs, then the solver's inputs of the step again
+        between = names[names.index("_advance_eager") + 1 : names.index("_store")]
+        if between[:1] == ["advance"]:  # the engine before captured its frame again (_engine_outdated)
+            between = between[1:]
+        regrow = [*_every("engine_inputs"), "inputs"]
+        test.assertGreater(len(between), 0)
+        test.assertEqual(between, regrow * (len(between) // len(regrow)))
+
+
 def _falling_box(device):
     """A box 0.4 m above the ground."""
     builder = newton.ModelBuilder()
@@ -542,6 +694,7 @@ for name, func in (
     ("test_refusals_keep_their_order", test_refusals_keep_their_order),
     ("test_refusals_at_notify", test_refusals_at_notify),
     ("test_taken_joints_are_left_to_their_module", test_taken_joints_are_left_to_their_module),
+    ("test_hooks_are_called_at_their_points", test_hooks_are_called_at_their_points),
     ("test_contact_damping_takes_none_only", test_contact_damping_takes_none_only),
 ):
     add_function_test(TestSolverIPCFeatureSeams, name, func, devices=devices)

@@ -20,9 +20,11 @@ import numpy as np
 from newton import MAXVAL, JointTargetMode, JointType
 
 if TYPE_CHECKING:
-    from newton import Model
+    from newton import Control, Model, ModelFlags, State
+    from newton.solvers import SolverBase
 
     from ..joints import _JointDofs
+    from ..solver_ipc import SolverIPC
     from . import FeatureOptions
 
 
@@ -88,3 +90,25 @@ def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
             "set limit_ke to 0, or the bounds to -MAXVAL and MAXVAL. libuipc limits revolute and prismatic joints only",
         )
     return None
+
+
+def build(solver: SolverIPC, scene) -> None:
+    """Nothing."""
+
+
+def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
+    """Nothing."""
+
+
+def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> None:
+    """Nothing."""
+
+
+def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observables | None) -> None:
+    """Nothing."""
+
+
+def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
+    """Nothing: the solver checks the joints again (``joint_refusal``) when a flag of their degrees of freedom is
+    reported."""
+    return False

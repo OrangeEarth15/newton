@@ -902,6 +902,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         if len(self._aim_bodies):  # libuipc's soft transform constraint on the kinematic bodies, in their order
             ratio = self._kinematic_strength_ratio
             scene.add_soft_transform_constraints(self._aim_bodies, (ratio, ratio))
+        features.build(self, scene)  # the feature modules, on the scene the solver laid out
         self._scene = scene
         self._scene_inputs = _scene_inputs_now(self)
         self._element_inputs = _element_inputs_now(self)
@@ -1082,6 +1083,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         if len(self._force_blocks):
             self._forces = self._uipc_warp.arrays.ExternalAcceleration("newton_forces", self._force_blocks, device)
             inputs["elements"].append(self._forces)
+        features.engine_inputs(self, inputs)  # the feature modules' element groups
         self._engine = self._uipc_warp.make_engine(
             self._config, self._options, **inputs, device=device, capacity=capacity
         )
@@ -1188,6 +1190,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         _write_joint_controls(self, control, dt)
         _write_stitch_stiffness(self, dt)
         _write_body_stiffness(self, dt)
+        features.prepare(self, state_in, control, dt)  # the feature modules' inputs of the step
         if self.model.device.is_capturing:
             # the solve joins the caller's graph; it cannot synchronize, grow or raise (docs/solvers/ipc.rst > "Status")
             self._engine.stop_on_overflow = False
@@ -1204,6 +1207,7 @@ class SolverIPC(SolverBase, CouplingInterface):
                 _shift_joint_history(self)
                 self._store(state_in.body_q, state_in.body_qd, state_out)
                 self._write_observables(observables, state_out)
+                features.finish(self, state_out, observables)
                 raise RuntimeError(self._world_failure(failed))
             if status.failed:
                 self._write_observables(observables, state_out)
@@ -1212,6 +1216,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         _shift_joint_history(self)
         self._store(state_in.body_q, state_in.body_qd, state_out)
         self._write_observables(observables, state_out)
+        features.finish(self, state_out, observables)  # the feature modules' outputs of the step
 
     def _start_in_capture(self) -> None:
         """The first step, captured in a graph: it cannot read its ``state_in``, so the pairs with a body whose start
@@ -2101,6 +2106,7 @@ class SolverIPC(SolverBase, CouplingInterface):
                 # engine was built with
                 aims = self._aim_bodies
                 rebuild |= any(not np.array_equal(a[aims], b[aims]) for a, b in zip(dyadic, self._dyadic, strict=True))
+        rebuild |= features.notify(self, flags)  # every feature module, which may need the solve built again
         if rebuild:
             # what the solver wrote for the bodies, whose twists a body that becomes kinematic does not take
             written = self._body_qd_written.numpy() if model.body_count else None

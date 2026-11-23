@@ -18,9 +18,11 @@ import numpy as np
 from newton import JointType
 
 if TYPE_CHECKING:
-    from newton import Model
+    from newton import Control, Model, ModelFlags, State
+    from newton.solvers import SolverBase
 
     from ..joints import _JointDofs
+    from ..solver_ipc import SolverIPC
     from . import FeatureOptions
 
 
@@ -56,3 +58,25 @@ def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
         lambda d: f"joint_friction {float(friction[d])!r}",
         "set it to 0. libuipc's joints have no friction",
     )
+
+
+def build(solver: SolverIPC, scene) -> None:
+    """Nothing."""
+
+
+def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
+    """Nothing."""
+
+
+def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> None:
+    """Nothing."""
+
+
+def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observables | None) -> None:
+    """Nothing."""
+
+
+def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
+    """Nothing: the solver checks the mimic constraints again (``check``) when ``CONSTRAINT_PROPERTIES`` is
+    reported, and the joints' friction when a flag of their degrees of freedom is."""
+    return False

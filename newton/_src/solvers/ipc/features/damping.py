@@ -17,9 +17,11 @@ import numpy as np
 from ..scene import _own_elements
 
 if TYPE_CHECKING:
-    from newton import Model
+    from newton import Control, Model, ModelFlags, State
+    from newton.solvers import SolverBase
 
     from ..joints import _JointDofs
+    from ..solver_ipc import SolverIPC
     from . import FeatureOptions
 
 
@@ -51,3 +53,25 @@ def check(model: Model, options: FeatureOptions, at: str) -> None:
 def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
     """Nothing of the joints."""
     return None
+
+
+def build(solver: SolverIPC, scene) -> None:
+    """Nothing."""
+
+
+def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
+    """Nothing."""
+
+
+def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> None:
+    """Nothing."""
+
+
+def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observables | None) -> None:
+    """Nothing."""
+
+
+def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
+    """Nothing: the solver checks the attachments again (``check``) when ``CONSTRAINT_PROPERTIES`` is reported, and
+    builds the solve again, which checks the springs, when their damping changes."""
+    return False
