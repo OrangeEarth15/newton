@@ -364,14 +364,14 @@ method's own (libuipc and the authors' code do the same), and it gains energy
 where ``d_hat`` exceeds the distance a body travels in a step: a cube dropped
 0.4 m onto the ground in steps of 1/1800 s leaves at 4.4 times its impact speed
 of 2.8 m/s with ``d_hat`` 1 cm, at 0.7 times with 1 mm, and in steps of 1/100 s
-at 0.34 times with 1 cm. libuipc's AL-IPC drops a pair from the active set three
-outer updates after it opens (its default ``decay_factor`` 0.3), so a resting
-contact that opens for a moment joins again at the surface and is pushed out
-again: a stack of two 0.1 m boxes in steps of 1/100 s keeps rocking with
-``d_hat`` 5 mm or 2 mm, in most runs until its upper box falls off, as on
-libuipc's own backend, where the paper's decay factor 0.9, which this solver
-does not set, brought it to rest in most runs. Keep ``d_hat`` well below the
-distance a body moves in a step. A kinematic body moved between steps is swept
+at 0.34 times with 1 cm. Keep ``d_hat`` well below the distance a body moves in
+a step. libuipc's default ``decay_factor`` 0.3 drops a pair from the active set
+three outer updates after it opens, so a resting contact that opens for a moment
+joins again at the surface and is pushed out again: a stack of two 0.1 m boxes
+in steps of 1/100 s keeps rocking with ``d_hat`` 5 mm or 2 mm, in most runs
+until its upper box falls off, on libuipc's own backend too. SolverIPC takes the
+paper's decay factor 0.9 instead (libuipc-warp's ``al_decay_factor``), which
+keeps a pair about 44 updates: such a stack comes to rest. A kinematic body moved between steps is swept
 from where the last step left it to its pose in ``state_in`` (the method's
 moving boundaries, which libuipc's frame lacks: there nothing a kinematic body
 moves into collides with it): what it meets joins the active set and is pushed,

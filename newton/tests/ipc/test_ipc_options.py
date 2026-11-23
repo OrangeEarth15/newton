@@ -293,11 +293,8 @@ def test_bdf2_drives(test, device):
 
 def test_al_ipc_rests_at_d_hat(test, device):
     """With contact_constitution="al-ipc" a box dropped onto the ground comes to rest with its gap at d_hat, the
-    distance AL-IPC's constraint keeps, to 1%, and at rest; the barrier keeps it inside d_hat. (libuipc's AL-IPC does
-    not keep a stack of two such boxes at this d_hat and dt: a pair that opens leaves the active set three outer
-    updates later and joins again at the surface, where its constraint pushes it out to d_hat; on libuipc's own CUDA
-    backend, as here, the upper box slides off within two seconds.) A free particle and a static box, which AL-IPC
-    would not constrain, are refused."""
+    distance AL-IPC's constraint keeps, to 1%, and at rest; the barrier keeps it inside d_hat. A free particle and a
+    static box, which AL-IPC would not constrain, are refused."""
     d_hat = 0.005
     for constitution in ("ipc", "al-ipc"):
         with test.subTest(contact_constitution=constitution):
@@ -331,12 +328,38 @@ def test_al_ipc_rests_at_d_hat(test, device):
         newton.solvers.SolverIPC(builder.finalize(device=device), contact_constitution="al-ipc")
 
 
+def test_al_ipc_keeps_a_stack(test, device):
+    """Under contact_constitution="al-ipc" SolverIPC takes the AL-IPC paper's decay factor 0.9 of an opened pair's
+    weight, where libuipc's default 0.3 drops the pair within three outer updates, so that a contact that opens for a
+    moment joins again at the surface and is pushed out to d_hat again: a stack of two 0.1 m boxes released 10 mm above
+    the ground and above each other, d_hat 5 mm, holds through 300 steps of 0.01 s, the upper box over the lower one at
+    every step, and is at rest over the last 100 steps. (Under 0.3 the stack keeps bouncing, faster than 6 m/s, and the
+    upper box falls off in some runs.)"""
+    d_hat = 0.005
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    _box_body(builder, (0.0, 0.0, 0.06), (0.05, 0.05, 0.05))
+    _box_body(builder, (0.0, 0.0, 0.17), (0.05, 0.05, 0.05))
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model, d_hat=d_hat, contact_constitution="al-ipc")
+    s0, s1 = model.state(), model.state()
+    for k in range(300):
+        solver.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+        q = s0.body_q.numpy()
+        test.assertLess(np.abs(q[1, :2] - q[0, :2]).max(), 0.05, f"step {k}: the upper box is off the lower one")
+        test.assertGreater(q[1, 2] - q[0, 2], 0.1, f"step {k}: the upper box is below the lower one's top")
+        if k >= 200:
+            test.assertLess(np.abs(s0.body_qd.numpy()).max(), 1e-3, f"step {k}: the stack moves")
+    test.assertEqual(solver._config.al_decay_factor, 0.9)
+
+
 def test_al_ipc_sweeps_kinematic_bodies(test, device):
     """Under contact_constitution="al-ipc" a kinematic body moved between steps is swept from where the last step left
     it to its state_in pose (AL-IPC's moving boundaries; libuipc's frame takes the written pose, and nothing the body
-    moves into collides with it): a box moved at 1.2 m/s pushes a free sphere it reaches, the two apart after every
-    step. The first step, and the step after reset(), place it at its pose instead: put across the sphere there, it
-    does not touch it, where the same move swept pushes the sphere away."""
+    moves into collides with it): a box moved at 1.2 m/s pushes a free sphere it reaches along, the two apart after
+    every step. The first step, and the step after reset(), place it at its pose instead: put across the sphere there,
+    it does not touch it, where the same move swept pushes the sphere away."""
     dt, speed = 1.0 / 240.0, 1.2
 
     def scene():
@@ -367,7 +390,9 @@ def test_al_ipc_sweeps_kinematic_bodies(test, device):
         gaps.append(q[probe, 0] - 0.05 - (q[kinematic, 0] + 0.1))
     test.assertGreater(min(gaps), -1e-6)
     test.assertGreater(float(s0.body_q.numpy()[probe, 0]), 0.1)
-    test.assertGreater(float(s0.body_qd.numpy()[probe, 0]), speed)
+    # pushed along; with libuipc's decay factor 0.3 the push-out of a pair that joins again drove the sphere faster
+    # than the box, with SolverIPC's 0.9 it keeps up with it
+    test.assertGreater(float(s0.body_qd.numpy()[probe, 0]), 0.5 * speed)
     # placements: the first step, and the step after reset(); a move without one is swept
     model, solver, kinematic, probe = scene()
     s0, s1 = model.state(), model.state()
@@ -478,6 +503,7 @@ for name, func in (
     ("test_bdf2_history_restarts_where_gravity_changes", test_bdf2_history_restarts_where_gravity_changes),
     ("test_bdf2_drives", test_bdf2_drives),
     ("test_al_ipc_rests_at_d_hat", test_al_ipc_rests_at_d_hat),
+    ("test_al_ipc_keeps_a_stack", test_al_ipc_keeps_a_stack),
     ("test_al_ipc_sweeps_kinematic_bodies", test_al_ipc_sweeps_kinematic_bodies),
     ("test_al_ipc_status_and_new_masses", test_al_ipc_status_and_new_masses),
     ("test_mas_matches_the_block_diagonal_preconditioner", test_mas_matches_the_block_diagonal_preconditioner),

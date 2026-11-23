@@ -1,0 +1,1 @@
+Take the AL-IPC paper's decay factor 0.9 of an opened pair's weight under SolverIPC's contact_constitution="al-ipc", where libuipc's default 0.3, which libuipc-warp keeps, drops the pair within three outer updates: a stack of two boxes, which kept rocking and in most runs lost its upper box, comes to rest.

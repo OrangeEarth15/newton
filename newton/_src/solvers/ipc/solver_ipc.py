@@ -129,6 +129,10 @@ _JOINT_STRENGTH_RATIO = 100.0
 # kinematic_strength_ratio
 _KAPPA = 1.0e9
 _KINEMATIC_STRENGTH_RATIO = 100.0
+# AL-IPC's decay of the weight of a pair that has opened: the paper's 0.9 (Zheng, Luo and Li), under which a stack of
+# boxes comes to rest, where libuipc's default 0.3 drops the pair within three outer updates (docs/solvers/ipc.rst >
+# "AL-IPC contact")
+_AL_DECAY_FACTOR = 0.9
 # MuJoCo's CONNECT and WELD equality types (mjtEq), and the target kind with which Newton's importers link an equality
 # row to the loop joint they turned it into (MjcEqualityTargetKind.JOINT); neither has a public name in Newton
 _EQ_CONNECT, _EQ_WELD = 0, 1
@@ -624,6 +628,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             raise ValueError(f"SolverIPC: body_kappa must be a finite positive stiffness, got {body_kappa}.")
         uipc_warp = self._import_uipc_warp()
         self._d_hat_given = d_hat is not None
+        al = {"al_decay_factor": _AL_DECAY_FACTOR} if contact_constitution == "al-ipc" else {}
         self._config = uipc_warp.SimConfig(
             kappa=kappa,
             d_hat=_D_HAT if d_hat is None else d_hat,
@@ -638,6 +643,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             integrator=integrator,
             contact_constitution=contact_constitution,
             fem_preconditioner=fem_preconditioner,
+            **al,
         )
         # a BDF2 history starts with an implicit Euler step: at the first step, and at every step from a state the
         # solver did not write (docs/solvers/ipc.rst > "BDF2")
