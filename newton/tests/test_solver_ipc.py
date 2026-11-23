@@ -1014,8 +1014,7 @@ def test_external_forces_match_closed_form(test, device):
         bodies.append(b)
     model = builder.finalize(device=device)
     # libuipc's body stiffness: the closed forms are rigid ones, and with the default stiffness a box of unequal sides
-    # that a torque starts turning runs 7e-4 of its turn ahead of a rigid one after a step (class docstring, **Rigid
-    # bodies**)
+    # that a torque starts turning runs 7e-4 of its turn ahead of a rigid one after a step (docs/solvers/ipc.rst > "Rigid # bodies")
     solver = newton.solvers.SolverIPC(
         model, newton_velocity_tol=1e-6, linear_tol_rate=1e-12, semi_implicit=False, body_kappa=1.0e8
     )
@@ -3773,7 +3772,7 @@ def test_fixed_and_ball_joints_hold(test, device):
     state.joint_q.assign(q)
     newton.eval_fk(model, state.joint_q, state.joint_qd, state)
     # libuipc's body stiffness: with the default one the arm's own stretch under the swing takes the ball joint's
-    # anchors 1.03e-4 m apart, past the joints' penalty (class docstring, **Rigid bodies**)
+    # anchors 1.03e-4 m apart, past the joints' penalty (docs/solvers/ipc.rst > "Rigid bodies")
     body_q, _ = _steps(
         model,
         newton.solvers.SolverIPC(model, body_kappa=1.0e8),

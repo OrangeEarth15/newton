@@ -214,10 +214,10 @@ def _store_body_momentum(
     body_qd: wp.array[wp.spatial_vector],
     written_qd: wp.array[wp.spatial_vector],
 ):
-    """``body_rotation="rigid"`` (class docstring, **Rigid bodies**): the angular velocity of ``body_qd`` (and of
-    ``written_qd``) that carries the body's angular momentum about its centre of mass with its rigid inertia,
-    w = (R I R^T)^-1 L, with L = vee(A_dot S_c A^T - A S_c A_dot^T), I = tr(S_c) 1 - S_c and ``spread`` the second
-    moment S_c about the centre of mass in the body frame; written over what ``_store_bodies`` wrote."""
+    """``body_rotation="rigid"`` (:ref:`ipc-rigid-bodies`): the angular velocity of ``body_qd`` (and of ``written_qd``)
+    that carries the body's angular momentum about its centre of mass with its rigid inertia, w = (R I R^T)^-1 L, with L
+    = vee(A_dot S_c A^T - A S_c A_dot^T), I = tr(S_c) 1 - S_c and ``spread`` the second moment S_c about the centre of
+    mass in the body frame; written over what ``_store_bodies`` wrote."""
     b = wp.tid()
     if kinematic[b] != 0:
         return
@@ -269,11 +269,11 @@ def _aim_kinematic_bodies(
     v_nm1: wp.array[wp.vec3d],
     hold: wp.array[wp.int32],
 ):
-    """The aim of every kinematic body of the soft transform constraint's rows (``kinematic_motion="aim"``, class
-    docstring, **Kinematic bodies**): its ``state_in`` pose advanced by its twist over the step, the centre of mass by
-    ``v dt``, the rotation by the exponential of ``omega dt``, as ``q_aim = (p, rows of R)``; the constraint on; the
-    body's affine velocity ``(q_aim - q) / dt`` from its state ``q``, so that the step's prediction ``q + v dt`` is the
-    aim, and with ``bdf2`` the history of a restart from that velocity (``x_nm1 = q - dt v``, ``v_nm1 = v``), whose
+    """The aim of every kinematic body of the soft transform constraint's rows (``kinematic_motion="aim"``,
+    :ref:`ipc-kinematic-bodies`): its ``state_in`` pose advanced by its twist over the step, the centre of mass by ``v
+    dt``, the rotation by the exponential of ``omega dt``, as ``q_aim = (p, rows of R)``; the constraint on; the body's
+    affine velocity ``(q_aim - q) / dt`` from its state ``q``, so that the step's prediction ``q + v dt`` is the aim,
+    and with ``bdf2`` the history of a restart from that velocity (``x_nm1 = q - dt v``, ``v_nm1 = v``), whose
     prediction is the same; and the body held from the next step on, so that it starts where it ends."""
     k = wp.tid()
     b = bodies[k]
@@ -461,16 +461,16 @@ def _joint_terms(
     force_on: wp.array[wp.int32],
     force: wp.array[wp.float64],
 ):
-    """The terms of a revolute or prismatic joint for the next step, from Newton's model and control (class docstring,
-    **Joints**): the strength ratio of its penalty ``strength`` (0 when disabled) for the engine's ``mass_sum``, the
-    masses the joint was built with; the drive, passive spring and passive damping as one quadratic potential of the
-    step (libuipc's driving term, ``drive_scale`` 1 for a revolute joint, 1/2 for a prismatic one, whose driving
-    energy counts its distance twice), with the velocity at the step's end of the step's integrator: BDF1, or with
-    ``bdf2`` BDF2 from the coordinate ``q_prev`` at the start of the step before, unless the engine's frame starts the
-    history of the joint's bodies with an implicit Euler step: that of every row (``restart[0]``), or with ``per_row``
-    that of the rows of a reset or a new state of their world (``restart_rows``, at the base row of the child or of the
-    parent); the limit as libuipc's cubic penalty with Newton's limit stiffness at ``_LIMIT_OVERSHOOT``; ``joint_f`` as
-    libuipc's external torque or force. ``q_start`` takes the coordinate at the step's start."""
+    """The terms of a revolute or prismatic joint for the next step, from Newton's model and control
+    (:ref:`ipc-joints`): the strength ratio of its penalty ``strength`` (0 when disabled) for the engine's ``mass_sum``,
+    the masses the joint was built with; the drive, passive spring and passive damping as one quadratic potential of the
+    step (libuipc's driving term, ``drive_scale`` 1 for a revolute joint, 1/2 for a prismatic one, whose driving energy
+    counts its distance twice), with the velocity at the step's end of the step's integrator: BDF1, or with ``bdf2``
+    BDF2 from the coordinate ``q_prev`` at the start of the step before, unless the engine's frame starts the history of
+    the joint's bodies with an implicit Euler step: that of every row (``restart[0]``), or with ``per_row`` that of the
+    rows of a reset or a new state of their world (``restart_rows``, at the base row of the child or of the parent); the
+    limit as libuipc's cubic penalty with Newton's limit stiffness at ``_LIMIT_OVERSHOOT``; ``joint_f`` as libuipc's
+    external torque or force. ``q_start`` takes the coordinate at the step's start."""
     e = wp.tid()
     j = joints[e]
     d = joint_qd_start[j]
@@ -629,19 +629,19 @@ def _joint_option_terms(
     force_on: wp.array[wp.int32],
     force: wp.array[wp.float64],
 ):
-    """The driving term of a revolute or prismatic joint with the terms SolverIPC adds on request (class docstring,
-    **Joints**), launched after ``_joint_terms`` and in place of its driving term: the drive, passive spring and
-    passive damping as ``_joint_terms`` computes them (the same expressions, so that terms of 0 leave its values bit
-    for bit), and with ``limit_damping`` the damping ``-joint_limit_kd qd`` of a joint whose coordinate is past one
-    of its limits at the step's start, a passive damping of the step's velocity (BDF1 or BDF2, as ``_joint_terms``
-    takes it) folded into the same quadratic potential; with ``armature`` the inertia of the coordinate, the
-    step's kinetic term ``a/2 |q - q~|^2 / dt^2`` (BDF2: 9/4 of it) of ``joint_armature`` a with the integrator's
-    prediction q~ from the coordinate and its rate ``rate_start`` at the step's start (``_joint_rates``; BDF2 also
-    the step before's, ``q_prev`` and ``rate_prev``), as libuipc writes the inertia of every degree of freedom; with
-    ``effort`` the bound ``joint_effort_limit`` L (below Newton's default 1e6) of the drive's force, decided at the
-    step's start: where ``ke (q* - q_n) + kd (qd* - qd_n)`` exceeds L in magnitude, the step takes the constant
-    force of that sign and magnitude L as libuipc's joint torque or force (``force``, with ``joint_f``) in place of
-    the drive's quadratic, whose passive spring and damping remain."""
+    """The driving term of a revolute or prismatic joint with the terms SolverIPC adds on request (:ref:`ipc-joints`),
+    launched after ``_joint_terms`` and in place of its driving term: the drive, passive spring and passive damping as
+    ``_joint_terms`` computes them (the same expressions, so that terms of 0 leave its values bit for bit), and with
+    ``limit_damping`` the damping ``-joint_limit_kd qd`` of a joint whose coordinate is past one of its limits at the
+    step's start, a passive damping of the step's velocity (BDF1 or BDF2, as ``_joint_terms`` takes it) folded into the
+    same quadratic potential; with ``armature`` the inertia of the coordinate, the step's kinetic term ``a/2 |q - q~|^2
+    / dt^2`` (BDF2: 9/4 of it) of ``joint_armature`` a with the integrator's prediction q~ from the coordinate and its
+    rate ``rate_start`` at the step's start (``_joint_rates``; BDF2 also the step before's, ``q_prev`` and
+    ``rate_prev``), as libuipc writes the inertia of every degree of freedom; with ``effort`` the bound
+    ``joint_effort_limit`` L (below Newton's default 1e6) of the drive's force, decided at the step's start: where ``ke
+    (q* - q_n) + kd (qd* - qd_n)`` exceeds L in magnitude, the step takes the constant force of that sign and magnitude
+    L as libuipc's joint torque or force (``force``, with ``joint_f``) in place of the drive's quadratic, whose passive
+    spring and damping remain."""
     e = wp.tid()
     j = joints[e]
     d = joint_qd_start[j]
@@ -769,10 +769,10 @@ def _stitch_stiffness(
     inv_dt2: wp.float64,
     kappa: wp.array[wp.float64],
 ):
-    """The stiffness [N/m] of every row of a stitch group for the next step (class docstring, **Attachments**):
-    ``source`` holds the row's attachment, or -1 less its spring. An attachment takes its stiffness, 0 when it is
-    disabled, and a hard one (infinite stiffness) the penalty ``hard`` of a ball joint over ``dt^2``; a spring of
-    rest length 0 takes its ``spring_stiffness``."""
+    """The stiffness [N/m] of every row of a stitch group for the next step (:ref:`ipc-attachments`): ``source`` holds
+    the row's attachment, or -1 less its spring. An attachment takes its stiffness, 0 when it is disabled, and a hard
+    one (infinite stiffness) the penalty ``hard`` of a ball joint over ``dt^2``; a spring of rest length 0 takes its
+    ``spring_stiffness``."""
     r = wp.tid()
     s = source[r]
     k = wp.float64(0.0)
@@ -801,9 +801,9 @@ def _distance_stiffness(
     rest_length: wp.array[wp.float64],
 ):
     """The stiffness [N/m] and rest length of every row of a stitch group of distance joints for the next step
-    (class docstring, **Distance joints**): ``source`` holds the row's distance joint among ``joints``, whose penalty
-    ``hard`` is a ball joint's, over ``dt^2``, 0 when the joint is disabled; its rest length the joint's distance,
-    the bounds of its first degree of freedom."""
+    (:ref:`ipc-distance-joints`): ``source`` holds the row's distance joint among ``joints``, whose penalty ``hard`` is
+    a ball joint's, over ``dt^2``, 0 when the joint is disabled; its rest length the joint's distance, the bounds of its
+    first degree of freedom."""
     r = wp.tid()
     k = source[r]
     j = joints[k]
@@ -1294,10 +1294,10 @@ def _contact_rows(
     soft_rigid_indices: wp.array[wp.vec3i],
     contact_f: wp.array[wp.spatial_vector],
 ):
-    """One row of ``Contacts`` per contact term with a force, from libuipc-warp's ``ContactForces`` records (class
-    docstring, **Contact output**): a rigid row for a term between two shapes, a soft row for a term between a
-    particle feature and a shape, none between particle features. Grid-stride over the live records; a row takes its
-    index from the rigid or the soft count, which counts every row, and is written only below its capacity."""
+    """One row of ``Contacts`` per contact term with a force, from libuipc-warp's ``ContactForces`` records
+    (:ref:`ipc-contact-output`): a rigid row for a term between two shapes, a soft row for a term between a particle
+    feature and a shape, none between particle features. Grid-stride over the live records; a row takes its index from
+    the rigid or the soft count, which counts every row, and is written only below its capacity."""
     tid = wp.tid()
     total = int(0)
     for k in range(10):
@@ -1429,9 +1429,9 @@ def _proxy_wrenches(
     body_com: wp.array[wp.vec3],
     out: wp.array[wp.spatial_vector],
 ):
-    """A coupled solver's proxy-body feedback (class docstring, **Coupling**): the force of every contact term of the
-    step on a vertex of a proxy body, and its torque about the body's centre of mass at the end of the step, added at
-    the proxy's index ``proxy_of_body[b]``. Grid-stride over the live records of libuipc-warp's ``ContactForces``."""
+    """A coupled solver's proxy-body feedback (:ref:`ipc-coupling`): the force of every contact term of the step on a
+    vertex of a proxy body, and its torque about the body's centre of mass at the end of the step, added at the proxy's
+    index ``proxy_of_body[b]``. Grid-stride over the live records of libuipc-warp's ``ContactForces``."""
     tid = wp.tid()
     total = int(0)
     for k in range(10):
@@ -1469,9 +1469,9 @@ def _proxy_particle_forces(
     proxy_of_particle: wp.array[int],
     out: wp.array[wp.vec3],
 ):
-    """A coupled solver's proxy-particle feedback (class docstring, **Coupling**): the force of every contact term of
-    the step on a proxy particle, added at the proxy's index ``proxy_of_particle[p]``. Grid-stride over the live
-    records of libuipc-warp's ``ContactForces``."""
+    """A coupled solver's proxy-particle feedback (:ref:`ipc-coupling`): the force of every contact term of the step on
+    a proxy particle, added at the proxy's index ``proxy_of_particle[p]``. Grid-stride over the live records of
+    libuipc-warp's ``ContactForces``."""
     tid = wp.tid()
     total = int(0)
     for k in range(10):

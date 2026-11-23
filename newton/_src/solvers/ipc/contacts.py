@@ -46,8 +46,8 @@ def _compatible_worlds(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 @dataclass
 class _ContactElements:
-    """libuipc contact elements for a model and the contact model of every pair of them (class docstring,
-    **Contact**). Element 0 is libuipc's default element; it holds no vertex."""
+    """libuipc contact elements for a model and the contact model of every pair of them (:ref:`ipc-contact`). Element 0
+    is libuipc's default element; it holds no vertex."""
 
     shape: np.ndarray  # (shape_count,): the element of every shape the solver triangulates, -1 for the others
     particle: np.ndarray  # (particle_count,): the element of every particle
@@ -87,21 +87,20 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
     Shapes that Newton's rules cannot tell apart share an element: their signature is the collision group, the world,
     the two collide flags and the friction coefficient. A shape in a filter pair that would otherwise collide gets an
     element of its own, since the pair excludes two shapes and not two classes of them. The particles take three
-    elements: those in no triangle and no tetrahedron, active (``P_free``) or not (``P_off``), and the vertices of
-    cloth and tetrahedra (``P_surf``). With ``worlds`` (several worlds) the subscenes keep the worlds apart, so the
-    world leaves the signature, and a shape in a filter pair shares its element with its copies in replicated worlds
-    (``_filter_classes``). With ``aims`` (``kinematic_motion="aim"``) a shape's motion joins the signature: on a
-    dynamic body, on a kinematic body (``_kinematic_bodies``), or static; the pairs of two shapes that are each
-    kinematic or static are disabled, and ``Model.shape_contact_pairs`` less those pairs is the set compared. In a
-    coupled solver's view with proxies (class docstring, **Coupling**) a shape's part joins the signature
-    (``_proxy_roles``): the pairs of a shape on a proxy body with another such shape or with a static shape or one on a
-    body of inverse mass 0 are disabled, and so are those of proxy particles, which take elements of their own
-    (``Q_free``, ``Q_surf``), with those shapes and among themselves; the set compared leaves those shape pairs out
-    too. Raises ``NotImplementedError`` when the shape pairs the elements enable on different bodies are not exactly
-    that set (a pair array assigned to the model; a coupled solver's view assigns it this set). Only the triangles and
-    tetrahedra the solver simulates (``_own_elements``) make vertices of cloth and tetrahedra. The engine tests the
-    elements' table and the subscenes' table apart, so their sizes are not multiplied; it refuses what it cannot hold
-    itself, naming the sizes.
+    elements: those in no triangle and no tetrahedron, active (``P_free``) or not (``P_off``), and the vertices of cloth
+    and tetrahedra (``P_surf``). With ``worlds`` (several worlds) the subscenes keep the worlds apart, so the world
+    leaves the signature, and a shape in a filter pair shares its element with its copies in replicated worlds
+    (``_filter_classes``). With ``aims`` (``kinematic_motion="aim"``) a shape's motion joins the signature: on a dynamic
+    body, on a kinematic body (``_kinematic_bodies``), or static; the pairs of two shapes that are each kinematic or
+    static are disabled, and ``Model.shape_contact_pairs`` less those pairs is the set compared. In a coupled solver's
+    view with proxies (:ref:`ipc-coupling`) a shape's part joins the signature (``_proxy_roles``): the pairs of a shape
+    on a proxy body with another such shape or with a static shape or one on a body of inverse mass 0 are disabled, and
+    so are those of proxy particles, which take elements of their own (``Q_free``, ``Q_surf``), with those shapes and
+    among themselves; the set compared leaves those shape pairs out too. Raises ``NotImplementedError`` when the shape
+    pairs the elements enable on different bodies are not exactly that set (a pair array assigned to the model; a
+    coupled solver's view assigns it this set). Only the triangles and tetrahedra the solver simulates
+    (``_own_elements``) make vertices of cloth and tetrahedra. The engine tests the elements' table and the subscenes'
+    table apart, so their sizes are not multiplied; it refuses what it cannot hold itself, naming the sizes.
     """
     ns, n_particles = model.shape_count, model.particle_count
     shape_element = np.full(ns, -1, np.int64)
@@ -232,10 +231,10 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
 
 
 def _proxy_roles(model: Model, body: np.ndarray) -> np.ndarray:
-    """The part of every shape in a coupled solver's proxy contact (class docstring, **Coupling**), from its body
-    ``body``: 1 on a proxy body, 2 static or on a body of inverse mass 0, 0 otherwise. A proxy meets none of the
-    shapes of parts 1 and 2, as the default ``CouplingInterface.coupling_prepare_proxy_contacts`` drops Newton's
-    contacts of a proxy with another proxy, a static shape or a body of inverse mass 0."""
+    """The part of every shape in a coupled solver's proxy contact (:ref:`ipc-coupling`), from its body ``body``: 1 on a
+    proxy body, 2 static or on a body of inverse mass 0, 0 otherwise. A proxy meets none of the shapes of parts 1 and 2,
+    as the default ``CouplingInterface.coupling_prepare_proxy_contacts`` drops Newton's contacts of a proxy with another
+    proxy, a static shape or a body of inverse mass 0."""
     role = np.where(body < 0, 2, 0)
     on_body = body >= 0
     if on_body.any():
@@ -368,11 +367,10 @@ def _check_al_ipc(solver: SolverIPC, elements: _ContactElements) -> None:
 
 
 def _make_contact_export(solver: SolverIPC) -> None:
-    """libuipc-warp's ``ContactForces`` of the engine, at the request and whenever the engine is built again,
-    outside any capture: once a container requested ``CONTACT_F`` (class docstring, **Contact output**), with
-    what the contact rows read besides it, for a model whose contact holds a shape (one without has no rows); and
-    for a coupled solver's proxies, whose feedback is the force of the contact terms on them (**Coupling**). None
-    otherwise."""
+    """libuipc-warp's ``ContactForces`` of the engine, at the request and whenever the engine is built again, outside
+    any capture: once a container requested ``CONTACT_F`` (:ref:`ipc-contact-output`), with what the contact rows read
+    besides it, for a model whose contact holds a shape (one without has no rows); and for a coupled solver's proxies,
+    whose feedback is the force of the contact terms on them (:ref:`ipc-coupling`). None otherwise."""
     solver._contact_export = None
     solver._export_step = -1  # the step whose records the export holds
     if solver._engine is None:
@@ -403,9 +401,9 @@ def _make_contact_export(solver: SolverIPC) -> None:
 
 
 def _write_contacts(solver: SolverIPC, observables: SolverBase.Observables | None, state_out: State | None) -> None:
-    """With ``CONTACT_F`` requested: the solver's contact terms of the step into the step's ``Contacts``, one row
-    per term with a force, and their forces into ``contact_f`` (class docstring, **Contact output**), on the
-    device. The counts and the forces are zeroed first; a step that failed has no rows."""
+    """With ``CONTACT_F`` requested: the solver's contact terms of the step into the step's ``Contacts``, one row per
+    term with a force, and their forces into ``contact_f`` (:ref:`ipc-contact-output`), on the device. The counts and
+    the forces are zeroed first; a step that failed has no rows."""
     if observables is None or not observables.is_requested(SolverBase.ObservableKind.CONTACT_F):
         return
     contacts, contact_f = observables.contacts, observables.contact_f

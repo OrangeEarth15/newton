@@ -38,7 +38,8 @@ _D_HAT_MESH_SHARE = 0.5
 _BODY_KAPPA = 1.0e8
 # the turn [rad] of a body in one step, about the axis of its largest principal moment of inertia, that the first Newton
 # iteration takes in full under the default body_kappa: libuipc's stiffness is lowered where the orthogonality term of
-# a step's incremental potential would exceed 1 / (4 _BODY_TURN^2) times that moment (class docstring, **Rigid bodies**)
+# a step's incremental potential would exceed 1 / (4 _BODY_TURN^2) times that moment (docs/solvers/ipc.rst >
+# "Rigid bodies")
 _BODY_TURN = 0.1
 
 
@@ -146,7 +147,7 @@ def _check_attachments(model: Model) -> None:
 def _kinematic_bodies(model: Model) -> np.ndarray:
     """The bodies the solver does not let forces move: :attr:`~newton.BodyFlags.KINEMATIC` ones, those of mass 0, and
     those of inverse mass 0. A body of positive mass has an inverse mass of 0 only in a coupled solver's view, which
-    zeroes the inverse mass of the bodies another entry owns and keeps their mass (class docstring, **Coupling**)."""
+    zeroes the inverse mass of the bodies another entry owns and keeps their mass (:ref:`ipc-coupling`)."""
     if model.body_count == 0:
         return np.zeros(0, bool)
     kinematic = ((model.body_flags.numpy() & int(BodyFlags.KINEMATIC)) != 0) | (model.body_mass.numpy() <= 0.0)
@@ -157,8 +158,8 @@ def _own_elements(model: Model) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Which triangles, tetrahedra and springs the solver simulates, as masks over ``tri_indices``, ``tet_indices`` and
     ``spring_indices``: every one but those whose particles are all disabled, of mass 0 and not
     :attr:`~newton.ParticleFlags.ACTIVE`. A coupled solver's view disables the particles another entry owns, which
-    simulates their cloth, soft bodies and springs (class docstring, **Coupling**); in a model of one solver such a
-    triangle or tetrahedron holds nothing that moves, and Newton's own contacts skip its faces."""
+    simulates their cloth, soft bodies and springs (:ref:`ipc-coupling`); in a model of one solver such a triangle or
+    tetrahedron holds nothing that moves, and Newton's own contacts skip its faces."""
     own = tuple(np.ones(n, bool) for n in (model.tri_count, model.tet_count, model.spring_count))
     if model.particle_count == 0 or not (model.tri_count or model.tet_count or model.spring_count):
         return own
@@ -175,7 +176,7 @@ def _own_elements(model: Model) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 def _proxy_bodies(model: Model) -> np.ndarray:
     """The bodies a coupled solver's view marks as proxies (:attr:`~newton.BodyFlags.PROXY`): another entry's bodies
-    that this entry moves as its own, with the view's masses (class docstring, **Coupling**)."""
+    that this entry moves as its own, with the view's masses (:ref:`ipc-coupling`)."""
     if model.body_count == 0:
         return np.zeros(0, bool)
     return (model.body_flags.numpy() & int(BodyFlags.PROXY)) != 0
@@ -577,9 +578,9 @@ def _ortho_ratios(solver: SolverIPC) -> np.ndarray:
 
 
 def _write_body_stiffness(solver: SolverIPC, dt: float) -> None:
-    """The orthogonality stiffness of every body for a step of ``dt`` (default ``body_kappa``, class docstring,
-    **Rigid bodies**): libuipc's, lowered to 1 / (4 _BODY_TURN^2) times the largest principal moment of inertia
-    over ``V dt^2``, on the device, so that a captured step takes the stiffness of its own ``dt``."""
+    """The orthogonality stiffness of every body for a step of ``dt`` (default ``body_kappa``, :ref:`ipc-rigid-bodies`):
+    libuipc's, lowered to 1 / (4 _BODY_TURN^2) times the largest principal moment of inertia over ``V dt^2``, on the
+    device, so that a captured step takes the stiffness of its own ``dt``."""
     if solver._ortho is None:
         return
     wp.launch(
@@ -713,9 +714,9 @@ def _add_springs(solver: SolverIPC, scene) -> None:
 
 
 def _plan_attachments(solver: SolverIPC) -> None:
-    """The anchors of every body that attachments hold (class docstring, **Attachments**): the distinct
-    ``attachment_particle_body_body_point`` of its attachments in the order they first appear, and for every
-    attachment its anchor among its body's."""
+    """The anchors of every body that attachments hold (:ref:`ipc-attachments`): the distinct
+    ``attachment_particle_body_body_point`` of its attachments in the order they first appear, and for every attachment
+    its anchor among its body's."""
     model = solver.model
     count = model.attachment_particle_body_count
     solver._body_anchors = {}
@@ -753,10 +754,9 @@ def _attachment_penalties(solver: SolverIPC, mass: np.ndarray) -> np.ndarray:
 
 
 def _add_stitches(solver: SolverIPC, scene) -> None:
-    """Newton's particle-body attachments and springs of rest length 0 as libuipc's soft vertex stitches of rest
-    length 0 (class docstring, **Attachments**): an attachment between its particle and its body's anchor, a
-    spring between its two particles. Keeps the attachment of every stitch, or -1 less its spring, for the
-    stiffness written at every step."""
+    """Newton's particle-body attachments and springs of rest length 0 as libuipc's soft vertex stitches of rest length
+    0 (:ref:`ipc-attachments`): an attachment between its particle and its body's anchor, a spring between its two
+    particles. Keeps the attachment of every stitch, or -1 less its spring, for the stiffness written at every step."""
     model = solver.model
     pairs, source = [], []
     if model.attachment_particle_body_count:
@@ -771,7 +771,7 @@ def _add_stitches(solver: SolverIPC, scene) -> None:
     if pairs:
         scene.add_stitches(np.concatenate(pairs), _stitch_kappa(solver, solver._config.dt), 0.0)
     # the distance joints of one length: a stitch of that rest length between the anchors of their two sides,
-    # after the other stitches (class docstring, **Distance joints**)
+    # after the other stitches (docs/solvers/ipc.rst > "Distance joints")
     solver._distance_first = len(solver._stitch_source)
     if len(solver._distance_joints):
         offsets = scene.layout().body_anchor_offsets
@@ -974,7 +974,7 @@ def _add_shapes_and_bodies(
         mass, first, second = _with_aim_moments(solver, (mass, first, second))
     body_q, body_qd, placed = _start_bodies(solver)
     # a kinematic body, whose pose the caller writes at every step, and a link the model leaves at the identity,
-    # which the caller places by writing forward kinematics into the state (class docstring, **State**)
+    # which the caller places by writing forward kinematics into the state (docs/solvers/ipc.rst > "State")
     solver._posed_body = solver._kinematic_body | placed
     body_com = model.body_com.numpy().astype(np.float64)
     body_mass = model.body_mass.numpy().astype(np.float64)
@@ -1065,12 +1065,12 @@ def _with_aim_moments(solver: SolverIPC, dyadic: tuple) -> tuple:
 
 
 def _start_bodies(solver: SolverIPC) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """The poses and twists the bodies are built at and the start check tests (class docstring, **State**):
-    ``model.body_q`` and ``model.body_qd``, but for a body whose pose there is the identity, where
-    ``ModelBuilder.add_link`` and ``add_body`` put a body given no transform: it starts where ``newton.eval_fk``
-    puts it from ``model.joint_q`` and ``model.joint_qd``, the pose with which a maximal-coordinate solver starts
-    once the caller has written forward kinematics into the state. Also the bodies that forward kinematics put
-    elsewhere than the identity: the links whose start the caller places."""
+    """The poses and twists the bodies are built at and the start check tests (:ref:`ipc-state`): ``model.body_q`` and
+    ``model.body_qd``, but for a body whose pose there is the identity, where ``ModelBuilder.add_link`` and ``add_body``
+    put a body given no transform: it starts where ``newton.eval_fk`` puts it from ``model.joint_q`` and
+    ``model.joint_qd``, the pose with which a maximal-coordinate solver starts once the caller has written forward
+    kinematics into the state. Also the bodies that forward kinematics put elsewhere than the identity: the links whose
+    start the caller places."""
     model = solver.model
     body_q = model.body_q.numpy().astype(np.float64)
     body_qd = model.body_qd.numpy().astype(np.float64)

@@ -51,15 +51,15 @@ def _check_start(solver: SolverIPC, state: str | None = None) -> None:
     nearly coplanar triangles of a flat sheet from crossing ones). A pair of parts of more than
     ``_START_CHECK_PAIRS`` primitive pairs is skipped with a warning.
 
-    The start is the state the first step takes (class docstring, **State**). At construction (``state`` None)
-    the engine holds the model's state, and a pair that fails there raises, unless one of its bodies is one whose
-    start the caller writes into the state (``_posed_body``: a kinematic body, and a link that the model leaves at
-    the identity where forward kinematics puts it elsewhere). The failure of such a pair is kept
-    (``_start_pending``), and the first step tests the pairs with such a body again: a first step that is not
-    captured on the engine's positions it has just loaded from its ``state_in``, a captured one, which cannot read
-    its ``state_in``, by raising the kept failure (``_start_in_capture``). With ``state``, the name of the state the
-    engine holds in the message, only the pairs with such a body are tested, on the engine's positions as they
-    stand, and a failure raises: the test holds for the state of any step loaded into the engine (it synchronizes).
+    The start is the state the first step takes (:ref:`ipc-state`). At construction (``state`` None) the engine holds
+    the model's state, and a pair that fails there raises, unless one of its bodies is one whose start the caller writes
+    into the state (``_posed_body``: a kinematic body, and a link that the model leaves at the identity where forward
+    kinematics puts it elsewhere). The failure of such a pair is kept (``_start_pending``), and the first step tests the
+    pairs with such a body again: a first step that is not captured on the engine's positions it has just loaded from
+    its ``state_in``, a captured one, which cannot read its ``state_in``, by raising the kept failure
+    (``_start_in_capture``). With ``state``, the name of the state the engine holds in the message, only the pairs with
+    such a body are tested, on the engine's positions as they stand, and a failure raises: the test holds for the state
+    of any step loaded into the engine (it synchronizes).
     """
     eng = solver._engine
     if eng is None:

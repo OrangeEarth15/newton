@@ -47,11 +47,11 @@ _UNMAPPED_JOINTS = {
 
 @dataclass(frozen=True)
 class _JointOptions:
-    """The joints SolverIPC maps beyond revolute, prismatic, fixed, ball and free joints, on request (class
-    docstring, **Joints**): ``d6``, D6 joints that lock what one of libuipc's joints locks; ``distance``, distance
-    joints of one length or none; ``limit_damping``, ``joint_limit_kd`` past a limit; ``armature``,
-    ``joint_armature`` as the inertia of a revolute or prismatic joint's coordinate; ``effort_limit``,
-    ``joint_effort_limit`` as a bound of the drive's force decided at the step's start."""
+    """The joints SolverIPC maps beyond revolute, prismatic, fixed, ball and free joints, on request
+    (:ref:`ipc-joints`): ``d6``, D6 joints that lock what one of libuipc's joints locks; ``distance``, distance joints
+    of one length or none; ``limit_damping``, ``joint_limit_kd`` past a limit; ``armature``, ``joint_armature`` as the
+    inertia of a revolute or prismatic joint's coordinate; ``effort_limit``, ``joint_effort_limit`` as a bound of the
+    drive's force decided at the step's start."""
 
     d6: bool = False
     distance: bool = False
@@ -178,11 +178,11 @@ def _map_joints(model: Model, options: _JointOptions) -> _JointMap:
 
 
 def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
-    """Joints that libuipc's affine-body joints represent (class docstring, **Joints**): revolute, prismatic, fixed,
-    ball and free joints, and with ``options`` the joints ``_map_joints`` maps; drives, passive springs, damping and
-    limits on revolute and prismatic joints only; no armature (with ``options.armature``, none on ball and free
-    joints), no joint friction, and no effort limit on a driven degree of freedom (with ``options.effort_limit``, none
-    that is negative)."""
+    """Joints that libuipc's affine-body joints represent (:ref:`ipc-joints`): revolute, prismatic, fixed, ball and free
+    joints, and with ``options`` the joints ``_map_joints`` maps; drives, passive springs, damping and limits on
+    revolute and prismatic joints only; no armature (with ``options.armature``, none on ball and free joints), no joint
+    friction, and no effort limit on a driven degree of freedom (with ``options.effort_limit``, none that is
+    negative)."""
     if model.joint_count == 0:
         return
     joint_type = model.joint_type.numpy()
@@ -288,10 +288,10 @@ def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
 
 
 def _plan_distance_joints(solver: SolverIPC) -> None:
-    """The anchors of the distance joints of one length (``enable_distance_joints``, class docstring, **Distance
-    joints**): one on either side at the origin of its joint frame, ``joint_X_p`` in the parent's frame, the
-    fixed body that stands for the world for a parent of -1, and ``joint_X_c`` in the child's, after the anchors
-    of the attachments; for every such joint the body and the anchor of its two sides."""
+    """The anchors of the distance joints of one length (``enable_distance_joints``, :ref:`ipc-distance-joints`): one on
+    either side at the origin of its joint frame, ``joint_X_p`` in the parent's frame, the fixed body that stands for
+    the world for a parent of -1, and ``joint_X_c`` in the child's, after the anchors of the attachments; for every such
+    joint the body and the anchor of its two sides."""
     model = solver.model
     solver._distance_joints = np.zeros(0, np.int32)
     solver._distance_anchor = np.zeros((0, 2, 2), np.int64)  # joint, side (parent, child), (body, anchor)
@@ -333,12 +333,12 @@ def _joint_inputs_now(solver: SolverIPC) -> tuple:
 
 
 def _add_joints(solver: SolverIPC, scene) -> None:
-    """Newton's revolute, prismatic, fixed and ball joints as libuipc's (class docstring, **Joints**), and with
+    """Newton's revolute, prismatic, fixed and ball joints as libuipc's (:ref:`ipc-joints`), and with
     ``enable_d6_joints`` the D6 joints that lock what one of them locks (``_map_joints``), joint frames taken as the
-    reference rotations, a fixed affine body without mass standing for the world. Sets up what the
-    per-step kernels read: per kind the joint of every group row and the row's penalty (``_joint_strength``,
-    0 without a dynamic body), per joint its row (``_joint_element``), and the free and ball joints, whose
-    ``joint_f`` acts through the bodies' wrenches."""
+    reference rotations, a fixed affine body without mass standing for the world. Sets up what the per-step kernels
+    read: per kind the joint of every group row and the row's penalty (``_joint_strength``, 0 without a dynamic body),
+    per joint its row (``_joint_element``), and the free and ball joints, whose ``joint_f`` acts through the bodies'
+    wrenches."""
     model, device = solver.model, solver.model.device
     solver._world_body = -1
     solver._joint_rows, solver._joint_strength, solver._joint_history, solver._joint_rate = {}, {}, {}, {}
@@ -446,9 +446,9 @@ def _shift_joint_history(solver: SolverIPC) -> None:
 
 def _load_joints(solver: SolverIPC, state_in: State) -> None:
     """The joints' angles and distances at the step's start, from the bodies' state just loaded. A revolute joint
-    unwraps its angle against the one it had, or against ``state_in.joint_q`` where that is not what the solver
-    wrote, so that a caller who wrote the angle picks its turn (class docstring, **Joints**). Where the joint
-    options need them, the rates of the coordinates from the bodies' twists (``_joint_rates``)."""
+    unwraps its angle against the one it had, or against ``state_in.joint_q`` where that is not what the solver wrote,
+    so that a caller who wrote the angle picks its turn (:ref:`ipc-joints`). Where the joint options need them, the
+    rates of the coordinates from the bodies' twists (``_joint_rates``)."""
     groups, x = solver._joint_groups, solver._engine.vm.x
     if groups.revolute is not None:
         if state_in.joint_q is not None:

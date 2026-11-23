@@ -55,6 +55,7 @@ Newton Physics
    MuJoCo <solvers/mujoco>
    Kamino <solvers/kamino>
    VBD <solvers/vbd>
+   IPC <solvers/ipc>
 
 .. toctree::
    :maxdepth: 1
