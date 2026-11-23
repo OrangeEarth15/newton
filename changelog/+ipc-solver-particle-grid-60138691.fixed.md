@@ -1,0 +1,1 @@
+Collide SolverIPC's free particles with each other while Model.particle_grid is not None, as Newton's particle solvers decide, so that setting it to None switches particle contact off; a notification of MODEL_PROPERTIES takes the change. The solver decided from the particle radii, and ignored the switch.

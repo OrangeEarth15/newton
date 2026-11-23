@@ -235,10 +235,12 @@ says: both collide with shapes, their collision groups and worlds are compatible
 and they are not a filter pair; shapes of one body never collide, and the solver
 checks at construction that its pairs are exactly the model's. A particle
 collides with a shape that has :attr:`~newton.ShapeFlags.COLLIDE_PARTICLES`, two
-free particles or a free particle and a cloth or tetrahedron vertex collide when
-the model has more than one particle and a positive
-:attr:`~newton.Model.particle_max_radius` (as Newton's particle solvers decide),
-and cloth and tetrahedra always collide with themselves and with each other. The
+free particles or a free particle and a cloth or tetrahedron vertex collide while
+the model has more than one particle and a :attr:`~newton.Model.particle_grid`
+(as Newton's particle solvers decide: ``finalize`` makes the grid for particles
+of positive radius, and setting it to ``None`` switches particle contact off;
+``notify_model_changed`` with ``MODEL_PROPERTIES`` takes the change), and cloth
+and tetrahedra always collide with themselves and with each other. The
 friction of two shapes is the arithmetic mean of their
 :attr:`~newton.Model.shape_material_mu`, of a particle and a shape the mean of
 :attr:`~newton.Model.soft_contact_mu` and the shape's, and of two particles

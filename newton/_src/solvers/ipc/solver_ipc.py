@@ -1878,7 +1878,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         whose gravity changed anew (see :ref:`ipc-bdf2`). A change of the triangulated shapes (``SHAPE_PROPERTIES`` with
         new transforms or scales, ``SHAPE_TYPE_AND_SOURCE``), of the friction coefficients and the contact thicknesses
         (``SHAPE_PROPERTIES`` with a new ``shape_material_mu`` or ``shape_margin``, ``MODEL_PROPERTIES`` with a new
-        ``soft_contact_mu``, ``particle_mu`` or ``particle_radius``), of the particles' masses (``MODEL_PROPERTIES``
+        ``soft_contact_mu``, ``particle_mu`` or ``particle_radius``, or a ``particle_grid`` set to None or back), of the particles' masses (``MODEL_PROPERTIES``
         with a new ``particle_mass``, as a coupled solver gives its proxy particles their masses), of the springs
         (``MODEL_PROPERTIES`` with a new ``spring_rest_length``, ``spring_stiffness`` or ``spring_damping``), of the
         joints' types, bodies, frames or axes (``JOINT_PROPERTIES``) or of which bodies are kinematic

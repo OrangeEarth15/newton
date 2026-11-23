@@ -903,10 +903,10 @@ def _mass_inverse(solver: SolverIPC, mass: np.ndarray, first: np.ndarray, second
 
 def _scene_inputs_now(solver: SolverIPC) -> tuple:
     """What the scene was laid out from besides gravity and the bodies' mass properties, which change in place:
-    the triangulated shapes, the friction coefficients of the contact models, the contact thicknesses, the
-    particles' masses and the springs."""
+    the triangulated shapes, the friction coefficients of the contact models, whether particles collide with each
+    other (``Model.particle_grid``), the contact thicknesses, the particles' masses and the springs."""
     model = solver.model
-    materials = (float(model.soft_contact_mu), float(model.particle_mu))
+    materials = (float(model.soft_contact_mu), float(model.particle_mu), model.particle_grid is not None)
     arrays = [model.particle_radius, model.particle_mass] if model.particle_count else []
     if model.spring_count:
         arrays += [model.spring_rest_length, model.spring_stiffness, model.spring_damping]

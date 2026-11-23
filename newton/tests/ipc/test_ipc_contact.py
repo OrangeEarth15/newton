@@ -316,6 +316,34 @@ def test_inactive_particles_do_not_collide(test, device):
                 test.assertGreater(float(s0.body_q.numpy()[body, 2]), 0.05)  # held above the particle
 
 
+def test_particle_contact_follows_the_particle_grid(test, device):
+    """Two free particles of radius 2 cm closing at 2 m/s without gravity stop apart, as Newton's particle solvers
+    collide particles while the model has its particle grid; with Model.particle_grid set to None, Newton's switch of
+    particle contact, they pass through each other, given so at construction or after notify_model_changed with
+    MODEL_PROPERTIES."""
+
+    def two_particles():
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        builder.add_particle(wp.vec3(0.0, 0.0, 1.0), wp.vec3(0.0, 0.0, 1.0), mass=1.0, radius=0.02)
+        builder.add_particle(wp.vec3(0.0, 0.0, 1.1), wp.vec3(0.0, 0.0, -1.0), mass=1.0, radius=0.02)
+        return builder.finalize(device=device)
+
+    def heights(model, solver):
+        return _run(model, solver, 20)[-1, :, 2]  # after 0.2 s
+
+    model = two_particles()
+    test.assertIsNotNone(model.particle_grid)
+    z = heights(model, newton.solvers.SolverIPC(model, d_hat=0.005))
+    test.assertGreater(z[1] - z[0], 0.04)  # held apart by their radii
+    model.particle_grid = None
+    np.testing.assert_allclose(heights(model, newton.solvers.SolverIPC(model, d_hat=0.005)), [1.2, 0.9], atol=1e-6)
+    model = two_particles()
+    solver = newton.solvers.SolverIPC(model, d_hat=0.005)
+    model.particle_grid = None
+    solver.notify_model_changed(newton.ModelFlags.MODEL_PROPERTIES)
+    np.testing.assert_allclose(heights(model, solver), [1.2, 0.9], atol=1e-6)
+
+
 @wp.kernel
 def _newton_heightfield_triangles(
     fields: wp.array[HeightfieldData],
@@ -725,6 +753,7 @@ for name, func in (
     ("test_excluded_pairs_never_collide", test_excluded_pairs_never_collide),
     ("test_particle_only_shapes", test_particle_only_shapes),
     ("test_inactive_particles_do_not_collide", test_inactive_particles_do_not_collide),
+    ("test_particle_contact_follows_the_particle_grid", test_particle_contact_follows_the_particle_grid),
     ("test_rest_heights_follow_radius_and_margin", test_rest_heights_follow_radius_and_margin),
     ("test_springs_oscillate_as_implicit_euler", test_springs_oscillate_as_implicit_euler),
     ("test_heightfield_triangles_and_rest", test_heightfield_triangles_and_rest),

@@ -211,9 +211,10 @@ def _contact_elements(model: Model, worlds: _Worlds | None = None, aims: bool = 
             if classes:
                 enabled[p, shapes] = enabled[shapes, p] = hits_particles[rep]
                 mu[p, shapes] = mu[shapes, p] = 0.5 * (model.soft_contact_mu + m)
-        # particles are spheres to each other where Newton's particle solvers collide them; finite elements always
-        # collide with themselves and with each other
-        spheres = n_particles > 1 and model.particle_max_radius > 0.0
+        # particles are spheres to each other where Newton's particle solvers collide them, while the model has a
+        # particle grid (finalize makes one for particles of positive radius; None switches particle contact off);
+        # finite elements always collide with themselves and with each other
+        spheres = n_particles > 1 and model.particle_grid is not None
         enabled[p_free, p_free] = enabled[p_free, p_surf] = enabled[p_surf, p_free] = spheres
         enabled[p_surf, p_surf] = True
         mu[p_free : p_surf + 1, p_free : p_surf + 1] = model.particle_mu
