@@ -1,0 +1,1 @@
+Add a ``contact_damping`` argument to ``SolverIPC``, for a damping of contact along its normal. It takes only ``None``, its default, which adds no damping; any other value raises ``NotImplementedError``, since the solver's contact has no damping term yet.

@@ -115,7 +115,8 @@ the options they do not take yet), a :attr:`~newton.Model.shape_contact_pairs`
 array assigned to the model, more contact elements than the engine takes (see
 :ref:`ipc-contact`), collision meshes with a surface velocity
 (``Mesh.enable_surface_velocity``, which the solver's own contacts would
-ignore), and a CPU device. Gaussian shapes and planes attached to bodies raise
+ignore), a ``contact_damping`` other than ``None`` (see :ref:`ipc-contact`),
+and a CPU device. Gaussian shapes and planes attached to bodies raise
 when the shapes are triangulated. A step that is not captured raises
 :class:`NotImplementedError` when its :class:`~newton.Control` holds a triangle
 or tetrahedron activation other than 0 (a captured step cannot raise, and does
@@ -288,6 +289,12 @@ which :meth:`~newton.solvers.SolverIPC.contact_stiffness` gives for a step of
 any ``dt``; with independent worlds every world takes the range of the same
 world alone, from its own vertices and the global ones, and every pair of a
 world its value (see :ref:`ipc-worlds`).
+
+Contact has no damping term: its forces are the barrier's and friction's. The
+shapes' contact damping :attr:`~newton.Model.shape_material_kd`, which
+Newton's penalty-based solvers apply, is not read (see :ref:`ipc-not-read`).
+The ``contact_damping`` argument takes only ``None``, its default, which adds
+no damping; any other value raises :class:`NotImplementedError`.
 
 .. _ipc-bdf2:
 

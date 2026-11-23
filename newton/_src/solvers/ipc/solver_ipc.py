@@ -415,6 +415,11 @@ class SolverIPC(SolverBase, CouplingInterface):
             refuses ``"rigid"``.
         contact_constitution: ``"ipc"`` (barrier contact) or ``"al-ipc"`` (see
             :ref:`ipc-al-ipc`).
+        contact_damping: A damping of the motion of surfaces in contact
+            along their normal. Only ``None``, the default, is taken: it adds
+            no damping, the contact's barrier and friction being its only
+            forces (see :ref:`ipc-contact`). Any other value raises
+            :class:`NotImplementedError`.
         fem_preconditioner: ``"diag"`` (block diagonal) or ``"mas"`` for
             particles, cloth and tetrahedra (see :ref:`ipc-mas`).
         kinematic_motion: How a kinematic body with mass and colliding shapes
@@ -567,6 +572,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         integrator: str = "bdf1",
         body_rotation: str | None = None,
         contact_constitution: str = "ipc",
+        contact_damping: float | str | None = None,
         fem_preconditioner: str = "diag",
         kinematic_motion: str | None = None,
         kinematic_strength_ratio: float = _KINEMATIC_STRENGTH_RATIO,
@@ -611,6 +617,11 @@ class SolverIPC(SolverBase, CouplingInterface):
         _check_choice("fem_preconditioner", fem_preconditioner, ("diag", "mas"))
         if kinematic_motion is not None:
             _check_choice("kinematic_motion", kinematic_motion, ("jump", "aim"))
+        if contact_damping is not None:
+            raise NotImplementedError(
+                f"SolverIPC: contact_damping={contact_damping!r} is not offered yet: the solver's contact has no "
+                "damping term. Leave contact_damping at None, its default."
+            )
         for name, value in (
             ("thickness", thickness),
             ("cloth_strain_rate", cloth_strain_rate),
