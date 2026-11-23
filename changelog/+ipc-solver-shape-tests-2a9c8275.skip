@@ -1,0 +1,1 @@
+Test-only: tests of SolverIPC's triangulation of capsules, cylinders, cones, ellipsoids, convex hulls and scaled meshes, and of a plane on a body (R2-07); no user-facing change.
