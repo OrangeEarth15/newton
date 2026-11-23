@@ -1,0 +1,1 @@
+Refuse body variants (ModelBuilder.add_body_variants) in SolverIPC by name, as Newton's other solvers that find their own contacts do: the solver triangulates the shapes when it builds the solve and cannot follow a variant row's shape. A model whose variant rows were all full was taken and one with an empty row refused with a message about Model.shape_contact_pairs.

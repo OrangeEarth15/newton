@@ -229,6 +229,15 @@ def _check_supported(model: Model, joints: _JointOptions | None = None) -> None:
             "SolverIPC: the model requires gradients (requires_grad=True); finalize it without them. SolverIPC "
             "computes no gradients."
         )
+    variant = model.body_variant.numpy() if model.body_count and model.body_variant is not None else np.zeros(0)
+    if np.any(variant >= 0):
+        bodies = np.flatnonzero(variant >= 0)
+        raise NotImplementedError(
+            f"SolverIPC: {len(bodies)} bodies have shape variants (ModelBuilder.add_body_variants; bodies "
+            f"{bodies[:8].tolist()}{' and more' if len(bodies) > 8 else ''}); build each body with one set of shapes. "
+            "SolverIPC triangulates the shapes when it builds the solve and finds its own contacts, so it cannot "
+            "follow a variant row's shape."
+        )
     for name, count in (
         ("tendons", model.tendon_count + model.custom_frequency_counts.get("mujoco:tendon", 0)),
         ("muscles", model.muscle_count),

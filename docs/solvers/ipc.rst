@@ -104,7 +104,10 @@ Not supported, and rejected when the solver is constructed:
 :class:`NotImplementedError` for springs and particle-body attachments with
 damping (libuipc has no damping element), springs of a negative rest length or
 stiffness or that join a particle to itself, mimic constraints, enabled MuJoCo
-equality rows that no loop joint holds (see :ref:`ipc-joints`), tendons, muscles, non-zero triangle or tetrahedron activations, the joint types
+equality rows that no loop joint holds (see :ref:`ipc-joints`), tendons, muscles, body variants (:meth:`~newton.ModelBuilder.add_body_variants`:
+the solver triangulates the shapes when it builds the solve and finds its own
+contacts, so it cannot follow a variant row's shape), non-zero triangle or
+tetrahedron activations, the joint types
 and properties that :ref:`ipc-joints` rejects, gradients
 (``model.requires_grad``), with independent worlds what :ref:`ipc-worlds`
 refuses (an unknown of the global world, an element that joins two worlds, and

@@ -316,6 +316,40 @@ def test_rejects_unsupported_joints(test, device):
             _rejects(test, builder, pattern, device)
 
 
+def test_rejects_body_variants(test, device):
+    """Refuse a model with body variants by name, as Newton's other solvers that find their own contacts do: the
+    scenes of Newton's body-variant tests, a body replicated in two worlds above the ground with the variants a cube
+    and two spheres (whose second collider row is empty while the cube is selected) or a cube and the same cube as a
+    mesh (every row full)."""
+
+    def variant(kind):
+        builder = newton.ModelBuilder()
+        body = builder.add_body(label=kind)
+        if kind == "cube":
+            builder.add_shape_box(body, hx=0.25, hy=0.25, hz=0.25)
+        elif kind == "mesh":
+            builder.add_shape_mesh(body, mesh=newton.Mesh.create_box(0.25))
+        else:
+            for z in (-0.05, 0.05):
+                builder.add_shape_sphere(body, xform=wp.transform((0.0, 0.0, z), wp.quat_identity()), radius=0.05)
+        return builder
+
+    for kinds in (("cube", "spheres"), ("cube", "mesh")):
+        with test.subTest(kinds=kinds):
+            env = newton.ModelBuilder()
+            body = env.add_body(xform=wp.transform((0.0, 0.0, 0.5), wp.quat_identity()), label="object")
+            env.add_body_variants(body, [variant(kind) for kind in kinds])
+            scene = newton.ModelBuilder()
+            scene.replicate(env, 2)
+            scene.add_ground_plane()
+            _rejects(
+                test,
+                scene,
+                "2 bodies have shape variants \\(ModelBuilder.add_body_variants; bodies \\[0, 1\\]\\)",
+                device,
+            )
+
+
 def test_rejects_gradients(test, device):
     """Reject a model finalized with gradients, as SolverSteel does."""
     builder = _two_particles()
@@ -1167,6 +1201,7 @@ for name, func in (
     ("test_rejects_activations", test_rejects_activations),
     ("test_control_activations_refused_at_eager_steps", test_control_activations_refused_at_eager_steps),
     ("test_rejects_unsupported_joints", test_rejects_unsupported_joints),
+    ("test_rejects_body_variants", test_rejects_body_variants),
     ("test_rejects_gradients", test_rejects_gradients),
     ("test_warns_of_velocity_limits", test_warns_of_velocity_limits),
     ("test_rejects_surface_velocity", test_rejects_surface_velocity),

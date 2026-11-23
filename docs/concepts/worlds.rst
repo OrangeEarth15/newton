@@ -507,7 +507,8 @@ select. Current limitations:
 
 - Contacts must come from :class:`~newton.CollisionPipeline` for models with variants:
   ``SolverMuJoCo`` requires ``use_mujoco_contacts=False``, ``SolverKamino`` requires
-  ``use_collision_detector=False``, and ``SolverImplicitMPM`` is unsupported. ``SolverMuJoCo``
+  ``use_collision_detector=False``, and ``SolverImplicitMPM`` and ``SolverIPC``, which finds its own
+  contacts, are unsupported. ``SolverMuJoCo``
   compiles one geom layout for all worlds, so construct it before selecting different variants per
   world. It follows per-world ``solref``, ``solimp``, ``solmix``, and friction after a selection, but
   ``condim`` and ``priority`` stay as compiled, all worlds use world 0's site sizes, spatial tendons
