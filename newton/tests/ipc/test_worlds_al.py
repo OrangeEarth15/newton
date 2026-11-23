@@ -1,13 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""SolverIPC's AL-IPC contact with independent worlds: every world takes the AL-IPC step of the same world alone.
+"""SolverIPC's AL-IPC contact with several worlds: independent worlds each take the AL-IPC step of the same world alone,
+and coupled worlds are one AL-IPC solve.
 
 ``contact_constitution="al-ipc"`` is libuipc's augmented-Lagrangian contact. With several worlds, libuipc-warp runs the
 augmented-Lagrangian loop of every world apart: its own Newton iterations, line searches and outer updates, its own
 active contact pairs and its own status (libuipc-warp's ``tests/test_worlds_al.py`` holds every world to its engine
 alone, with failures, quotas and restarts). Here, through Newton's model: every world takes the Newton iterations of the
-same world built alone at every step, eager and captured, and its positions and status are those of the run alone."""
+same world built alone at every step, eager and captured, and its positions and status are those of the run alone.
+With ``coupled_worlds=True`` the worlds are one solve, and the solver discards friction per world, as with independent
+worlds (libuipc-warp's ``tests/test_subscene_friction.py``): identical worlds take the step of one world alone."""
 
 import unittest
 
@@ -45,10 +48,11 @@ def _al_worlds(device, shifts):
     return scene.finalize(device=device)
 
 
-def _record(model, solver, steps, dt=0.01, capture=False):
+def _record(model, solver, steps, dt=0.01, capture=False, resets=None):
     """``steps`` steps from the model's state, eager, or captured two at a time after one eager step. After each step
     (each replay's second step when captured): every local world's particle and body positions, its Newton iterations
-    (libuipc-warp's ``frame_status(engine).worlds``) and the STATUS entries of every world and the global one."""
+    (libuipc-warp's ``frame_status(engine).worlds``, or the one solve's) and the STATUS entries of every world and the
+    global one. ``resets``: eager only, ``{step: world_mask}``, a ``reset`` with that mask before that step."""
     import uipc_warp.arrays  # noqa: PLC0415
 
     observables = solver.observables({solver.ObservableKind.STATUS})
@@ -74,7 +78,9 @@ def _record(model, solver, steps, dt=0.01, capture=False):
             wp.capture_launch(cap.graph)
             record(s0)
     else:
-        for _ in range(steps):
+        for i in range(steps):
+            if resets and i in resets:
+                solver.reset(s0, resets[i])
             solver.step(s0, s1, None, None, dt, observables=observables)
             s0, s1 = s1, s0
             record(s0)
@@ -108,9 +114,41 @@ def test_independent_worlds_under_al_ipc_step_as_alone(test, device):
                 np.testing.assert_array_equal(run["status"][:, k], alone["status"][:, 0], f"world {k}")
 
 
+def test_coupled_worlds_under_al_ipc_step_as_one_world(test, device):
+    """With coupled_worlds=True the worlds are one AL-IPC solve, and the solver discards friction per world: at every
+    step for the worlds whose state it did not write, and at a reset by mask (libuipc-warp's ``discard_friction(where=)``
+    with one flag per subscene, which its AL-IPC pipeline refused unless the worlds were independent: the first step
+    raised).
+    Two copies of ``_al_world`` at one height take the Newton iterations of the world built alone at every step, stay
+    within 1e-6 m of its run and take its STATUS entry, eager and captured; eager across a reset of both worlds by mask
+    after 10 steps, as the world alone across its reset. A reset of one of two worlds by mask steps on, every STATUS
+    entry 0."""
+    steps = 21
+    both = wp.array([True, True, False], dtype=wp.bool, device=device)
+    for capture in (False, True):
+        with test.subTest(captured=capture):
+            model = _al_worlds(device, (0.0, 0.0))
+            solver = newton.solvers.SolverIPC(model, coupled_worlds=True, contact_constitution="al-ipc")
+            test.assertFalse(solver._independent)
+            run = _record(model, solver, steps, capture=capture, resets=None if capture else {10: both})
+            one = _al_worlds(device, [0.0])
+            solo = newton.solvers.SolverIPC(one, contact_constitution="al-ipc")
+            alone = _record(one, solo, steps, capture=capture, resets=None if capture else {10: None})
+            np.testing.assert_array_equal(run["iterations"][:, 0], alone["iterations"][:, 0])
+            for k in range(2):
+                worst = np.abs(run["q"][:, k] - alone["q"][:, 0]).max()
+                test.assertLess(worst, 1.0e-6, f"world {k}: {worst:.3g} m")
+                np.testing.assert_array_equal(run["status"][:, k], alone["status"][:, 0], f"world {k}")
+    model = _al_worlds(device, (0.0, 0.03))
+    solver = newton.solvers.SolverIPC(model, coupled_worlds=True, contact_constitution="al-ipc")
+    one_world = wp.array([False, True, False], dtype=wp.bool, device=device)
+    run = _record(model, solver, 11, resets={5: one_world})
+    np.testing.assert_array_equal(run["status"], 0)
+
+
 @requires("uipc_warp")
 class TestSolverIPCWorldsALIPC(unittest.TestCase):
-    """AL-IPC with independent worlds, each world as the same world alone."""
+    """AL-IPC with several worlds: independent worlds each as the same world alone, coupled worlds as one solve."""
 
 
 devices = get_cuda_test_devices()
@@ -118,6 +156,12 @@ add_function_test(
     TestSolverIPCWorldsALIPC,
     "test_independent_worlds_under_al_ipc_step_as_alone",
     test_independent_worlds_under_al_ipc_step_as_alone,
+    devices=devices,
+)
+add_function_test(
+    TestSolverIPCWorldsALIPC,
+    "test_coupled_worlds_under_al_ipc_step_as_one_world",
+    test_coupled_worlds_under_al_ipc_step_as_one_world,
     devices=devices,
 )
 
