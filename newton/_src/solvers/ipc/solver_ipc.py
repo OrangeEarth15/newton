@@ -597,12 +597,6 @@ class SolverIPC(SolverBase, CouplingInterface):
                 raise ValueError(f"SolverIPC: {name} must be finite and not negative, got {value}.")
         if not (np.isfinite(shape_segments) and shape_segments >= 3 and shape_segments == int(shape_segments)):
             raise ValueError(f"SolverIPC: shape_segments must be a whole number of at least 3, got {shape_segments}.")
-        if kinematic_motion == "aim" and contact_constitution == "al-ipc":
-            # libuipc's AL-IPC frame checks animated aims with a test of its own (animation_reach_target), which has
-            # not been tested on this path
-            raise NotImplementedError(
-                "SolverIPC: kinematic_motion='aim' is not offered with contact_constitution='al-ipc'."
-            )
         # a value other than the default of an argument that the other options leave unread
         if adaptive_kappa and contact_constitution == "al-ipc":
             raise ValueError(

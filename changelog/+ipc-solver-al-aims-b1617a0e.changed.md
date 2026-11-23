@@ -1,0 +1,1 @@
+Take ``kinematic_motion="aim"`` with ``SolverIPC``'s ``contact_constitution="al-ipc"`` for a model without a body that would move toward its aims (a kinematic body with colliding shapes and mass); every model was refused before. A model with such a body is still refused, naming it: pass ``kinematic_motion="jump"``, whose moves AL-IPC sweeps.

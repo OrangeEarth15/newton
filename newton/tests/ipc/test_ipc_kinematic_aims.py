@@ -412,6 +412,33 @@ def test_rekinematic_body_drops_its_twist(test, device):
     np.testing.assert_allclose(run(True), [0.2 * 60 / 240.0, 0.0, 0.0], rtol=0.0, atol=1e-4)
 
 
+def test_al_ipc_takes_aims_without_aiming_bodies(test, device):
+    """contact_constitution="al-ipc" refuses kinematic_motion="aim" only for a model with a body that would move toward
+    its aims: two boxes dropped onto the ground, without a kinematic body, step under "aim" as under "jump" (to 1e-9 m
+    over 30 steps); a kinematic box of mass 1 kg with a collision shape is refused, naming it."""
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    _box_body(builder, (0.0, 0.0, 0.06), (0.05, 0.05, 0.05))
+    _box_body(builder, (0.0, 0.0, 0.17), (0.05, 0.05, 0.05))
+    model = builder.finalize(device=device)
+    paths = {}
+    for mode in ("jump", "aim"):
+        solver = newton.solvers.SolverIPC(model, d_hat=0.005, contact_constitution="al-ipc", kinematic_motion=mode)
+        s0, s1 = model.state(), model.state()
+        path = []
+        for _ in range(30):
+            solver.step(s0, s1, None, None, 0.01)
+            s0, s1 = s1, s0
+            path.append(s0.body_q.numpy()[:, :3].copy())
+        paths[mode] = np.array(path)
+    np.testing.assert_allclose(paths["aim"], paths["jump"], rtol=0.0, atol=1e-9)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    kinematic = builder.add_body(mass=1.0, is_kinematic=True)
+    builder.add_shape_box(kinematic, hx=0.1, hy=0.1, hz=0.1)
+    with test.assertRaisesRegex(NotImplementedError, f"move the kinematic body {kinematic} toward its aims"):
+        newton.solvers.SolverIPC(builder.finalize(device=device), contact_constitution="al-ipc", kinematic_motion="aim")
+
+
 @requires("uipc_warp")
 class TestSolverIPCKinematicMotion(unittest.TestCase):
     """Which kinematic bodies move toward their aims, and the twist of a body that becomes kinematic."""
@@ -420,6 +447,7 @@ class TestSolverIPCKinematicMotion(unittest.TestCase):
 for name, func in (
     ("test_massless_kinematic_bodies_keep_the_jump", test_massless_kinematic_bodies_keep_the_jump),
     ("test_rekinematic_body_drops_its_twist", test_rekinematic_body_drops_its_twist),
+    ("test_al_ipc_takes_aims_without_aiming_bodies", test_al_ipc_takes_aims_without_aiming_bodies),
 ):
     add_function_test(TestSolverIPCKinematicMotion, name, func, devices=devices)
 

@@ -540,8 +540,10 @@ static do not collide, as Newton's collision pipeline can filter them
 (``include_static_kinematic_pairs=False``) and as they never collide in the
 default mode, where neither moves inside the step; the solver checks its pairs
 against :attr:`~newton.Model.shape_contact_pairs` less those pairs. Kinematic
-particles keep the jump (a soft aim would make a pinned vertex sag). Not with
-``contact_constitution="al-ipc"``.
+particles keep the jump (a soft aim would make a pinned vertex sag). With
+``contact_constitution="al-ipc"`` a model with a body that would move toward its
+aims is refused (pass ``kinematic_motion="jump"``, whose moves AL-IPC sweeps,
+see :ref:`ipc-al-ipc`); a model without one is taken.
 
 .. _ipc-attachments:
 
