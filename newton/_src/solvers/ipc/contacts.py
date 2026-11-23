@@ -4,9 +4,9 @@
 """SolverIPC's contact: which pairs collide, and the contact rows it writes.
 
 libuipc's contact tabular from Newton's collision groups, worlds, collide flags, filter pairs and friction
-coefficients (``_contact_elements``), checked against ``Model.shape_contact_pairs``; what AL-IPC contact and mesh
-surface velocities refuse; and the rows of ``CONTACT_F``, one per contact term of a step with a force, from
-libuipc-warp's contact records (``_write_contacts``), which a coupled solver's proxy feedback reads too.
+coefficients (``_contact_elements``), checked against ``Model.shape_contact_pairs``; what AL-IPC contact refuses; and
+the rows of ``CONTACT_F``, one per contact term of a step with a force, from libuipc-warp's contact records
+(``_write_contacts``), which a coupled solver's proxy feedback reads too.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import warp as wp
 
-from newton import GeoType, Mesh, Model, ModelBuilder, ParticleFlags, ShapeFlags, State
+from newton import Model, ModelBuilder, ParticleFlags, ShapeFlags, State
 from newton.solvers import SolverBase
 
 from .kernels import _contact_rows
@@ -378,21 +378,6 @@ def _check_shape_pairs(
             f"let collide, which must be Model.shape_contact_pairs: {detail}. A pair array assigned to the model is "
             "supported only when it is that set, as a coupled solver's view assigns it."
         )
-
-
-def _check_surface_velocity(model: Model) -> None:
-    """Refuse a collision mesh with a surface velocity: Newton's contacts sample it (a conveyor belt), and the
-    solver, which finds its own contacts, would ignore it."""
-    if model.shape_count == 0:
-        return
-    meshes = np.flatnonzero(_colliding_shapes(model) & (model.shape_type.numpy() == int(GeoType.MESH)))
-    for s in meshes:
-        source = model.shape_source[s]
-        if isinstance(source, Mesh) and source.enable_surface_velocity:
-            raise NotImplementedError(
-                f"SolverIPC: shape {int(s)} is a mesh with enable_surface_velocity=True; turn the surface velocity "
-                "off. SolverIPC finds its own contacts, which do not apply surface velocities."
-            )
 
 
 def _unread_materials(model: Model) -> list[str]:

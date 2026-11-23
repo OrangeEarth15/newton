@@ -888,12 +888,15 @@ class TestSolverIPCInputs(unittest.TestCase):
         )
 
     def test_imports_only_public_newton_names(self):
-        """SolverIPC's modules import Newton through its public modules only: no import of theirs resolves under
-        newton._src outside SolverIPC's own package."""
+        """SolverIPC's modules, those of its feature modules among them, import Newton through its public modules
+        only: no import of theirs resolves under newton._src outside SolverIPC's own package."""
         module = importlib.import_module(newton.solvers.SolverIPC.__module__)
-        package = module.__package__
-        private = []
-        for path in sorted(pathlib.Path(module.__file__).parent.glob("*.py")):
+        root = pathlib.Path(module.__file__).parent
+        private, paths = [], sorted(root.rglob("*.py"))
+        self.assertIn(root / "features" / "__init__.py", paths)
+        for path in paths:
+            # the package the module's relative imports start from
+            package = ".".join([module.__package__, *path.relative_to(root).parent.parts])
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if isinstance(node, ast.Import):
                     names = [alias.name for alias in node.names]
@@ -902,9 +905,9 @@ class TestSolverIPCInputs(unittest.TestCase):
                 else:
                     continue
                 for name in names:
-                    own = name == package or name.startswith(package + ".")
+                    own = name == module.__package__ or name.startswith(module.__package__ + ".")
                     if (name == "newton._src" or name.startswith("newton._src.")) and not own:
-                        private.append(f"{path.name}:{node.lineno} {name}")
+                        private.append(f"{path.relative_to(root)}:{node.lineno} {name}")
         self.assertEqual(private, [])
 
     def test_rest_shape_copies_match_newtons_builders(self):

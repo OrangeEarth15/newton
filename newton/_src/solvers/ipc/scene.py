@@ -117,14 +117,13 @@ def _default_d_hat(model: Model) -> float:
 
 
 def _check_springs(model: Model) -> None:
-    """Springs that libuipc represents: no damping (libuipc has no damping element), a rest length that is not
-    negative (above 0 libuipc's Hookean spring, 0 its soft vertex stitch) and a stiffness that is not negative. The
-    springs of a coupled solver's other entries are theirs (``_own_elements``)."""
+    """Springs that libuipc represents: a rest length that is not negative (above 0 libuipc's Hookean spring, 0 its
+    soft vertex stitch) and a stiffness that is not negative. The springs of a coupled solver's other entries are
+    theirs (``_own_elements``). Their damping is the damping module's (``features.damping``), checked before."""
     if model.spring_count == 0:
         return
     own = _own_elements(model)[2]
     for name, array, bad, remedy in (
-        ("spring_damping", model.spring_damping, lambda v: v != 0.0, "set it to 0. libuipc's springs have no damping"),
         ("spring_rest_length", model.spring_rest_length, lambda v: ~(v >= 0.0), "make it 0 or positive"),
         ("spring_stiffness", model.spring_stiffness, lambda v: ~(v >= 0.0), "make it 0 or positive"),
     ):
@@ -143,24 +142,18 @@ def _check_springs(model: Model) -> None:
 
 
 def _check_attachments(model: Model) -> None:
-    """Particle-body attachments that libuipc's soft vertex stitch represents: no damping (libuipc's stitch has none,
-    and an implicit damping cannot be folded into it the way the joint drives fold theirs, since it has no rest
-    offset to carry it) and a stiffness that is not negative, finite or infinite (hard)."""
+    """Particle-body attachments that libuipc's soft vertex stitch represents: a stiffness that is not negative, finite
+    or infinite (hard). Their damping is the damping module's (``features.damping``), checked before."""
     if model.attachment_particle_body_count == 0:
         return
-    for name, array, bad, remedy in (
-        ("damping", model.attachment_particle_body_damping, lambda v: v != 0.0, "set it to 0. libuipc's stitch has no "
-         "damping"),
-        ("stiffness", model.attachment_particle_body_stiffness, lambda v: ~(v >= 0.0), "make it 0 or positive, or "
-         "infinite for a hard attachment"),
-    ):  # fmt: skip
-        values = array.numpy()
-        found = np.flatnonzero(bad(values))
-        if len(found):
-            k = int(found[0])
-            raise NotImplementedError(
-                f"SolverIPC: particle-body attachment {k} has {name} {float(values[k])!r}; {remedy}."
-            )
+    values = model.attachment_particle_body_stiffness.numpy()
+    found = np.flatnonzero(~(values >= 0.0))
+    if len(found):
+        k = int(found[0])
+        raise NotImplementedError(
+            f"SolverIPC: particle-body attachment {k} has stiffness {float(values[k])!r}; make it 0 or positive, or "
+            "infinite for a hard attachment."
+        )
 
 
 def _kinematic_bodies(model: Model) -> np.ndarray:

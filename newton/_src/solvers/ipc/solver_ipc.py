@@ -20,10 +20,10 @@ from newton.solvers.experimental.coupled import CouplingInterface
 from newton import Contacts, Control, JointType, Model, ModelFlags, NewtonWarning, State, StateFlags
 from newton.solvers import SolverBase
 
+from . import features
 from .contacts import (
     _CONTACT_ROW_BLOCK,
     _check_al_ipc,
-    _check_surface_velocity,
     _contact_elements,
     _contact_records,
     _make_contact_export,
@@ -216,17 +216,11 @@ def _unprojected_equality_rows(model: Model) -> np.ndarray:
     return np.flatnonzero(enabled & ~projected)
 
 
-def _check_constraints(model: Model) -> None:
-    """``NotImplementedError`` for a mimic constraint, and for an enabled equality row that no loop joint holds
+def _check_constraints(model: Model, options: features.FeatureOptions) -> None:
+    """What the feature modules refuse of the constraints (``features.check`` at ``"constraints"``: mimic
+    constraints), and ``NotImplementedError`` for an enabled equality row that no loop joint holds
     (``_unprojected_equality_rows``)."""
-    mimic = int(model.constraint_mimic_count)
-    if model.joint_count and model.joint_mimic_joint is not None:
-        mimic += int(np.count_nonzero(model.joint_mimic_joint.numpy() >= 0))
-    if mimic:
-        raise NotImplementedError(
-            f"SolverIPC: the model has {mimic} mimic constraints; remove them. SolverIPC does not enforce mimic "
-            "constraints."
-        )
+    features.check(model, options, "constraints")
     rows = _unprojected_equality_rows(model)
     if len(rows):
         shown = rows[:8].tolist()
@@ -239,9 +233,10 @@ def _check_constraints(model: Model) -> None:
         )
 
 
-def _check_supported(model: Model, joints: _JointOptions | None = None) -> None:
+def _check_supported(model: Model, joints: _JointOptions, options: features.FeatureOptions) -> None:
     """Reject model content the solver would otherwise accept and ignore; joints as ``joints`` maps them
-    (``_JointOptions``). What independent worlds refuse is checked when the solve is laid out
+    (``_JointOptions``), and with the feature modules' refusals (``features.check``, with ``options``) at their points
+    among these checks. What independent worlds refuse is checked when the solve is laid out
     (``SolverIPC._check_independent_options``, ``_check_independent_content``)."""
     if model.requires_grad:
         raise NotImplementedError(
@@ -257,15 +252,12 @@ def _check_supported(model: Model, joints: _JointOptions | None = None) -> None:
             "SolverIPC triangulates the shapes when it builds the solve and finds its own contacts, so it cannot "
             "follow a variant row's shape."
         )
-    for name, count in (
-        ("tendons", model.tendon_count + model.custom_frequency_counts.get("mujoco:tendon", 0)),
-        ("muscles", model.muscle_count),
-    ):
-        if count:
-            raise NotImplementedError(
-                f"SolverIPC: the model has {count} {name}; remove them. SolverIPC does not simulate {name}."
-            )
-    _check_constraints(model)
+    features.check(model, options, "tendons")
+    if model.muscle_count:
+        raise NotImplementedError(
+            f"SolverIPC: the model has {model.muscle_count} muscles; remove them. SolverIPC does not simulate muscles."
+        )
+    _check_constraints(model, options)
     own_tris, own_tets, _ = _own_elements(model)
     for name, activations, own in (
         ("triangle", model.tri_activations, own_tris),
@@ -277,9 +269,11 @@ def _check_supported(model: Model, joints: _JointOptions | None = None) -> None:
                 "activations."
             )
     _check_joints(model, joints)
+    features.check(model, options, "springs")
     _check_springs(model)
+    features.check(model, options, "attachments")
     _check_attachments(model)
-    _check_surface_velocity(model)
+    features.check(model, options, "shapes")
 
 
 class SolverIPC(SolverBase, CouplingInterface):
@@ -589,7 +583,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._joint_options = _JointOptions(
             limit_damping=bool(enable_joint_limit_damping), effort_limit=bool(enable_joint_effort_limit)
         )
-        _check_supported(model, self._joint_options)
+        self._feature_options = features.FeatureOptions(contact_damping=contact_damping)
+        _check_supported(model, self._joint_options, self._feature_options)
         self._velocity_limits_warned = False
         _warn_of_velocity_limits(self, stacklevel=3)
         unread = _unread_materials(model)
@@ -617,11 +612,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         _check_choice("fem_preconditioner", fem_preconditioner, ("diag", "mas"))
         if kinematic_motion is not None:
             _check_choice("kinematic_motion", kinematic_motion, ("jump", "aim"))
-        if contact_damping is not None:
-            raise NotImplementedError(
-                f"SolverIPC: contact_damping={contact_damping!r} is not offered yet: the solver's contact has no "
-                "damping term. Leave contact_damping at None, its default."
-            )
+        features.check(model, self._feature_options, "options")
         for name, value in (
             ("thickness", thickness),
             ("cloth_strain_rate", cloth_strain_rate),
@@ -2078,9 +2069,12 @@ class SolverIPC(SolverBase, CouplingInterface):
             if model.joint_count:  # a distance joint gains or loses its length
                 rebuild |= not np.array_equal(_map_joints(model).distance, self._distance_joints)
         if flags & ModelFlags.CONSTRAINT_PROPERTIES:
-            _check_constraints(model)  # an equality row enabled since, a mimic relation set since
+            # an equality row enabled since, a mimic relation set since
+            _check_constraints(model, self._feature_options)
         if flags & ModelFlags.CONSTRAINT_PROPERTIES and model.attachment_particle_body_count:
-            _check_attachments(model)  # their stiffness and enabled flags are read at every step
+            # their stiffness and enabled flags are read at every step
+            features.check(model, self._feature_options, "attachments")
+            _check_attachments(model)
             body, particle, point = self._attachment_inputs or (None, None, None)
             rebuild |= (
                 body is None
@@ -2110,7 +2104,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         if rebuild:
             # what the solver wrote for the bodies, whose twists a body that becomes kinematic does not take
             written = self._body_qd_written.numpy() if model.body_count else None
-            _check_supported(model, self._joint_options)
+            _check_supported(model, self._joint_options, self._feature_options)
             self._build_engine()
             if written is not None:
                 self._drop_residual_twists(self._kinematic_body & ~kinematic, written)

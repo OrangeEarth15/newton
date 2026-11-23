@@ -3,10 +3,11 @@
 
 """Newton's joints on libuipc's affine-body joints.
 
-Which libuipc joint every Newton joint becomes, and the joints SolverIPC refuses (``_map_joints``, ``_check_joints``);
-how the joints are laid out in the scene with their penalties (``_add_joints``, the distance joints' anchors); and the
-joints' work at every step: their angles and distances at the step's start, the drives, springs, damping, limits and
-``joint_f`` as libuipc's driving terms (``_write_joint_controls``), and the BDF2 history of their coordinates.
+Which libuipc joint every Newton joint becomes, and the joints SolverIPC refuses (``_map_joints``, ``_check_joints``,
+with the feature modules' refusals of what libuipc's joints do not hold: ``features``); how the joints are laid out in
+the scene with their penalties (``_add_joints``, the distance joints' anchors); and the joints' work at every step:
+their angles and distances at the step's start, the drives, springs, damping, limits and ``joint_f`` as libuipc's
+driving terms (``_write_joint_controls``), and the BDF2 history of their coordinates.
 """
 
 from __future__ import annotations
@@ -19,8 +20,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 import warp as wp
 
-from newton import MAXVAL, Control, JointTargetMode, JointType, Model, NewtonWarning, State
+from newton import Control, JointType, Model, NewtonWarning, State
 
+from . import features
 from .kernels import (
     _EFFORT_LIMIT,
     _adopt_joint_angles,
@@ -59,11 +61,13 @@ class _JointMap:
     """How every joint of a model maps onto libuipc (``_map_joints``).
 
     ``kind``: the joint type whose libuipc joint the joint becomes, REVOLUTE, PRISMATIC, FIXED or BALL, or FREE for
-    none. ``store``: the type ``_store_joints`` and ``_joint_wrenches`` take the joint for, its own but for a D6 joint:
-    that of its libuipc joint, or FIXED (skipped) for one whose coordinates and ``joint_f`` the D6 kernels take.
-    ``d6``: those joints, D6 joints of three angular axes, with or without three linear ones. ``distance``: the
-    distance joints of one length, libuipc's stitch of that rest length between their joint frames' origins; the
-    other distance joints, of no length, are no joint, and every distance joint is stored as a free joint."""
+    none; D6 for a D6 joint that a feature module took (``features.universal.take_d6``), of which this module builds,
+    drives and stores nothing. ``store``: the type ``_store_joints`` and ``_joint_wrenches`` take the joint for, its own
+    but for a D6 joint: that of its libuipc joint, or FIXED (skipped) for one whose coordinates and ``joint_f`` the D6
+    kernels take or a feature module took. ``d6``: those joints, D6 joints of three angular axes, with or without three
+    linear ones. ``distance``: the distance joints of one length, libuipc's stitch of that rest length between their
+    joint frames' origins; the other distance joints, of no length or taken by a feature module
+    (``features.universal.take_distance``), are no joint here, and every distance joint is stored as a free joint."""
 
     kind: np.ndarray
     store: np.ndarray
@@ -90,9 +94,10 @@ def _orthonormal(axes: np.ndarray) -> bool:
 
 def _map_joints(model: Model) -> _JointMap:
     """How every joint maps onto libuipc (``_JointMap``), or ``NotImplementedError`` for the first joint that does
-    not: a joint type libuipc has no joint for (``_UNMAPPED_JOINTS``), a D6 joint that locks other degrees of freedom
-    than one of libuipc's joints does, or that takes Newton's coordinates of three axes that are not orthonormal, and a
-    distance joint whose distance is bounded to a range or on one side."""
+    not: a joint type libuipc has no joint for (``_UNMAPPED_JOINTS``) and a D6 joint that takes Newton's coordinates of
+    three axes that are not orthonormal. A D6 joint that locks other degrees of freedom than one of libuipc's joints
+    does, and a distance joint whose distance is bounded to a range or on one side, are offered to the universal
+    module in the order of the joints, which takes them or raises (``features.universal``)."""
     joint_type = model.joint_type.numpy().astype(np.int32)
     kind, store = joint_type.copy(), joint_type.copy()
     supported = [int(t) for t in (JointType.FREE, JointType.REVOLUTE, JointType.PRISMATIC, JointType.FIXED)]
@@ -113,12 +118,10 @@ def _map_joints(model: Model) -> _JointMap:
     for j in d6:
         lin, ang = (int(n) for n in dof_dim[j])
         t = _D6_KINDS.get((lin, ang))
-        if t is None:
-            raise NotImplementedError(
-                f"SolverIPC: the D6 joint {j} has {lin} linear and {ang} angular axes; give it no axis, one axis, three "
-                f"angular axes, or three linear and three angular axes. Its axes lock {3 - lin} translations and "
-                f"{3 - ang} rotations, which no libuipc joint locks."
-            )
+        if t is None:  # what no libuipc joint locks: the universal module takes the joint, or raises
+            features.universal.take_d6(model, int(j), lin, ang)
+            kind[j], store[j] = int(JointType.D6), int(JointType.FIXED)
+            continue
         if ang == 3:
             s = int(qd_start[j])
             for name, rows in (("linear", axes[s : s + lin]), ("angular", axes[s + lin : s + lin + ang])):
@@ -134,113 +137,99 @@ def _map_joints(model: Model) -> _JointMap:
         # the bounds of a distance joint are those of its first degree of freedom, a negative one being no bound
         first = model.joint_qd_start.numpy()[distance]
         lo, hi = model.joint_limit_lower.numpy()[first], model.joint_limit_upper.numpy()[first]
-        for j, a, b in zip(distance, lo, hi, strict=True):
-            if (a >= 0.0 or b >= 0.0) and not (a == b):
-                raise NotImplementedError(
-                    f"SolverIPC: the DISTANCE joint {j} bounds its distance to [{float(a)!r}, {float(b)!r}] (a "
-                    "negative bound is none); give both bounds one value, or make both negative. libuipc's stitch, "
-                    "which holds the distance, has one rest length and no range."
-                )
+        taken = np.zeros(len(distance), bool)
+        for k, (j, a, b) in enumerate(zip(distance, lo, hi, strict=True)):
+            if (a >= 0.0 or b >= 0.0) and not (a == b):  # a range: the universal module takes the joint, or raises
+                features.universal.take_distance(model, int(j), a, b)
+                taken[k] = True
         kind[distance] = int(JointType.FREE)
         store[distance] = int(JointType.FREE)
-        distance = distance[lo >= 0.0]
+        distance = distance[(lo >= 0.0) & ~taken]
     three = (d6[dof_dim[d6, 1] == 3] if len(d6) else d6).astype(np.int32)
     return _JointMap(kind, store, three, bool(np.any(store != joint_type)), distance.astype(np.int32))
 
 
+class _JointDofs:
+    """The degrees of freedom of a model's joints as the refusals of ``_check_joints`` and of the feature modules
+    (``features.joint_refusal``) read them: the joint of every degree of freedom (``joint``) and the type that joint
+    maps onto (``kind``, ``_JointMap.kind``), the joints' types and first degrees of freedom (``joint_type``,
+    ``qd_start``), the model's per-DOF arrays (``value``) and the message of a refusal (``refusal``)."""
+
+    def __init__(self, model: Model, kind: np.ndarray):
+        self.model = model
+        self.joint_type = model.joint_type.numpy()
+        self.qd_start = model.joint_qd_start.numpy()
+        self.joint = np.repeat(np.arange(model.joint_count), np.diff(self.qd_start))
+        self.kind = kind[self.joint]
+        self._values = {}
+
+    def value(self, name: str) -> np.ndarray:
+        """The model's per-DOF array ``name`` in float64, zeros where the model has none."""
+        if name not in self._values:
+            a = getattr(self.model, name)
+            self._values[name] = np.zeros(self.model.joint_dof_count) if a is None else a.numpy().astype(np.float64)
+        return self._values[name]
+
+    def refusal(self, dofs: np.ndarray, what: Callable[[int], str], remedy: str) -> tuple[int, str] | None:
+        """The refusal of the first of ``dofs``, ``(dof, message)``, or None for none: the message says what it has
+        (``what(dof)``), what to do and why (``remedy``)."""
+        if not len(dofs):
+            return None
+        d = int(dofs[0])
+        j = int(self.joint[d])
+        name = JointType(int(self.joint_type[j])).name
+        return d, f"SolverIPC: DOF {d} of the {name} joint {j} has {what(d)}; {remedy}."
+
+
+def _refuse(refusal: tuple[int, str] | None) -> None:
+    """Raise ``NotImplementedError`` with the message of ``refusal`` (``_JointDofs.refusal``), if any."""
+    if refusal is not None:
+        raise NotImplementedError(refusal[1])
+
+
 def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
-    """Joints that libuipc's affine-body joints represent (:ref:`ipc-joints`): the joints ``_map_joints`` maps; drives,
-    passive springs, damping, limits and armature on revolute and prismatic joints only; no negative armature, no
-    joint friction, and no negative effort limit on a driven degree of freedom (without ``options.effort_limit``, none
-    below Newton's default)."""
+    """Joints that libuipc's affine-body joints represent (:ref:`ipc-joints`): the joints ``_map_joints`` maps, no
+    negative armature, and no negative effort limit on a driven degree of freedom (without ``options.effort_limit``,
+    none below Newton's default). What the feature modules refuse of the degrees of freedom (``features``: joint
+    friction, and armature, drives, springs, damping and limits on ball and free joints) is checked in the order
+    these checks always had: friction, a negative armature, the modules' armature, drives and limits, the effort
+    limit."""
     if model.joint_count == 0:
         return
-    joint_type = model.joint_type.numpy()
     options = options or _JointOptions()
     kind = _map_joints(model).kind
     if model.joint_dof_count == 0:
         return
-    qd_start = model.joint_qd_start.numpy()
-    dof_joint = np.repeat(np.arange(model.joint_count), np.diff(qd_start))
-    dof_type = kind[dof_joint]
-
-    def per_dof(name: str) -> np.ndarray:
-        a = getattr(model, name)
-        return np.zeros(model.joint_dof_count) if a is None else a.numpy().astype(np.float64)
-
-    def refuse(dofs: np.ndarray, what: Callable[[int], str], remedy: str) -> None:
-        """Raise for the first of ``dofs``: what it has, what to do and why (``remedy``)."""
-        if len(dofs):
-            d = int(dofs[0])
-            j = int(dof_joint[d])
-            raise NotImplementedError(
-                f"SolverIPC: DOF {d} of the {JointType(int(joint_type[j])).name} joint {j} has {what(d)}; {remedy}."
-            )
-
-    friction = per_dof("joint_friction")
-    refuse(
-        np.flatnonzero(friction != 0.0),
-        lambda d: f"joint_friction {float(friction[d])!r}",
-        "set it to 0. libuipc's joints have no friction",
-    )
-    ke, kd = per_dof("joint_target_ke"), per_dof("joint_target_kd")
-    ks, c = per_dof("joint_stiffness"), per_dof("joint_damping")
-    mode = model.joint_target_mode.numpy() if model.joint_target_mode is not None else np.zeros(len(ke), np.int32)
-    actuated = np.isin(
-        mode, [int(m) for m in (JointTargetMode.POSITION, JointTargetMode.VELOCITY, JointTargetMode.POSITION_VELOCITY)]
-    )
-    lo, hi, limit_k = per_dof("joint_limit_lower"), per_dof("joint_limit_upper"), per_dof("joint_limit_ke")
-    limited = ((lo > -MAXVAL) | (hi < MAXVAL)) & (limit_k > 0.0)
-    limited[qd_start[:-1][joint_type == int(JointType.DISTANCE)]] = False  # a distance joint's bounds
-    other = np.isin(dof_type, [int(JointType.BALL), int(JointType.FREE)])
-    armature = per_dof("joint_armature")
-    refuse(
-        np.flatnonzero(~(armature >= 0.0)),
-        lambda d: f"joint_armature {float(armature[d])!r}",
-        "make it 0 or positive. An armature is an inertia",
-    )
-    refuse(
-        np.flatnonzero((armature != 0.0) & other),
-        lambda d: f"joint_armature {float(armature[d])!r}",
-        "set it to 0. SolverIPC takes the armature of revolute and prismatic joints only, as the inertia of their one "
-        "coordinate",
-    )
-
-    def drive(d: int) -> str:
-        if actuated[d]:
-            return f"the target mode {JointTargetMode(int(mode[d])).name}"
-        return (
-            f"target_ke {float(ke[d])!r}, target_kd {float(kd[d])!r}, stiffness {float(ks[d])!r} "
-            f"and damping {float(c[d])!r}"
+    dofs = _JointDofs(model, kind)
+    _refuse(features.joint_refusal("friction", dofs))
+    armature = dofs.value("joint_armature")
+    _refuse(
+        dofs.refusal(
+            np.flatnonzero(~(armature >= 0.0)),
+            lambda d: f"joint_armature {float(armature[d])!r}",
+            "make it 0 or positive. An armature is an inertia",
         )
-
-    driven = actuated | (ke != 0.0) | (kd != 0.0) | (ks != 0.0) | (c != 0.0)
-    refuse(
-        np.flatnonzero(other & driven),
-        drive,
-        "set the gains, stiffness and damping to 0 and the target mode to NONE, and apply forces through "
-        "Control.joint_f, which acts on every joint. libuipc drives, springs and damps revolute and prismatic joints "
-        "only",
     )
-    refuse(
-        np.flatnonzero(other & limited),
-        lambda d: f"the limits [{float(lo[d])!r}, {float(hi[d])!r}] with limit_ke {float(limit_k[d])!r}",
-        "set limit_ke to 0, or the bounds to -MAXVAL and MAXVAL. libuipc limits revolute and prismatic joints only",
-    )
-    effort = per_dof("joint_effort_limit")
+    for category in ("armature", "drive", "limit"):
+        _refuse(features.joint_refusal(category, dofs))
+    ke, kd, effort = (dofs.value(name) for name in ("joint_target_ke", "joint_target_kd", "joint_effort_limit"))
     gains = (ke != 0.0) | (kd != 0.0)
     if options.effort_limit:
-        refuse(
-            np.flatnonzero(gains & ~(effort >= 0.0)),
-            lambda d: f"joint_effort_limit {float(effort[d])!r} and a drive",
-            "make it 0 or positive. It bounds the drive's force",
+        _refuse(
+            dofs.refusal(
+                np.flatnonzero(gains & ~(effort >= 0.0)),
+                lambda d: f"joint_effort_limit {float(effort[d])!r} and a drive",
+                "make it 0 or positive. It bounds the drive's force",
+            )
         )
     else:
-        refuse(
-            np.flatnonzero(gains & (effort < _EFFORT_LIMIT)),
-            lambda d: f"joint_effort_limit {float(effort[d])!r} and a drive",
-            f"raise it to {_EFFORT_LIMIT:g}, Newton's default, or pass enable_joint_effort_limit=True for a bound "
-            "decided at the start of every step. libuipc's quadratic drive cannot bound its force",
+        _refuse(
+            dofs.refusal(
+                np.flatnonzero(gains & (effort < _EFFORT_LIMIT)),
+                lambda d: f"joint_effort_limit {float(effort[d])!r} and a drive",
+                f"raise it to {_EFFORT_LIMIT:g}, Newton's default, or pass enable_joint_effort_limit=True for a bound "
+                "decided at the start of every step. libuipc's quadratic drive cannot bound its force",
+            )
         )
 
 
@@ -342,7 +331,8 @@ def _add_joints(solver: SolverIPC, scene) -> None:
     solver._wrenched_joints = wp.array(np.flatnonzero(wrenched).astype(np.int32), dtype=wp.int32, device=device)
     element = np.full(model.joint_count, -1, np.int32)
     joints = np.flatnonzero(joint_type != int(JointType.FREE))
-    world = np.concatenate([joints, mapping.distance])  # the distance joints' stitches need it too
+    # the distance joints' stitches need the world's body too, and so may the joints a feature module took (D6)
+    world = np.concatenate([joints, mapping.distance])
     if len(world) and np.any(parent[world] < 0):
         solver._world_body = model.body_count
         scene.add_affine_body(
