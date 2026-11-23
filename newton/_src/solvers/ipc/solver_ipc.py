@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 import re
 import warnings
 from dataclasses import dataclass
@@ -82,6 +83,7 @@ from .scene import (
     _check_springs,
     _collect_planes,
     _default_d_hat,
+    _default_kinematic_motion,
     _element_inputs_now,
     _engine_dyadic,
     _find_body_stiffness,
@@ -129,6 +131,8 @@ _JOINT_STRENGTH_RATIO = 100.0
 # kinematic_strength_ratio
 _KAPPA = 1.0e9
 _KINEMATIC_STRENGTH_RATIO = 100.0
+logger = logging.getLogger(__name__)
+
 # the Newton loop's defaults: libuipc's tolerances with its semi-implicit exit, and for an entry of a coupled solver
 # with proxies converged steps, at which the feedback of an impact stays within 1% of the converged one in the
 # measured scenes (docs/solvers/ipc.rst > "Coupling")
@@ -316,9 +320,9 @@ class SolverIPC(SolverBase, CouplingInterface):
     - contact between all of these, with friction, between the pairs that
       Newton's collision groups, worlds, collide flags and filter pairs let
       collide (:ref:`ipc-contact`);
-    - kinematic bodies, which move inside the step toward the pose that
-      ``state_in`` prescribes, and kinematic particles, which jump to it
-      before the step (:ref:`ipc-kinematic-bodies`);
+    - kinematic particles and bodies, which follow the poses of
+      ``state_in`` by aims inside the step or by jumps before it
+      (:ref:`ipc-kinematic-bodies`);
     - revolute, prismatic, fixed and ball joints with drives, springs,
       damping, limits, armature and :attr:`~newton.Control.joint_f`, D6 joints
       that lock what one of them locks, and distance joints of one length
@@ -414,14 +418,19 @@ class SolverIPC(SolverBase, CouplingInterface):
         fem_preconditioner: ``"diag"`` (block diagonal) or ``"mas"`` for
             particles, cloth and tetrahedra (see :ref:`ipc-mas`).
         kinematic_motion: How a kinematic body with mass and colliding shapes
-            follows ``state_in``. ``"aim"`` (the default) moves it inside the
-            step toward the prescribed pose, so that contact and friction act
-            on its motion. ``"jump"`` writes the pose before the step, and a
-            jump that meets a surface fails the step. See
+            follows ``state_in``: ``"aim"`` moves it inside the step toward the
+            prescribed pose, so that contact and friction act on its motion,
+            and ``"jump"`` writes the pose before the step, failing the step
+            when the jump meets a surface. The default, ``None``, picks
+            ``"aim"`` on the barrier pipeline when every such body can aim,
+            and ``"jump"`` otherwise (under AL-IPC, for such a body of the
+            global world with independent worlds, or for one with a singular
+            inertia); :attr:`kinematic_motion` gives the choice. See
             :ref:`ipc-kinematic-bodies`.
         kinematic_strength_ratio: The strength ratio of the aims of
-            ``kinematic_motion="aim"`` (libuipc's soft transform constraint);
-            ``"jump"`` refuses a value other than the default.
+            ``kinematic_motion="aim"`` (libuipc's soft transform constraint).
+            A solve that takes the jump refuses a value other than the
+            default.
         enable_joint_limit_damping: Damp a revolute or prismatic joint that
             starts a step past one of its limits with ``joint_limit_kd``, as
             Featherstone and SemiImplicit do (see :ref:`ipc-joints`); with False
@@ -559,7 +568,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         body_rotation: str | None = None,
         contact_constitution: str = "ipc",
         fem_preconditioner: str = "diag",
-        kinematic_motion: str = "aim",
+        kinematic_motion: str | None = None,
         kinematic_strength_ratio: float = _KINEMATIC_STRENGTH_RATIO,
         enable_joint_limit_damping: bool = True,
         enable_joint_effort_limit: bool = True,
@@ -600,7 +609,8 @@ class SolverIPC(SolverBase, CouplingInterface):
             )
         _check_choice("contact_constitution", contact_constitution, ("ipc", "al-ipc"))
         _check_choice("fem_preconditioner", fem_preconditioner, ("diag", "mas"))
-        _check_choice("kinematic_motion", kinematic_motion, ("jump", "aim"))
+        if kinematic_motion is not None:
+            _check_choice("kinematic_motion", kinematic_motion, ("jump", "aim"))
         for name, value in (
             ("thickness", thickness),
             ("cloth_strain_rate", cloth_strain_rate),
@@ -683,7 +693,10 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._body_kappa = None if body_kappa is None else float(body_kappa)
         self._joint_strength_ratio = float(joint_strength_ratio)
         self._shape_segments = int(shape_segments)
-        self._aims = kinematic_motion == "aim"
+        # kinematic_motion as given (None: the solver picks it, _resolve_kinematic_motion), and as the solve takes it
+        self._kinematic_motion_given = kinematic_motion
+        self._kinematic_motion = None
+        self._aims = False
         self._kinematic_strength_ratio = float(kinematic_strength_ratio)
         self._dt = self._config.dt  # of the last step, which grow() solves again
         self._clamp_checked_dt = None  # the step size whose stiffness the clamp warning was last checked for
@@ -832,6 +845,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._proxy_body, self._proxy_particle = _proxy_bodies(model), _proxy_particles(model)
         self._proxies = bool(self._proxy_body.any() or self._proxy_particle.any())
         if model.particle_count == 0 and model.body_count == 0:
+            self._resolve_kinematic_motion()
             return
         if self._proxies:
             self._check_proxies()
@@ -846,6 +860,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         # solves them apart from each other (independent worlds) unless coupled_worlds asks for one solve
         self._worlds = _Worlds.of(model)
         self._independent = self._worlds is not None and not self._coupled_worlds
+        self._resolve_kinematic_motion()
         self._status_entries = None
         scene = self._uipc_warp.arrays.ArrayScene(
             kappa_corridor=self._adaptive_kappa, independent_subscenes=self._independent
@@ -1371,6 +1386,31 @@ class SolverIPC(SolverBase, CouplingInterface):
             ],
             device=self.model.device,
         )
+
+    def _resolve_kinematic_motion(self) -> None:
+        """Set how the solve being built moves the kinematic bodies: the ``kinematic_motion`` given, or for ``None``
+        the one ``_default_kinematic_motion`` picks, logged at the debug level when it is picked or changes.
+
+        Raises ``ValueError`` for a ``kinematic_strength_ratio`` other than the default when the solve takes the jump,
+        which reads no ratio."""
+        given = self._kinematic_motion_given
+        mode, reason = (given, None) if given is not None else _default_kinematic_motion(self)
+        if given is None and mode != self._kinematic_motion:
+            logger.debug("SolverIPC: kinematic_motion=None takes %r%s.", mode, f" ({reason})" if reason else "")
+        if mode == "jump" and given is None and self._kinematic_strength_ratio != _KINEMATIC_STRENGTH_RATIO:
+            raise ValueError(
+                "SolverIPC: kinematic_strength_ratio sets the strength of the aims of kinematic_motion='aim', which "
+                f"the default kinematic_motion=None does not take here ({reason}): it takes 'jump', which reads no "
+                f"ratio; leave it at its default {_KINEMATIC_STRENGTH_RATIO:g}, got {self._kinematic_strength_ratio}."
+            )
+        self._kinematic_motion = mode
+        self._aims = mode == "aim"
+
+    @property
+    def kinematic_motion(self) -> str:
+        """The mode in which this solve moves its kinematic bodies, ``"aim"`` or ``"jump"``, as given or as the
+        default ``None`` picked it (see :ref:`ipc-kinematic-bodies`). Read-only."""
+        return self._kinematic_motion
 
     def _drop_residual_twists(self, became: np.ndarray, written: np.ndarray | None) -> None:
         """Make the aims of the bodies ``became``, which a notification made kinematic, ignore the twist the solver
@@ -2044,6 +2084,9 @@ class SolverIPC(SolverBase, CouplingInterface):
             # kinematic_motion="aim": a kinematic body that gains or loses its mass starts or stops moving toward its
             # aims
             rebuild |= not np.array_equal(_aiming_bodies(self, dyadic[0]), self._aim_bodies)
+            # kinematic_motion=None: the mode it picks follows the kinematic bodies, their masses and inertias
+            if self._kinematic_motion_given is None:
+                rebuild |= _default_kinematic_motion(self)[0] != self._kinematic_motion
             changed = any(not np.array_equal(a, b) for a, b in zip(dyadic, self._dyadic, strict=True))
             if self._config.contact_constitution == "al-ipc":
                 # the AL-IPC contact penalty follows the masses the engine was built with

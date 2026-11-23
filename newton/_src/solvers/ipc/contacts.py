@@ -435,10 +435,10 @@ def _check_al_ipc(solver: SolverIPC, elements: _ContactElements) -> None:
     mass, a body of no mass), where libuipc's own obstacles are bodies or vertices with mass."""
     if len(solver._aim_bodies):
         raise NotImplementedError(
-            "SolverIPC: kinematic_motion='aim', the default, would move the kinematic body "
-            f"{int(solver._aim_bodies[0])} toward its aims; pass kinematic_motion='jump', under which "
-            "contact_constitution='al-ipc' sweeps the moves of kinematic bodies. AL-IPC tests animated aims with a "
-            "check of its own, which SolverIPC does not run."
+            "SolverIPC: kinematic_motion='aim' would move the kinematic body "
+            f"{int(solver._aim_bodies[0])} toward its aims; leave kinematic_motion at its default (None) or pass "
+            "'jump', under which contact_constitution='al-ipc' sweeps the moves of kinematic bodies. AL-IPC tests "
+            "animated aims with a check of its own, which SolverIPC does not run."
         )
     model = solver.model
     colliding = elements.enabled[elements.particle].any(axis=1) if model.particle_count else np.zeros(0, bool)

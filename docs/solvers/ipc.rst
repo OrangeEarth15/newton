@@ -75,10 +75,9 @@ The solver simulates:
   and kinematic bodies (:attr:`~newton.BodyFlags.KINEMATIC`, zero mass or zero
   inverse mass, see :ref:`ipc-coupling`). A kinematic body with mass and
   colliding shapes moves inside the step toward the pose that ``state_in``
-  prescribes. Kinematic particles, kinematic bodies without mass or colliding
-  shapes, and with ``kinematic_motion="jump"`` every kinematic body jump to
-  their ``state_in`` pose before the step; a jump that meets a surface fails
-  the step (see :ref:`ipc-kinematic-bodies`). A particle that is not active and
+  prescribes, where the solver can aim it. Kinematic particles and the other
+  kinematic bodies jump to their ``state_in`` pose before the step, and a jump
+  that meets a surface fails the step (see :ref:`ipc-kinematic-bodies`). A particle that is not active and
   on no cloth or tetrahedron collides with nothing, as in Newton.
 - revolute, prismatic, fixed and ball joints between bodies or to the world,
   with drives, passive springs and damping, limits, armature and
@@ -464,9 +463,9 @@ Global entities (world -1) must not move, because every world would push them
 and so join the worlds. The solver refuses with :class:`NotImplementedError` a
 global free particle (one with mass that is
 :attr:`~newton.ParticleFlags.ACTIVE`), a global dynamic body, a global proxy of
-a coupled solver, and a global kinematic body that moves toward an aim (one with
-mass and colliding shapes; pass ``kinematic_motion="jump"`` to make it a fixed
-body). Newton's implicit MPM refuses global colliders backed by dynamic bodies
+a coupled solver, and a global kinematic body that an explicit
+``kinematic_motion="aim"`` would move toward an aim (one with mass and colliding
+shapes; the default takes the jump for it, as a fixed body). Newton's implicit MPM refuses global colliders backed by dynamic bodies
 with ``separate_worlds`` in the same way. A triangle, tetrahedron or spring that
 joins two worlds is refused too. Global static shapes and planes, kinematic
 particles and kinematic bodies that jump act in every world. Not offered with independent worlds yet, where two worlds or
@@ -505,10 +504,16 @@ Kinematic bodies
 
 A kinematic body (:attr:`~newton.BodyFlags.KINEMATIC`) follows the poses that
 the caller writes into ``state_in``; forces and contacts do not change its
-motion. The solver moves it in one of two ways, chosen by ``kinematic_motion``.
+motion. The solver moves it in one of two ways, chosen by ``kinematic_motion``:
+by an aim inside the step, or by a jump before it. The default, ``None``, picks
+``"aim"`` on the barrier pipeline when every kinematic body with mass and
+colliding shapes can aim, and ``"jump"`` otherwise: under AL-IPC, with
+independent worlds when such a body belongs to the global world, and when such
+a body has a singular inertia. :attr:`~newton.solvers.SolverIPC.kinematic_motion`
+gives the mode a solver took.
 
-With the default, ``kinematic_motion="aim"``, a kinematic body with mass and
-colliding shapes moves during the step. Its aim is the pose of ``state_in``
+With ``kinematic_motion="aim"``, a kinematic body with mass and colliding shapes
+moves during the step. Its aim is the pose of ``state_in``
 advanced over the step by the twist (``body_qd``) of ``state_in``. The step
 pulls the body toward its aim with libuipc's soft transform constraint
 (constitution 16), an elastic pull whose strength ratio :math:`\eta` is
@@ -541,14 +546,15 @@ each kinematic or static never collide, as Newton's collision pipeline can
 filter such pairs (``include_static_kinematic_pairs=False``); the solver checks
 its pairs against :attr:`~newton.Model.shape_contact_pairs` without them.
 
-The solver refuses aims, naming the body, in two cases; pass
-``kinematic_motion="jump"`` there:
+An explicit ``kinematic_motion="aim"`` is refused, naming the body, in the
+cases where the default takes the jump:
 
 - with ``contact_constitution="al-ipc"``, because libuipc's AL-IPC frame checks
   animated aims with a test of its own that the solver does not run (see
   :ref:`ipc-al-ipc`);
 - with independent worlds, for a body of the global world, which every world
-  would push (see :ref:`ipc-worlds`).
+  would push (see :ref:`ipc-worlds`);
+- for a body with mass but a singular inertia, which the aim cannot turn.
 
 With ``kinematic_motion="jump"`` a kinematic body jumps: before the step the
 solver writes the pose of ``state_in`` into a fixed body. Kinematic particles

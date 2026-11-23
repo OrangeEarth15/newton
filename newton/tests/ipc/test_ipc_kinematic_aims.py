@@ -244,9 +244,9 @@ def test_reset_teleports_a_kinematic_body(test, device):
 
 def test_jump_mode_builds_the_engine_of_before(test, device):
     """kinematic_motion="jump" builds a kinematic body as before: fixed, without a soft transform constraint, with the
-    contact elements of before, its state_out a copy of state_in; "aim", the default, builds it free, with the
-    constraint and the kinematic and static shapes in elements of their own. Invalid options and AL-IPC with aims,
-    the default's included, are refused."""
+    contact elements of before, its state_out a copy of state_in; "aim", which the default picks for this model,
+    builds it free, with the constraint and the kinematic and static shapes in elements of their own. Invalid options
+    and AL-IPC with an explicit "aim" are refused; AL-IPC with the default takes the jump."""
     from newton._src.solvers.ipc.contacts import _contact_elements  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
@@ -280,10 +280,10 @@ def test_jump_mode_builds_the_engine_of_before(test, device):
         newton.solvers.SolverIPC(model, kinematic_motion="slide")
     with test.assertRaisesRegex(ValueError, "kinematic_strength_ratio"):
         newton.solvers.SolverIPC(model, kinematic_motion="aim", kinematic_strength_ratio=-1.0)
-    for kwargs in ({"kinematic_motion": "aim"}, {}):
-        with test.assertRaisesRegex(NotImplementedError, "the default, would move the kinematic body"):
-            newton.solvers.SolverIPC(model, contact_constitution="al-ipc", **kwargs)
-    test.assertTrue(newton.solvers.SolverIPC(model)._aims)
+    with test.assertRaisesRegex(NotImplementedError, "kinematic_motion='aim' would move the kinematic body"):
+        newton.solvers.SolverIPC(model, contact_constitution="al-ipc", kinematic_motion="aim")
+    test.assertEqual(newton.solvers.SolverIPC(model, contact_constitution="al-ipc").kinematic_motion, "jump")
+    test.assertEqual(newton.solvers.SolverIPC(model).kinematic_motion, "aim")
 
 
 @requires("uipc_warp")
@@ -576,6 +576,83 @@ def test_aims_pass_the_twist_through(test, device):
                 np.testing.assert_array_equal(s0.body_qd.numpy()[box], twist)
 
 
+def _kinematic_box(builder, x):
+    """A kinematic box of 1 kg, inertia 1e-3 kg m^2 about every axis, with a colliding shape of 0.1 m at ``x``."""
+    body = builder.add_body(
+        xform=wp.transform(wp.vec3(*x), wp.quat_identity()),
+        mass=1.0,
+        inertia=wp.mat33(np.eye(3) * 1.0e-3),
+        is_kinematic=True,
+    )
+    builder.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+    return body
+
+
+def _fallback_models(device):
+    """The three models for which kinematic_motion=None takes the jump, with the explicit "aim" refusal of each: a
+    kinematic box under contact_constitution="al-ipc"; a kinematic box of the global world beside two worlds with a
+    box each (independent worlds); a kinematic box whose inertia has a zero principal moment."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    _box_body(builder, (0.0, 0.0, 0.0), (0.05, 0.05, 0.05))
+    _kinematic_box(builder, (0.5, 0.0, 0.0))
+    al = (builder.finalize(device=device), {"contact_constitution": "al-ipc"}, NotImplementedError, "toward its aims")
+
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    for w in range(2):
+        builder.begin_world()
+        _box_body(builder, (0.0, float(w), 0.0), (0.05, 0.05, 0.05))
+        builder.end_world()
+    _kinematic_box(builder, (0.5, 3.0, 0.0))  # after the worlds: the global world
+    worlds = (builder.finalize(device=device), {}, NotImplementedError, "global world -1 is a kinematic body")
+
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    _box_body(builder, (0.0, 0.0, 0.0), (0.05, 0.05, 0.05))
+    flat = _kinematic_box(builder, (0.5, 0.0, 0.0))
+    model = builder.finalize(device=device)
+    inertia = model.body_inertia.numpy()
+    inertia[flat] = np.diag([1.0e-3, 1.0e-3, 0.0])
+    model.body_inertia.assign(inertia)
+    singular = (model, {}, ValueError, "positive-definite inertia for the kinematic body")
+    return {"al-ipc": al, "global body": worlds, "singular inertia": singular}
+
+
+def test_default_picks_the_mode_per_solver(test, device):
+    """kinematic_motion=None picks "aim" on the barrier pipeline when every kinematic body that would aim can, and
+    "jump" otherwise: under AL-IPC, for such a body of the global world with independent worlds, and for one with a
+    singular inertia. The fallback warns of nothing and logs its choice at the debug level; solver.kinematic_motion
+    gives the mode (read-only). An explicit "aim" is refused in each fallback case; an explicit "jump" stays the jump,
+    and so does a model that would aim. A kinematic_strength_ratio other than the default is refused where the
+    default takes the jump."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    _box_body(builder, (0.0, 0.0, 0.0), (0.05, 0.05, 0.05))
+    kinematic = _kinematic_box(builder, (0.5, 0.0, 0.0))
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model)
+    test.assertEqual(solver.kinematic_motion, "aim")
+    np.testing.assert_array_equal(solver._aim_bodies, [kinematic])
+    with test.assertRaises(AttributeError):
+        solver.kinematic_motion = "jump"
+    jump = newton.solvers.SolverIPC(model, kinematic_motion="jump")
+    test.assertEqual(jump.kinematic_motion, "jump")
+    test.assertEqual(len(jump._aim_bodies), 0)
+    for name, (model, options, error, pattern) in _fallback_models(device).items():
+        with test.subTest(name):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                with test.assertLogs("newton._src.solvers.ipc.solver_ipc", "DEBUG") as logs:
+                    solver = newton.solvers.SolverIPC(model, **options)
+            test.assertEqual(solver.kinematic_motion, "jump")
+            test.assertEqual(len(solver._aim_bodies), 0)
+            test.assertEqual(len(logs.records), 1)
+            test.assertIn("kinematic_motion=None takes 'jump'", logs.output[0])
+            s0, s1 = model.state(), model.state()
+            solver.step(s0, s1, None, None, 0.01)
+            with test.assertRaisesRegex(error, pattern):
+                newton.solvers.SolverIPC(model, kinematic_motion="aim", **options)
+            with test.assertRaisesRegex(ValueError, "the default kinematic_motion=None does not take here"):
+                newton.solvers.SolverIPC(model, kinematic_strength_ratio=50.0, **options)
+
+
 @requires("uipc_warp")
 class TestSolverIPCKinematicMotion(unittest.TestCase):
     """Which kinematic bodies move toward their aims, the twist of a body that becomes kinematic, and the sweep of the
@@ -590,6 +667,7 @@ for name, func in (
     ("test_import_requires_the_kinematic_sweep", test_import_requires_the_kinematic_sweep),
     ("test_refused_first_step_takes_state_in_again", test_refused_first_step_takes_state_in_again),
     ("test_aims_pass_the_twist_through", test_aims_pass_the_twist_through),
+    ("test_default_picks_the_mode_per_solver", test_default_picks_the_mode_per_solver),
 ):
     add_function_test(TestSolverIPCKinematicMotion, name, func, devices=devices)
 
