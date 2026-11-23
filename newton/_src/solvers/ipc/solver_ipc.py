@@ -960,6 +960,11 @@ class SolverIPC(SolverBase, CouplingInterface):
                 through[self._aim_bodies] = False
                 self._body_passthrough = wp.array(through.astype(np.int32), dtype=wp.int32, device=device)
             self._aim_rows = wp.array(self._aim_bodies.astype(np.int32), dtype=wp.int32, device=device)
+            # the twist of every such body that it had as a dynamic body before a notification made it kinematic,
+            # which its aims do not take (NaN: none; _drop_residual_twists)
+            self._aim_residual = wp.array(
+                np.full((len(self._aim_bodies), 6), np.nan, np.float32), dtype=wp.spatial_vector, device=device
+            )
             entry = np.where(model.body_world.numpy() < 0, model.world_count, model.body_world.numpy())
             self._body_entry = wp.array(entry.astype(np.int32), dtype=wp.int32, device=device)
             self._joint_wrench = wp.zeros(nb, dtype=wp.spatial_vector, device=device)
@@ -1328,9 +1333,25 @@ class SolverIPC(SolverBase, CouplingInterface):
                 eng.vm.x_nm1,
                 eng.vm.v_nm1,
                 self._body_hold,
+                self._aim_residual,
             ],
             device=self.model.device,
         )
+
+    def _drop_residual_twists(self, became: np.ndarray, written: np.ndarray | None) -> None:
+        """``kinematic_motion="aim"``, after a notification that made the bodies ``became`` kinematic and built the
+        solve again: such a body moving toward its aims does not take the twist the solver wrote for it as a dynamic
+        body (``written``, the ``_body_qd_written`` of the old solve), which ``state_in`` still holds until the caller
+        writes another; its aims take a zero twist until then (``_aim_kinematic_bodies``), as Newton's other solvers
+        leave a body that becomes kinematic where it is."""
+        if written is None or not len(self._aim_bodies):
+            return
+        rows = np.flatnonzero(became[self._aim_bodies])
+        if not len(rows):
+            return
+        residual = self._aim_residual.numpy()
+        residual[rows] = written[self._aim_bodies[rows]]
+        self._aim_residual.assign(residual)
 
     def _write_forces(self, state_in: State, control: Control) -> None:
         """The external accelerations of the step, on the device."""
@@ -1998,8 +2019,12 @@ class SolverIPC(SolverBase, CouplingInterface):
                 aims = self._aim_bodies
                 rebuild |= any(not np.array_equal(a[aims], b[aims]) for a, b in zip(dyadic, self._dyadic, strict=True))
         if rebuild:
+            # what the solver wrote for the bodies, whose twists a body that becomes kinematic does not take
+            written = self._body_qd_written.numpy() if model.body_count else None
             _check_supported(model, self._joint_options)
             self._build_engine()
+            if written is not None:
+                self._drop_residual_twists(self._kinematic_body & ~kinematic, written)
             return
         if flags & ModelFlags.MODEL_PROPERTIES:
             self._gravity = _world_gravity(self)

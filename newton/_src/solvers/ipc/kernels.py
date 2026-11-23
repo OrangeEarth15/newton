@@ -268,17 +268,32 @@ def _aim_kinematic_bodies(
     x_nm1: wp.array[wp.vec3d],
     v_nm1: wp.array[wp.vec3d],
     hold: wp.array[wp.int32],
+    residual: wp.array[wp.spatial_vector],
 ):
     """The aim of every kinematic body of the soft transform constraint's rows (``kinematic_motion="aim"``,
     :ref:`ipc-kinematic-bodies`): its ``state_in`` pose advanced by its twist over the step, the centre of mass by ``v
     dt``, the rotation by the exponential of ``omega dt``, as ``q_aim = (p, rows of R)``; the constraint on; the body's
     affine velocity ``(q_aim - q) / dt`` from its state ``q``, so that the step's prediction ``q + v dt`` is the aim,
     and with ``bdf2`` the history of a restart from that velocity (``x_nm1 = q - dt v``, ``v_nm1 = v``), whose
-    prediction is the same; and the body held from the next step on, so that it starts where it ends."""
+    prediction is the same; and the body held from the next step on, so that it starts where it ends.
+
+    ``residual[k]`` is the twist the solver wrote for the body while it was dynamic, before a notification made it
+    kinematic (NaN for none): a ``state_in`` twist equal to it is no twist the caller wrote, and the body takes a zero
+    twist instead; any other twist ends that, and ``residual[k]`` becomes NaN."""
     k = wp.tid()
     b = bodies[k]
     tf = body_q[b]
     tw = body_qd[b]
+    left = residual[k]
+    same = int(1)
+    for i in range(6):
+        if tw[i] != left[i]:
+            same = 0
+    if same != 0:
+        tw = wp.spatial_vector()
+    else:
+        nan = wp.nan
+        residual[k] = wp.spatial_vector(nan, nan, nan, nan, nan, nan)
     R0 = _rotation64(wp.transform_get_rotation(tf))
     c = _to64(body_com[b])
     com = _to64(wp.transform_get_translation(tf)) + R0 * c + _to64(wp.spatial_top(tw)) * dt

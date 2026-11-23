@@ -525,7 +525,12 @@ density 0 that anchors joints, keeps the jump: there is no mass for the
 constraint to move, and a soft anchor would let the joints it holds sag. A
 caller who writes consistent ``body_q`` and ``body_qd`` every step gets the
 next pose as the aim, one who writes poses only (``body_qd`` 0) the written
-pose, one who writes nothing motion at constant twist. The step starts from the pose the body reached, so the motion from there
+pose, one who writes nothing motion at constant twist. A body that a
+notification makes kinematic (``notify_model_changed`` with
+``BODY_PROPERTIES``) does not take the twist the solver wrote for it as a
+dynamic body, which ``state_in`` holds until the caller writes another: it
+stays where it is, as Newton's other solvers leave such a body, until the
+caller writes a twist. The step starts from the pose the body reached, so the motion from there
 to the aim is swept, a jump included; the first step after the solver is built
 and the step after a :meth:`~newton.solvers.SolverIPC.reset` that selects the
 body's world take ``state_in`` instead, which is how a caller moves such a body

@@ -364,12 +364,63 @@ def test_massless_kinematic_bodies_keep_the_jump(test, device):
     test.assertEqual(len(solver._aim_bodies), 0)
 
 
+def test_rekinematic_body_drops_its_twist(test, device):
+    """Newton's test_kinematic_runtime_toggle under kinematic_motion="aim": a kinematic sphere, made dynamic and pushed
+    by 10 N for 60 steps of 1/240 s, then made kinematic again (notify_model_changed(BODY_PROPERTIES)). Its state_in
+    still holds the twist it gained as a dynamic body, which the solver wrote; the body does not take it, and stays
+    where it is over the next 60 steps, to 1e-6 m (it moved on at that twist, 0.12 m). A caller who writes another
+    twist at the second toggle moves the body at it from the first step on."""
+
+    def run(prescribed):
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        body = builder.add_body(mass=1.0, is_kinematic=True)
+        builder.add_shape_sphere(body, radius=0.1)
+        model = builder.finalize(device=device)
+        solver = newton.solvers.SolverIPC(model, kinematic_motion="aim")
+        s0, s1 = model.state(), model.state()
+
+        def phase(steps):
+            nonlocal s0, s1
+            for _ in range(steps):
+                s0.clear_forces()
+                s0.body_f.assign(np.array([[10.0, 0.0, 0.0, 0.0, 0.0, 0.0]], np.float32))
+                solver.step(s0, s1, None, None, 1.0 / 240.0)
+                s0, s1 = s1, s0
+
+        def toggle(flag):
+            flags = model.body_flags.numpy()
+            flags[body] = int(flag)
+            model.body_flags.assign(flags)
+            solver.notify_model_changed(newton.ModelFlags.BODY_PROPERTIES)
+
+        phase(60)
+        test.assertLess(np.linalg.norm(s0.body_q.numpy()[body, :3]), 1e-6)  # kinematic: forces do not move it
+        toggle(newton.BodyFlags.DYNAMIC)
+        phase(60)
+        start = s0.body_q.numpy()[body, :3].copy()
+        test.assertGreater(start[0], 0.05)
+        test.assertGreater(float(s0.body_qd.numpy()[body, 0]), 0.4)  # the twist it gained
+        toggle(newton.BodyFlags.KINEMATIC)
+        if prescribed:
+            qd = s0.body_qd.numpy()
+            qd[body] = (0.2, 0.0, 0.0, 0.0, 0.0, 0.0)
+            s0.body_qd.assign(qd)
+        phase(60)
+        return s0.body_q.numpy()[body, :3] - start
+
+    np.testing.assert_allclose(run(False), 0.0, rtol=0.0, atol=1e-6)
+    np.testing.assert_allclose(run(True), [0.2 * 60 / 240.0, 0.0, 0.0], rtol=0.0, atol=1e-4)
+
+
 @requires("uipc_warp")
 class TestSolverIPCKinematicMotion(unittest.TestCase):
     """Which kinematic bodies move toward their aims, and the twist of a body that becomes kinematic."""
 
 
-for name, func in (("test_massless_kinematic_bodies_keep_the_jump", test_massless_kinematic_bodies_keep_the_jump),):
+for name, func in (
+    ("test_massless_kinematic_bodies_keep_the_jump", test_massless_kinematic_bodies_keep_the_jump),
+    ("test_rekinematic_body_drops_its_twist", test_rekinematic_body_drops_its_twist),
+):
     add_function_test(TestSolverIPCKinematicMotion, name, func, devices=devices)
 
 
