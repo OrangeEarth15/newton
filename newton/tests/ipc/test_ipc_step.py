@@ -22,7 +22,6 @@ from newton.tests.ipc._fixtures import (
     _run,
     _soft_cube,
     _stacking_cubes,
-    _worlds,
 )
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
@@ -358,42 +357,6 @@ def test_reset_inside_captured_graph(test, device):
     np.testing.assert_allclose(runs["world 0 only"][1], runs["none"][1], rtol=0.0, atol=1e-6)
 
 
-def test_reset_checks_world_mask_as_newton_does(test, device):
-    """reset checks world_mask with SolverIPC's copy of Newton's check, which has no public name: for a model of one
-    world and one of three coupled worlds, it accepts the masks that SolverBase.reset accepts and raises the same
-    error for the others (another length, dtype, rank or device, a NumPy array, a list)."""
-
-    def outcome(solver, state, mask):
-        try:
-            solver.reset(state, world_mask=mask)
-        except (TypeError, ValueError) as error:
-            return type(error).__name__, str(error)
-        return "accepted"
-
-    for copies in (1, 3):
-        with test.subTest(copies=copies):
-            model = _worlds(device, copies)
-            n = model.world_count + 1
-            masks = [
-                None,
-                wp.array([True] * n, dtype=wp.bool, device=device),
-                wp.zeros(n, dtype=wp.bool, device=device),
-                wp.ones(n - 1, dtype=wp.bool, device=device),
-                wp.ones(n + 1, dtype=wp.bool, device=device),
-                wp.ones(n, dtype=wp.int32, device=device),
-                wp.ones(n, dtype=wp.uint8, device=device),
-                wp.ones((n, 1), dtype=wp.bool, device=device),
-                wp.ones(n, dtype=wp.bool, device="cpu"),
-                np.ones(n, dtype=bool),
-                [True] * n,
-            ]
-            state = model.state()
-            expected = [outcome(newton.solvers.SolverBase(model), state, m) for m in masks]
-            test.assertEqual(expected.count("accepted"), 3)
-            solver = newton.solvers.SolverIPC(model, coupled_worlds=copies > 1)
-            test.assertEqual([outcome(solver, state, m) for m in masks], expected)
-
-
 def _hanging_cloth(device):
     """A 32 x 32 cloth of 1 cm cells hanging from its top edge, without contact."""
     builder = newton.ModelBuilder()
@@ -693,7 +656,6 @@ for name, func in (
     ("test_grown_lists_keep_a_changed_gravity", test_grown_lists_keep_a_changed_gravity),
     ("test_teleport_equals_fresh_solver", test_teleport_equals_fresh_solver),
     ("test_reset_inside_captured_graph", test_reset_inside_captured_graph),
-    ("test_reset_checks_world_mask_as_newton_does", test_reset_checks_world_mask_as_newton_does),
     ("test_notify_updates_gravity_and_inertia_in_place", test_notify_updates_gravity_and_inertia_in_place),
     ("test_notify_new_masses_without_joints", test_notify_new_masses_without_joints),
     ("test_notify_new_particle_masses", test_notify_new_particle_masses),

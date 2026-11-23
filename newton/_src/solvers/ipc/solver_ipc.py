@@ -124,32 +124,6 @@ _MAX_REGROWS = 8
 _JOINT_STRENGTH_RATIO = 100.0
 
 
-# A copy of Newton's normalize_reset_world_mask (newton/_src/core/reset.py), which SolverBase.reset calls and which has
-# no public name. test_reset_checks_world_mask_as_newton_does fails when the two check a mask differently.
-def _normalize_reset_world_mask(
-    world_mask: wp.array[wp.bool] | None, *, world_count: int, device: wp.Device
-) -> wp.array[wp.bool] | None:
-    """Validate a reset mask with shape ``(world_count + 1,)``.
-
-    The final entry selects global entities in world ``-1``. Returns the mask
-    unchanged, or ``None`` if no mask was given.
-    """
-    if world_mask is None:
-        return None
-    if not isinstance(world_mask, wp.array):
-        raise TypeError("'world_mask' must be a Warp array or None.")
-    if world_mask.dtype != wp.bool:
-        raise TypeError("'world_mask' must have dtype bool.")
-    if world_mask.ndim != 1:
-        raise ValueError("'world_mask' must be one-dimensional.")
-    if world_mask.device != device:
-        raise ValueError(f"'world_mask' device {world_mask.device} does not match expected device {device}.")
-    mask_size = world_mask.shape[0]
-    if mask_size != world_count + 1:
-        raise ValueError(f"'world_mask' length {mask_size} must equal model.world_count + 1 ({world_count + 1}).")
-    return world_mask
-
-
 def _release(version: str) -> tuple[int, ...]:
     """The release numbers at the start of a version string (``"0.4.0.dev0"`` gives ``(0, 4, 0)``)."""
     match = re.match(r"\d+(?:\.\d+)*", version)
@@ -1815,10 +1789,7 @@ class SolverIPC(SolverBase, CouplingInterface):
                 resets.
             flags: Unused.
         """
-        del state, flags
-        world_mask = _normalize_reset_world_mask(
-            world_mask, world_count=int(self.model.world_count), device=self.model.device
-        )
+        super().reset(state, world_mask, flags)  # checks world_mask
         self._restore_pending = False  # the next step starts from the reset, not from a coupled step's start
         if self._engine is None:
             return
