@@ -2082,6 +2082,12 @@ class SolverIPC(SolverBase, CouplingInterface):
         return True
 
     @override
+    def coupling_supports_particle_body_attachments(self) -> bool:
+        """``True``: the solver applies the particle-body attachments of its model view as libuipc's soft vertex
+        stitch, a hard one with a ball joint's penalty (:ref:`ipc-attachments`)."""
+        return True
+
+    @override
     def coupling_prepare_proxy_contacts(
         self,
         state: State,

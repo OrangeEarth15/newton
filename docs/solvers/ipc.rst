@@ -1001,7 +1001,11 @@ surface here, its particles fixed points that collide with nothing. And the
 view's :attr:`~newton.Model.shape_contact_pairs`, which the coupler filters by
 the view's collide flags, is the set the solver's rules give (see
 :ref:`ipc-contact`). An entry therefore steps its own content as the solver
-alone does, to the rounding of its sums.
+alone does, to the rounding of its sums. A particle-body attachment whose
+particle and body the entry owns is in its view, and the solver applies it (see
+:ref:`ipc-attachments`): ``SolverCoupledADMM`` leaves such an attachment to the
+entry, a hard one too, as to SolverVBD, since the solver reports
+``coupling_supports_particle_body_attachments()``.
 
 A proxy body or particle (:attr:`~newton.BodyFlags.PROXY`,
 :attr:`~newton.ParticleFlags.PROXY`), another entry's that this entry moves with

@@ -1544,6 +1544,10 @@ class SolverVBD(TendonStateMixin, SolverBase, CouplingInterface):
     def coupling_supports_full_surface_soft_contacts(self) -> bool:
         return True
 
+    @override
+    def coupling_supports_particle_body_attachments(self) -> bool:
+        return True
+
     def coupling_notify_input_state_update(
         self,
         state: State,

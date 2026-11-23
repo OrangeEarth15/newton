@@ -463,6 +463,49 @@ def test_admm_with_two_iterations(test, device):
         solver.coupling_notify_input_state_update(state, newton.StateFlags.ALL, iteration_restart=True, dt=0.01)
 
 
+def test_admm_leaves_attachments_to_the_entry(test, device):
+    """SolverCoupledADMM leaves a particle-body attachment whose particle and body one SolverIPC entry owns to that
+    entry, as it leaves them to SolverVBD (CouplingInterface.coupling_supports_particle_body_attachments): a particle
+    of 1 kg moving at 1 m/s on an attachment to a free body of 1 kg at its origin, without gravity, steps as SolverIPC
+    alone steps it, finite (no warning that the attachment applies no force) and hard (which the coupler refused), and
+    pulls the body along; the hard attachment holds the particle at the body's origin."""
+    import math  # noqa: PLC0415
+
+    from newton.solvers.experimental.coupled import SolverCoupledADMM  # noqa: PLC0415
+
+    def pair(stiffness):
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        inertia = wp.mat33(0.1, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.1)
+        body = builder.add_body(mass=1.0, inertia=inertia, lock_inertia=True)
+        particle = builder.add_particle(pos=wp.vec3(0.0, 0.0, 0.0), vel=wp.vec3(1.0, 0.0, 0.0), mass=1.0)
+        builder.add_attachment_particle_body(particle, body, stiffness=stiffness)
+        return builder.finalize(device=device)
+
+    def run(model, solver):
+        s0, s1 = model.state(), model.state()
+        for _ in range(20):
+            solver.step(s0, s1, None, None, 0.01)
+            s0, s1 = s1, s0
+        return s0.body_q.numpy()[0, :3].astype(np.float64), s0.particle_q.numpy()[0].astype(np.float64)
+
+    for stiffness in (2.0e4, math.inf):
+        with test.subTest(stiffness=stiffness):
+            model = pair(stiffness)
+            entry = SolverCoupledADMM.Entry(
+                "ipc", newton.solvers.SolverIPC, bodies=[0], particles=[0], joints=_joints_of(model, [0])
+            )
+            with test.assertNoLogs("newton._src.solvers.coupled.solver_coupled_admm", level="WARNING"):
+                coupled = SolverCoupledADMM(model, [entry], SolverCoupledADMM.Config(iterations=1))
+            body, particle = run(model, coupled)
+            alone = pair(stiffness)
+            body_alone, particle_alone = run(alone, newton.solvers.SolverIPC(alone))
+            np.testing.assert_allclose(body, body_alone, rtol=0.0, atol=1e-9)
+            np.testing.assert_allclose(particle, particle_alone, rtol=0.0, atol=1e-9)
+            test.assertGreater(body[0], 0.05)  # the attachment pulls the body along
+            if math.isinf(stiffness):
+                test.assertLess(np.linalg.norm(particle - body), 1e-3)
+
+
 def test_proxy_passes_converge(test, device):
     """``SolverCoupledProxy`` with several passes per step: XPBD's 1 kg box on SolverIPC's cloth over a static support
     (``_proxy_scene``), at 1/240 s with converged steps. Every pass of SolverIPC's entry starts from the step's start,
@@ -847,6 +890,7 @@ for name, func in (
     ("test_restart_restores_every_world", test_restart_restores_every_world),
     ("test_restart_replaces_the_status_of_a_pass", test_restart_replaces_the_status_of_a_pass),
     ("test_admm_with_two_iterations", test_admm_with_two_iterations),
+    ("test_admm_leaves_attachments_to_the_entry", test_admm_leaves_attachments_to_the_entry),
     ("test_proxy_passes_converge", test_proxy_passes_converge),
     ("test_coupled_status_of_captured_steps", test_coupled_status_of_captured_steps),
     ("test_coupled_reset_is_the_solvers_reset", test_coupled_reset_is_the_solvers_reset),

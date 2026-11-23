@@ -2852,7 +2852,6 @@ class SolverCoupledADMM(SolverCoupled):
         grouped: dict[tuple[str, str], list[tuple[int, tuple[float, float, float], int, float, float]]] = {}
         unowned: list[str] = []
         unsupported_same_entry: list[tuple[str, str, str]] = []
-        from ..vbd.solver_vbd import SolverVBD  # noqa: PLC0415
 
         for name, body, particle, point, stiffness, damping in rows:
             body_entry = self._entry_name_for_body(body)
@@ -2860,18 +2859,20 @@ class SolverCoupledADMM(SolverCoupled):
             if math.isinf(stiffness) and (
                 body_entry is None
                 or particle_entry != body_entry
-                or not isinstance(self._entries[body_entry].solver, SolverVBD)
+                or not self._entries[body_entry].solver.coupling_supports_particle_body_attachments()
             ):
                 raise ValueError(
-                    "Hard particle-body attachments require both endpoints in the same SolverVBD entry; "
-                    f"attachment {name} has body entry {body_entry!r} and particle entry {particle_entry!r}"
+                    "Hard particle-body attachments require both endpoints in the same entry whose solver applies "
+                    "particle-body attachments (coupling_supports_particle_body_attachments(), such as SolverVBD and "
+                    f"SolverIPC); attachment {name} has body entry {body_entry!r} and particle entry "
+                    f"{particle_entry!r}"
                 )
             if body_entry is None or particle_entry is None:
                 unowned.append(name)
                 continue
             if body_entry == particle_entry:
                 solver = self._entries[body_entry].solver
-                if not isinstance(solver, SolverVBD):
+                if not solver.coupling_supports_particle_body_attachments():
                     unsupported_same_entry.append((name, body_entry, type(solver).__name__))
                 continue
             grouped.setdefault((body_entry, particle_entry), []).append((body, point, particle, stiffness, damping))
@@ -2887,8 +2888,9 @@ class SolverCoupledADMM(SolverCoupled):
                 for name, entry_name, solver_name in unsupported_same_entry
             )
             logger.warning(
-                f"SolverCoupledADMM found same-entry particle-body attachment {details}, but only SolverVBD "
-                "applies same-entry attachments; these attachments apply no force.",
+                f"SolverCoupledADMM found same-entry particle-body attachment {details}, but its solver does not apply "
+                "particle-body attachments (coupling_supports_particle_body_attachments()); these attachments apply "
+                "no force.",
             )
 
         device = self.model.device

@@ -1262,7 +1262,7 @@ class TestAdmmBodyParticleAttachment(unittest.TestCase):
             )
 
         self.assertEqual(solver._admm_rp_groups, [])
-        self.assertTrue(any("only SolverVBD" in message for message in logs.output))
+        self.assertTrue(any("does not apply particle-body attachments" in message for message in logs.output))
 
     def test_single_vbd_entry_attachment_is_left_to_vbd(self):
         """Leave a same-entry model attachment to SolverVBD without an attachment warning."""

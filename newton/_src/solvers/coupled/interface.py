@@ -54,6 +54,9 @@ Supported hook signatures are:
     def coupling_supports_full_surface_soft_contacts() -> bool: ...
 
 
+    def coupling_supports_particle_body_attachments() -> bool: ...
+
+
     def coupling_rewind_proxy_body(
         body_local_to_proxy_global, state, coupling_forces, body_gravity_acceleration, dt
     ) -> None: ...
@@ -287,6 +290,16 @@ class CouplingInterface:
         their derived inertial buffers with device work only, should override
         this to return ``True`` and provide a graph-capturable implementation
         of :meth:`notify_model_changed` for BODY_INERTIAL_PROPERTIES.
+        """
+        return False
+
+    def coupling_supports_particle_body_attachments(self) -> bool:
+        """Return whether the solver applies the particle-body attachments of its model view.
+
+        :class:`~newton.solvers.experimental.coupled.SolverCoupledADMM` leaves an attachment whose particle and body
+        are both owned by one entry to that entry's solver when this returns ``True``, a hard (infinite-stiffness)
+        attachment among them, and couples only the attachments that join two entries. When it returns ``False`` such
+        an attachment applies no force, and a hard one is refused.
         """
         return False
 
