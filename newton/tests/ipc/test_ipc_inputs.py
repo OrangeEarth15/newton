@@ -142,6 +142,41 @@ def test_rejects_activations(test, device):
             _rejects(test, builder, "activations", device)
 
 
+def test_control_activations_refused_at_eager_steps(test, device):
+    """A step that is not captured refuses a Control with a triangle or a tetrahedron activation other than 0, which
+    the solver does not read, naming the array, and steps again once it is 0; given no control it checks the model's
+    own, which change in place after construction. A captured step does not check them."""
+    builder = newton.ModelBuilder()
+    _cloth(builder, 2, 0.05, 1.0)
+    builder.add_soft_grid(
+        pos=wp.vec3(1.0, 0.0, 1.0), rot=wp.quat_identity(), vel=wp.vec3(0.0, 0.0, 0.0), dim_x=1, dim_y=1, dim_z=1,
+        cell_x=0.1, cell_y=0.1, cell_z=0.1, density=1000.0, k_mu=1.0e4, k_lambda=1.0e4, k_damp=0.0,
+    )  # fmt: skip
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model)
+    s0, s1 = model.state(), model.state()
+    control = model.control()
+    solver.step(s0, s1, control, None, 0.01)
+    for name in ("tri_activations", "tet_activations"):
+        with test.subTest(name):
+            values = getattr(control, name).numpy()
+            values[-1] = 0.25
+            getattr(control, name).assign(values)
+            with test.assertRaisesRegex(NotImplementedError, f"the step's control has non-zero {name}; set them to 0"):
+                solver.step(s1, s0, control, None, 0.01)
+            values[-1] = 0.0
+            getattr(control, name).assign(values)
+            solver.step(s1, s0, control, None, 0.01)
+    activations = model.tet_activations.numpy()
+    activations[0] = 1.0
+    model.tet_activations.assign(activations)
+    with test.assertRaisesRegex(NotImplementedError, "non-zero tet_activations"):
+        solver.step(s0, s1, None, None, 0.01)
+    with wp.ScopedCapture(device=device) as capture:
+        solver.step(s0, s1, None, None, 0.01)
+    wp.capture_launch(capture.graph)
+
+
 def test_rejects_unsupported_joints(test, device):
     """Reject the joints SolverIPC does not simulate, naming what libuipc lacks: rod joints, drives, passive springs,
     limits and armature on ball and free joints, joint friction, and a negative effort limit on a driven joint."""
@@ -1016,6 +1051,7 @@ for name, func in (
     ("test_rejects_tendons", test_rejects_tendons),
     ("test_rejects_muscles", test_rejects_muscles),
     ("test_rejects_activations", test_rejects_activations),
+    ("test_control_activations_refused_at_eager_steps", test_control_activations_refused_at_eager_steps),
     ("test_rejects_unsupported_joints", test_rejects_unsupported_joints),
     ("test_rejects_gradients", test_rejects_gradients),
     ("test_warns_of_velocity_limits", test_warns_of_velocity_limits),

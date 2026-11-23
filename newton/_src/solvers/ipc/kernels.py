@@ -1115,6 +1115,28 @@ def _keep_status(step: wp.array[wp.int32], kept: wp.array[wp.int32]):
     kept[k] = kept[k] | step[k]
 
 
+@wp.kernel
+def _nonzero_activations(
+    tris: wp.array[wp.int32],
+    tri_activations: wp.array[wp.float32],
+    tets: wp.array[wp.int32],
+    tet_activations: wp.array[wp.float32],
+    found: wp.array[wp.int32],
+):
+    """Set ``found[0]`` when a triangle of ``tris`` has an activation other than 0 in ``tri_activations``, ``found[1]``
+    when a tetrahedron of ``tets`` has one in ``tet_activations`` (an absent array has none); one thread per triangle,
+    then one per tetrahedron."""
+    k = wp.tid()
+    n = tris.shape[0]
+    if k < n:
+        if tri_activations:
+            if tri_activations[tris[k]] != 0.0:
+                found[0] = 1
+    elif tet_activations:
+        if tet_activations[tets[k - n]] != 0.0:
+            found[1] = 1
+
+
 @wp.func
 def _record_count(rec_counts: wp.array[wp.int32]) -> int:
     """The live records of libuipc-warp's ``ContactForces``: the sum of the counts of its 10 segments, the active and

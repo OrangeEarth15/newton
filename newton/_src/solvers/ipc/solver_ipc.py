@@ -54,6 +54,7 @@ from .kernels import (
     _keep_status,
     _load_bodies,
     _load_particles,
+    _nonzero_activations,
     _particle_accelerations,
     _proxy_particle_forces,
     _proxy_wrenches,
@@ -834,6 +835,11 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._particle_quiet = wp.array(quiet, dtype=wp.int32, device=device)
         self._status_scratch = wp.zeros(1, dtype=wp.int32, device=device)
         self._residual_scratch = wp.zeros(1, dtype=wp.float32, device=device)
+        # the triangles and tetrahedra whose activations in a step's control an eager step checks (_check_activations)
+        own_tris, own_tets, _ = _own_elements(model)
+        self._activation_tris = wp.array(np.flatnonzero(own_tris).astype(np.int32), dtype=wp.int32, device=device)
+        self._activation_tets = wp.array(np.flatnonzero(own_tets).astype(np.int32), dtype=wp.int32, device=device)
+        self._activations_found = wp.zeros(2, dtype=wp.int32, device=device)
         nb = model.body_count
         if nb:
             self._body_base = wp.array(layout.body_base.astype(np.int32), dtype=wp.int32, device=device)
@@ -1010,6 +1016,8 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._save_pending = self._restore_pending = False
         if control is None:
             control = self._control_of_model()
+        if not self.model.device.is_capturing:
+            self._check_activations(control)
         self._dt, self._control = dt, control
         self._report_clamp(dt)
         self._load(state_in)
@@ -1071,6 +1079,31 @@ class SolverIPC(SolverBase, CouplingInterface):
         ):
             control = self._default_control = model.control(clone_variables=False)
         return control
+
+    def _check_activations(self, control: Control) -> None:
+        """A step that is not captured: ``NotImplementedError`` when ``control`` holds an activation other than 0 of a
+        triangle or tetrahedron the solver simulates, which it does not read (one kernel, one read-back of two
+        words). A captured step cannot raise, and does not check them."""
+        n_tri, n_tet = self._activation_tris.shape[0], self._activation_tets.shape[0]
+        tris = control.tri_activations if n_tri else None
+        tets = control.tet_activations if n_tet else None
+        if tris is None and tets is None:
+            return
+        self._activations_found.zero_()
+        wp.launch(
+            _nonzero_activations,
+            n_tri + n_tet,
+            inputs=[self._activation_tris, tris, self._activation_tets, tets],
+            outputs=[self._activations_found],
+            device=self.model.device,
+        )
+        found = self._activations_found.numpy()
+        names = [name for name, k in (("tri_activations", 0), ("tet_activations", 1)) if found[k]]
+        if names:
+            raise NotImplementedError(
+                f"SolverIPC: the step's control has non-zero {' and '.join(names)}; set them to 0. SolverIPC does not "
+                "read activations."
+            )
 
     def _report_clamp(self, dt: float) -> None:
         """Warn once when a step's ``dt`` clamps the given ``kappa`` into libuipc's stiffness range, with independent

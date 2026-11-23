@@ -113,7 +113,10 @@ array assigned to the model, more contact elements than the engine takes (see
 :ref:`ipc-contact`), collision meshes with a surface velocity
 (``Mesh.enable_surface_velocity``, which the solver's own contacts would
 ignore), and a CPU device. Gaussian shapes and planes attached to bodies raise
-when the shapes are triangulated. The ``contacts`` argument of
+when the shapes are triangulated. A step that is not captured raises
+:class:`NotImplementedError` when its :class:`~newton.Control` holds a triangle
+or tetrahedron activation other than 0 (a captured step cannot raise, and does
+not check them). The ``contacts`` argument of
 :meth:`~newton.solvers.SolverIPC.step` is not read: the solver detects its own
 contacts, and writes them into it when ``CONTACT_F`` is requested (see
 :ref:`ipc-contact-output`).
@@ -130,7 +133,8 @@ Not read: the penalty contact parameters of shapes and particles (``ke``,
 distance), the :attr:`~newton.Model.particle_radius` of cloth and tetrahedron
 vertices (see :ref:`ipc-contact`), damping coefficients, ``spring_control``,
 drag, lift, ``edge_rest_length`` (see :ref:`ipc-cloth`), the activations of a
-:class:`~newton.Control`, ``joint_target_mode``, ``joint_velocity_limit``, of
+:class:`~newton.Control` (an eager step refuses those other than 0, see
+:ref:`ipc-refused`), ``joint_target_mode``, ``joint_velocity_limit``, of
 which the solver warns once, with :class:`~newton.NewtonWarning` when it is
 built or notified of the joints' degrees of freedom, where one is below Newton's
 default 1e6 (it does not limit joint velocities, and Newton's URDF importer
