@@ -397,10 +397,13 @@ body put back through the space another one fills is a valid reset. The moves
 of kinematic bodies and particles and of a coupled solver's proxies are swept
 instead (see :ref:`ipc-kinematic-bodies`), and checked as written only where a
 step places them without a sweep: at the first step and at the steps after a
-reset or a failed step. A step in which nothing new is written costs the
-comparison its loads make anyway; a written state costs a search of the pairs
-near the written vertices, through bounding-volume trees refit to the step's
-start.
+reset or a failed step. A step in which nothing new is written costs, besides
+the comparison its loads make anyway, the reset of two small arrays of flags and
+one conditional node: 12 µs on a captured step of 0.49 ms of 64 boxes resting on
+the ground. A step that takes a written state searches the pairs near the
+written vertices through bounding-volume trees refit to its start, those of the
+written vertex's world only: one box written among the 64, or in one of 256
+worlds of a box, adds 0.18 ms.
 
 .. _ipc-tolerances:
 
