@@ -1224,8 +1224,14 @@ segment of 0.2 m, radius 0.05 m and 1.57 kg at :math:`\Delta t` = 1/60 s. A
 joint to the world or to a kinematic body is not relieved. In Newton's
 bend-stiffness sweep at that step (bend stiffness 50, 500 and 5000 N m/rad),
 the tips rest 4 mm, 71 mm and 160 mm below SolverVBD's; with
-``body_kappa=1e8``, libuipc's stiffness, within 1 mm. Pass a ``body_kappa`` for
-which :math:`4 \kappa V` is far above the rods' bend and twist stiffness.
+``body_kappa=1e8``, libuipc's stiffness, within 1 mm. Pass ``body_kappa=1e8``,
+or a value for which :math:`4 \kappa V` is far above the rods' bend and twist
+stiffness, where the shape of a rod under load matters, as for a cable at rest
+or moving slowly. The default stays lowered for rods too, since a stiffer
+segment takes less of a fast turn in one step: with the segments alone at 1e8
+Pa, Newton's twisted cable under ``integrator="bdf2"`` opens its attachment by
+18 mm instead of 10 mm, while its kinematic arc keeps its segments within 0.1%
+of their length, as the default does not.
 
 What it costs: the bend and twist of a joint take a projection of an 18 x 18
 matrix in every Newton iteration, about 0.25 ms for one joint, 0.5 ms for 64 and
