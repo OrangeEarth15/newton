@@ -87,7 +87,15 @@ def _distance(lower, upper):
 
 
 def _rod():
-    return _joint(lambda b, link, x: b.add_joint_rod(-1, link))
+    """A rod joint whose first two axes ``add_joint_rod`` made are swapped afterwards: a layout SolverIPC refuses."""
+
+    def add(b, link, x):
+        j = b.add_joint_rod(-1, link)
+        s = b.joint_qd_start[j]
+        b.joint_axis[s], b.joint_axis[s + 1] = b.joint_axis[s + 1], b.joint_axis[s]
+        return j
+
+    return _joint(add)
 
 
 def _free(offset=0, **dof):
@@ -355,7 +363,7 @@ _ORDER = (
         {},
         "the D6 joint 1 has 1 linear and 1 angular axes;",
     ),
-    ("joint types before D6 joints", (_d6("X", "X"), _rod()), {}, "joint 1 is a ROD joint;"),
+    ("rod joints before D6 joints", (_d6("X", "X"), _rod()), {}, "the ROD joint 1 does not have three linear"),
     (
         "joints before springs",
         (_spring(damping=0.5), _free(3, friction=0.5)),
@@ -380,7 +388,7 @@ _ORDER = (
         {},
         "particle-body attachment 1 has damping -2.0;",
     ),
-    ("the model before contact_damping", (_rod(),), {"contact_damping": -1.0}, "joint 0 is a ROD joint;"),
+    ("the model before contact_damping", (_rod(),), {"contact_damping": -1.0}, "the ROD joint 0 does not have"),
 )
 
 

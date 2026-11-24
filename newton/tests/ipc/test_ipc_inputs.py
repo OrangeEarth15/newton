@@ -322,7 +322,7 @@ def test_rejects_unsupported_joints(test, device):
     _box_body(free_friction, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
     free_friction.joint_friction[3] = 0.5
     for name, builder, pattern in (
-        ("rod", hinged(rod), "joint 0 is a ROD joint; use SolverVBD or SolverKamino for rods"),
+        ("rod friction", hinged(rod, friction=0.5), "DOF 0 of the ROD joint 0 has joint_friction 0.5; set it to 0."),
         ("free drive", free, "FREE joint 0 has the target mode POSITION"),
         ("D6 ball drive", hinged(d6_ball, target_ke=10.0), "D6 joint 0 has target_ke 10.0.*; set the gains"),
         ("ball limit", hinged(ball, limit_lower=-0.5), "Newton defines no limits of a ball joint"),

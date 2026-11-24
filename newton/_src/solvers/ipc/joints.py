@@ -4,10 +4,11 @@
 """Newton's joints on libuipc's affine-body joints.
 
 Which libuipc joint every Newton joint becomes, and the joints SolverIPC refuses (``_map_joints``, ``_check_joints``,
-with the feature modules' refusals of what libuipc's joints do not hold: ``features``); how the joints are laid out in
-the scene with their penalties (``_add_joints``, the distance joints' anchors); and the joints' work at every step:
-their angles and distances at the step's start, the drives, springs, damping, limits and ``joint_f`` as libuipc's
-driving terms (``_write_joint_controls``), and the BDF2 history of their coordinates.
+with the feature modules' refusals of what libuipc's joints do not hold: ``features``; the rod joints are the rods
+module's, ``features.rods``); how the joints are laid out in the scene with their penalties (``_add_joints``, the
+distance joints' anchors); and the joints' work at every step: their angles and distances at the step's start, the
+drives, springs, damping, limits and ``joint_f`` as libuipc's driving terms (``_write_joint_controls``), and the BDF2
+history of their coordinates.
 """
 
 from __future__ import annotations
@@ -39,11 +40,6 @@ if TYPE_CHECKING:
 # Newton's default joint_velocity_limit (ModelBuilder.JointDofConfig's), which bounds nothing; SolverIPC warns of one
 # below it (_warn_of_velocity_limits)
 _VELOCITY_LIMIT = 1.0e6
-# what to do with a joint of a type SolverIPC refuses, and why libuipc has no joint for it
-_UNMAPPED_JOINTS = {
-    JointType.ROD: "use SolverVBD or SolverKamino for rods. libuipc's rods are finite elements, not joints between two "
-    "affine bodies",
-}
 
 
 @dataclass(frozen=True)
@@ -61,13 +57,15 @@ class _JointMap:
     """How every joint of a model maps onto libuipc (``_map_joints``).
 
     ``kind``: the joint type whose libuipc joint the joint becomes, REVOLUTE, PRISMATIC, FIXED or BALL, or FREE for
-    none; D6 for a D6 joint that a feature module took (``features.universal.take_d6``), of which this module builds,
-    drives and stores nothing. ``store``: the type ``_store_joints`` and ``_joint_wrenches`` take the joint for, its own
-    but for a D6 joint: that of its libuipc joint, or FIXED (skipped) for one whose coordinates and ``joint_f`` the D6
-    kernels take or a feature module took. ``d6``: those joints, D6 joints of three angular axes, with or without three
-    linear ones. ``distance``: the distance joints of one length, libuipc's stitch of that rest length between their
-    joint frames' origins; the other distance joints, of no length or taken by a feature module
-    (``features.universal.take_distance``), are no joint here, and every distance joint is stored as a free joint."""
+    none; D6 for a D6 joint that a feature module took (``features.universal.take_d6``), and ROD for a rod joint
+    (``features.rods.take_rods``), of which this module builds and drives nothing. ``store``: the type ``_store_joints``
+    and ``_joint_wrenches`` take the joint for, its own but for a D6 joint: that of its libuipc joint, or FIXED
+    (skipped) for one whose coordinates and ``joint_f`` the D6 kernels take or a feature module took; and FREE for a rod
+    joint, whose ``joint_q``, ``joint_qd`` and ``joint_f`` are a free joint's. ``d6``: those joints, D6 joints of three
+    angular axes, with or without three linear ones. ``distance``: the distance joints of one length, libuipc's stitch
+    of that rest length between their joint frames' origins; the other distance joints, of no length or taken by a
+    feature module (``features.universal.take_distance``), are no joint here, and every distance joint is stored as a
+    free joint."""
 
     kind: np.ndarray
     store: np.ndarray
@@ -94,22 +92,25 @@ def _orthonormal(axes: np.ndarray) -> bool:
 
 def _map_joints(model: Model) -> _JointMap:
     """How every joint maps onto libuipc (``_JointMap``), or ``NotImplementedError`` for the first joint that does
-    not: a joint type libuipc has no joint for (``_UNMAPPED_JOINTS``) and a D6 joint that takes Newton's coordinates of
-    three axes that are not orthonormal. A D6 joint that locks other degrees of freedom than one of libuipc's joints
-    does, and a distance joint whose distance is bounded to a range or on one side, are offered to the universal
-    module in the order of the joints, which takes them or raises (``features.universal``)."""
+    not: a joint of a type SolverIPC does not know and a D6 joint that takes Newton's coordinates of three axes that are
+    not orthonormal. Rod joints are offered to the rods module (``features.rods.take_rods``), which takes them or raises;
+    a D6 joint that locks other degrees of freedom than one of libuipc's joints does, and a distance joint whose distance
+    is bounded to a range or on one side, are offered to the universal module (``features.universal``); each in the
+    order of the joints."""
     joint_type = model.joint_type.numpy().astype(np.int32)
     kind, store = joint_type.copy(), joint_type.copy()
     supported = [int(t) for t in (JointType.FREE, JointType.REVOLUTE, JointType.PRISMATIC, JointType.FIXED)]
-    supported += [int(JointType.BALL), int(JointType.D6), int(JointType.DISTANCE)]
+    supported += [int(JointType.BALL), int(JointType.D6), int(JointType.DISTANCE), int(JointType.ROD)]
     other = np.flatnonzero(~np.isin(joint_type, supported))
     if len(other):
         j = int(other[0])
-        t = JointType(int(joint_type[j]))
-        why = _UNMAPPED_JOINTS.get(
-            t, "use revolute, prismatic, fixed, ball, free, D6 or distance joints. libuipc has no joint of this type"
+        raise NotImplementedError(
+            f"SolverIPC: joint {j} has the joint type {int(joint_type[j])}, which SolverIPC does not know; use "
+            "revolute, prismatic, fixed, ball, free, D6, distance or rod joints."
         )
-        raise NotImplementedError(f"SolverIPC: joint {j} is a {t.name} joint; {why}.")
+    rods = np.flatnonzero(joint_type == int(JointType.ROD))
+    features.rods.take_rods(model, rods)
+    kind[rods], store[rods] = int(JointType.ROD), int(JointType.FREE)
     d6 = np.flatnonzero(joint_type == int(JointType.D6))
     if len(d6):
         dof_dim = model.joint_dof_dim.numpy()
@@ -213,7 +214,8 @@ def _check_joints(model: Model, options: _JointOptions | None = None) -> None:
     for category in ("armature", "drive", "limit"):
         _refuse(features.joint_refusal(category, dofs))
     ke, kd, effort = (dofs.value(name) for name in ("joint_target_ke", "joint_target_kd", "joint_effort_limit"))
-    gains = (ke != 0.0) | (kd != 0.0)
+    # a rod's gains are its material's stiffness and damping, which no effort limit bounds
+    gains = ((ke != 0.0) | (kd != 0.0)) & (dofs.kind != int(JointType.ROD))
     if options.effort_limit:
         _refuse(
             dofs.refusal(

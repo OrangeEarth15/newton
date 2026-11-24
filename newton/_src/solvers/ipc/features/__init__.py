@@ -6,10 +6,11 @@
 A feature is Newton input that libuipc has no term for: the damping of springs, attachments and elements (``damping``),
 MuJoCo's spatial tendons (``tendons``), mimic joints, fixed tendons and joint friction (``joint_terms``), universal
 joints and distance joints with a range (``universal``), the drives, springs, damping, armature, friction and limits of
-ball joints (``ball``), the surface velocity of a mesh (``surface_velocity``), contact damping (``contact_damping``) and
-the solver observables (``observables``). A module holds what SolverIPC does with its feature, and while SolverIPC has
-no term for it, the refusal of it: each refusal keeps its message, and fires at the point and in the order it fired
-before the modules held them, so that a model refused before is refused with the same message.
+ball joints (``ball``), rod joints (``rods``), the surface velocity of a mesh (``surface_velocity``), contact damping
+(``contact_damping``) and the solver observables (``observables``). A module holds what SolverIPC does with its
+feature, and while SolverIPC has no term for it, the refusal of it: each refusal keeps its message, and fires at the
+point and in the order it fired before the modules held them, so that a model refused before is refused with the same
+message.
 
 The solver calls every module, in the order of ``FEATURES``, at these points; a module with nothing to do there does
 nothing:
@@ -43,9 +44,10 @@ nothing:
   to build the solve again: returns whether the solve must be built again.
 
 The universal module is also offered the joints that ``joints._map_joints`` cannot map onto a libuipc joint
-(``universal.take_d6``, ``universal.take_distance``), and the observables module gives the supported observables
-(``observables.supported``) and allocates, in ``SolverIPC.observables`` after Newton's allocation and outside any graph
-capture, what the kinds a container requests need of it (``observables.allocate``).
+(``universal.take_d6``, ``universal.take_distance``), the rods module the rod joints (``rods.take_rods``), and the
+observables module gives the supported observables (``observables.supported``) and allocates, in
+``SolverIPC.observables`` after Newton's allocation and outside any graph capture, what the kinds a container requests
+need of it (``observables.allocate``).
 """
 
 from __future__ import annotations
@@ -53,7 +55,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from . import ball, contact_damping, damping, joint_terms, observables, surface_velocity, tendons, universal
+from . import ball, contact_damping, damping, joint_terms, observables, rods, surface_velocity, tendons, universal
 
 if TYPE_CHECKING:
     from newton import Control, Model, ModelFlags, State
@@ -63,7 +65,7 @@ if TYPE_CHECKING:
     from ..solver_ipc import SolverIPC
 
 # the feature modules, in the order the solver calls them
-FEATURES = (damping, tendons, joint_terms, universal, ball, surface_velocity, contact_damping, observables)
+FEATURES = (damping, tendons, joint_terms, universal, ball, rods, surface_velocity, contact_damping, observables)
 
 
 @dataclass(frozen=True)
@@ -116,3 +118,4 @@ def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
     for feature in FEATURES:
         rebuild |= bool(feature.notify(solver, flags))
     return rebuild
+
