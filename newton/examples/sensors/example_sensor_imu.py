@@ -12,6 +12,7 @@ Success criteria:
 
 Runs:
 - `python -m newton.examples sensor_imu`
+- `python -m newton.examples sensor_imu --solver ipc`
 """
 
 import numpy as np
@@ -129,6 +130,9 @@ class Example:
             solver_config.integrator = "moreau"
             solver_config.scc.max_alternating_iterations = 8
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
+        elif self.solver_type == "ipc":
+            # SolverIPC finds its own contacts and writes their forces into the Contacts it is given
+            self.solver = newton.solvers.SolverIPC(self.model)
         else:
             self.solver = newton.solvers.SolverMuJoCo(self.model, njmax=100)
 
@@ -223,7 +227,7 @@ class Example:
 if __name__ == "__main__":
     # Parse arguments and initialize viewer
     parser = newton.examples.create_parser()
-    parser.add_argument("--solver", choices=["mujoco", "kamino"], default="mujoco")
+    parser.add_argument("--solver", choices=["mujoco", "kamino", "ipc"], default="mujoco")
     viewer, args = newton.examples.init(parser)
 
     # Create viewer and run

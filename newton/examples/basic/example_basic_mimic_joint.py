@@ -17,6 +17,7 @@ Runs:
 - `python -m newton.examples basic_mimic_joint`
 - `python -m newton.examples basic_mimic_joint --pitch -1.2`
   - Nut travel reverses for the same sign of screw rotation compared with positive pitch.
+- `python -m newton.examples basic_mimic_joint --solver ipc`
 """
 
 import math
@@ -37,7 +38,7 @@ class Example:
     SCREW_HALF_LENGTH = 1.15
     SCREW_RADIUS = 0.11
     THREAD_SEGMENTS = 192
-    SOLVERS = ("featherstone", "semi_implicit", "xpbd", "mujoco", "vbd")
+    SOLVERS = ("featherstone", "semi_implicit", "xpbd", "mujoco", "vbd", "ipc")
 
     def __init__(self, viewer, args):
         """Build and actuate a lead screw with a joint-owned mimic relationship."""
@@ -232,6 +233,9 @@ class Example:
                 rigid_joint_linear_ke=1.0e6,
                 rigid_joint_angular_ke=1.0e6,
             )
+        if self.solver_name == "ipc":
+            # SolverIPC holds the relationship as a stiff penalty of the joints' strength
+            return newton.solvers.SolverIPC(self.model)
         raise ValueError(f"Unknown solver: {self.solver_name}")
 
     def simulate(self):
