@@ -293,8 +293,7 @@ def test_bdf2_drives(test, device):
 
 def test_al_ipc_rests_at_d_hat(test, device):
     """With contact_constitution="al-ipc" a box dropped onto the ground comes to rest with its gap at d_hat, the
-    distance AL-IPC's constraint keeps, to 1%, and at rest; the barrier keeps it inside d_hat. A static box, whose
-    vertices have no mass for AL-IPC's penalty, is refused."""
+    distance AL-IPC's constraint keeps, to 1%, and at rest; the barrier keeps it inside d_hat."""
     d_hat = 0.005
     for constitution in ("ipc", "al-ipc"):
         with test.subTest(contact_constitution=constitution):
@@ -314,12 +313,49 @@ def test_al_ipc_rests_at_d_hat(test, device):
             else:
                 test.assertGreater(gap, 0.0)
                 test.assertLess(gap, 0.99 * d_hat)
-    # a static shape has no mass for AL-IPC's penalty: refused
-    builder = newton.ModelBuilder()
-    _box_body(builder, (0.0, 0.0, 0.17), (0.05, 0.05, 0.05))
-    builder.add_shape_box(-1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.05), wp.quat_identity()), hx=0.1, hy=0.1, hz=0.05)
-    with test.assertRaisesRegex(NotImplementedError, "static shapes"):
-        newton.solvers.SolverIPC(builder.finalize(device=device), contact_constitution="al-ipc")
+
+
+def test_al_ipc_rests_on_supports_without_mass(test, device):
+    """With contact_constitution="al-ipc" a box dropped onto a support without mass comes to rest with its gap at d_hat
+    to 1%, at rest, every step without a status bit: a static box shape (Newton's static shapes have no mass), a body of
+    mass 0 (which Newton holds still) and a cloth whose particles have mass 0 (pinned). AL-IPC's penalty scales with the
+    smallest mass of a pair's vertices; a vertex without mass, which never moves, adds none of its own, so the pair
+    takes the box's."""
+    d_hat = 0.005
+    top = 0.1  # the support's top face
+
+    def static_shape(builder):
+        builder.add_shape_box(
+            -1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.05), wp.quat_identity()), hx=0.1, hy=0.1, hz=0.05
+        )
+
+    def massless_body(builder):
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.05), wp.quat_identity()), mass=0.0)
+        builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
+
+    def massless_cloth(builder):
+        _cloth(builder, 8, 0.025, top, mass=0.0)
+
+    for name, support in (
+        ("static shape", static_shape),
+        ("body without mass", massless_body),
+        ("cloth without mass", massless_cloth),
+    ):
+        with test.subTest(support=name):
+            builder = newton.ModelBuilder()
+            box = _box_body(builder, (0.0, 0.0, top + 0.06), (0.05, 0.05, 0.05))
+            support(builder)
+            model = builder.finalize(device=device)
+            solver = newton.solvers.SolverIPC(model, d_hat=d_hat, contact_constitution="al-ipc")
+            observables = solver.observables({solver.ObservableKind.STATUS})
+            s0, s1 = model.state(), model.state()
+            for _ in range(200):
+                solver.step(s0, s1, None, None, 0.01, observables=observables)
+                test.assertFalse(solver.check_status(observables))
+                s0, s1 = s1, s0
+            gap = float(s0.body_q.numpy()[box, 2]) - 0.05 - top
+            test.assertLess(np.abs(s0.body_qd.numpy()[box]).max(), 1e-3)
+            test.assertAlmostEqual(gap, d_hat, delta=0.01 * d_hat)
 
 
 def test_al_ipc_holds_free_particles(test, device):
@@ -527,6 +563,7 @@ for name, func in (
     ("test_bdf2_history_restarts_where_gravity_changes", test_bdf2_history_restarts_where_gravity_changes),
     ("test_bdf2_drives", test_bdf2_drives),
     ("test_al_ipc_rests_at_d_hat", test_al_ipc_rests_at_d_hat),
+    ("test_al_ipc_rests_on_supports_without_mass", test_al_ipc_rests_on_supports_without_mass),
     ("test_al_ipc_holds_free_particles", test_al_ipc_holds_free_particles),
     ("test_al_ipc_keeps_a_stack", test_al_ipc_keeps_a_stack),
     ("test_al_ipc_sweeps_kinematic_bodies", test_al_ipc_sweeps_kinematic_bodies),

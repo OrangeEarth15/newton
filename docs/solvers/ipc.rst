@@ -1477,12 +1477,13 @@ solution. Contact rests at ``d_hat`` beyond the contact thickness, where the
 barrier rests inside ``d_hat``: two free particles that meet are held ``d_hat``
 beyond the sum of their radii.
 
-**Masses.** A pair's penalty scales with the smallest mass of its vertices, so
-the constraints hold only between vertices with mass. Static mesh shapes
-(Newton's have no mass), particles of cloth or tetrahedra without mass and
-bodies without mass that collide are refused; static planes are taken. A change
-of the bodies' masses builds the solve again, since the penalty follows the
-masses the solve was built with.
+**Masses.** A pair's penalty scales with the smallest mass of its vertices. A
+vertex without mass never moves (the vertices of static mesh shapes, which have
+no mass in Newton, of particles without mass and of bodies without mass), and it
+adds no penalty of its own: its pairs take the penalty of their side that moves,
+so a box resting on a static mesh takes the penalty of the box. A change of the
+bodies' masses builds the solve again, since the penalty follows the masses the
+solve was built with.
 
 **Rebounds.** A pair joins the active set only when a sweep finds its two
 primitives touching, and the step that solves its constraint ends with the gap at

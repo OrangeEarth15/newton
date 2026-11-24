@@ -915,7 +915,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         if self._independent:
             _check_independent_content(self)
         if self._config.contact_constitution == "al-ipc":
-            _check_al_ipc(self, elements)
+            _check_al_ipc(self)
         _add_joints(self, scene)
         self._planes = _collect_planes(self)
         for P, N, s in zip(*self._planes, strict=True):
