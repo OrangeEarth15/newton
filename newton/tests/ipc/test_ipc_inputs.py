@@ -793,7 +793,10 @@ def test_state_written_between_steps_is_checked(test, device):
     check_status raises with the pair; and so under AL-IPC. A free particle written below the ground fails the same
     way."""
     named = r"( \('[^']*'\))?"  # a body's label, where it has one of its own
-    expected = rf"puts body 0{named} and plane shape 0 -0\.01 m apart, at or inside their contact thickness \(0 m\)"
+    # the box's lowest vertex 1 cm under the ground, to the turn of the swinging box and float32 (-0.0100003 m)
+    expected = (
+        rf"puts body 0{named} and plane shape 0 -0\.0100\d* m apart, at or inside their contact thickness \(0 m\)"
+    )
     for constitution in ("ipc", "al-ipc"):
         with test.subTest(contact_constitution=constitution):
             model = _pendulum().finalize(device=device)
@@ -896,7 +899,7 @@ def test_written_state_fails_its_world_alone(test, device):
     with test.assertRaisesRegex(
         RuntimeError,
         r"failed in 1 of its 2 worlds, world 1 on THICKNESS_VIOLATED.*Before the step ran, the state the "
-        rf"step took from state_in in world 1 puts body 1{named} and plane shape 0 -0\.01 m apart",
+        rf"step took from state_in in world 1 puts body 1{named} and plane shape 0 -0\.0100\d* m apart",
     ):
         solver.step(s1, s0, None, None, 5e-3)
     solo.step(a1, a0, None, None, 5e-3)
