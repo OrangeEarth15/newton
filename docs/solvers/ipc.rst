@@ -341,8 +341,9 @@ rigid motion of its pose and twist. A new state for a particle or body that is
 not kinematic discards the friction of that step's contacts, as libuipc does
 after a state is written: friction acts again from the next step. With several
 worlds only that world's friction is discarded.
-:meth:`~newton.solvers.SolverIPC.reset` discards friction, and the history of
-``integrator="bdf2"``, without a new state, also inside a captured graph.
+:meth:`~newton.solvers.SolverIPC.reset` discards friction, the history of
+``integrator="bdf2"`` and the Dahl hysteresis of rod joints (:ref:`ipc-rods`),
+without a new state, also inside a captured graph.
 
 The solve is built at the model's state, :attr:`~newton.Model.body_q` and
 ``body_qd``, with one exception. A body whose pose there is the identity, where
@@ -508,6 +509,8 @@ The solver simulates:
   (:ref:`ipc-joints`);
 - MuJoCo's spatial tendons, through sites, around spheres and cylinders and over
   pulleys (:ref:`ipc-spatial-tendons`);
+- rods and cables: the stretch, shear, bend and twist of rod joints, with their
+  damping and SolverVBD's Dahl hysteresis (:ref:`ipc-rods`);
 - external forces: :attr:`~newton.State.particle_f`,
   :attr:`~newton.State.body_f` and :attr:`~newton.Control.joint_f`, each held
   constant over the step, as libuipc holds its external forces. A body wrench
@@ -1156,6 +1159,78 @@ a free joint does; drives and friction on it are refused. A change of the bounds
 that turns a range into one length or none, or back, builds the solve again; a
 change within a range is read at the next step.
 
+.. _ipc-rods:
+
+Rods and cables
+~~~~~~~~~~~~~~~
+
+A rod or cable that :meth:`~newton.ModelBuilder.add_rod` builds is a chain of
+capsule bodies joined by joints of type ROD
+(:meth:`~newton.ModelBuilder.add_joint_rod`). libuipc's rods are finite
+elements of points without a twist; SolverIPC gives every rod joint
+libuipc-warp's rod joints (``uipc_warp.ext.rods``), which act between the two
+bodies with Newton's strain, each component a spring toward its rest and a
+damping of its rate:
+
+- the stretch and shear, the child's anchor in the parent's anchor frame: the
+  springs are ``joint_target_ke`` of the degrees of freedom ``shear_x``,
+  ``shear_y`` and ``stretch``, their damping ``joint_target_kd``, and the
+  translation of ``joint_rest_q`` is the rest (SolverKamino reads it too;
+  ``add_rod`` writes 0, so a rod it builds behaves as in SolverVBD);
+- the bend, the curvature binormal of the two segments' tangents in the parent's
+  frame (``2 tan(theta / 2)`` for a bend by :math:`\theta`), and the twist,
+  after the parent's frame is carried to the child's tangent, against the
+  rotation of ``joint_rest_q``: the degrees of freedom ``bend_x``, ``bend_y``
+  and ``twist``. A twist beyond a half turn at one joint wraps, as in SolverVBD
+  and SolverKamino. X and Y may differ, as for a flat ribbon (SolverVBD refuses
+  that).
+
+Every term is part of the step's energy, so the step is implicit in all of
+them, with the damping on the rate of the strain as SolverVBD's. Newton caps the
+bend at 20 (168.6 degrees per joint), a guard of its own solvers past which its
+energy is flat; SolverIPC does not, so a joint with bend stiffness keeps from
+folding. Toward a fold the twist is undefined: past 168.6 degrees the twist's
+terms and the bend's damping fade smoothly to 0, and a joint without bend
+stiffness folds freely, as a chain of hinges does. The two differ only past
+168.6 degrees at one joint.
+
+With :meth:`~newton.solvers.SolverVBD.register_custom_attributes`,
+``model.vbd.dahl_eps_max`` and ``dahl_tau`` both above 0 on a rod joint give its
+bend and twist SolverVBD's Dahl hysteresis: a stress that lags the strain, so
+that a rod bent and released keeps part of its bend. Within a step the stress is
+linear in the strain, from its value and slope at the step's start; at its end
+it follows the step's own change of strain, as in SolverVBD. A
+:meth:`~newton.solvers.SolverIPC.reset` starts it anew, also per world. On other
+joints the attributes are not read, as in SolverVBD.
+
+``joint_q`` and ``joint_qd`` of a rod joint are a free joint's (the child's
+anchor frame in the parent's), as :func:`newton.eval_ik` computes them, and
+``joint_f`` is a world wrench at the child's centre of mass with its reaction on
+the parent, as SolverVBD applies it. ``joint_enabled``, the gains, the rest and
+the Dahl attributes are read at every step, also in graphs captured before. A
+rod joint's terms are part of its child's ``BODY_PARENT_F``
+(:ref:`ipc-body-observables`). The capsules are triangulated as every capsule
+is, and the filters of ``add_rod`` (the joints' parents,
+``junction_collision_filter``) leave their pairs out of contact.
+
+The segments are affine bodies (:ref:`ipc-rigid-bodies`), and a joint measures
+its bend and twist in its parent's frame, which a shear of the parent turns
+against the parent's centreline. Under the default ``body_kappa``, lowered for
+the step, a segment shears enough to relieve the joint it is the parent of: that
+joint bends and twists about as if its stiffness were in series with
+:math:`4 \kappa V = 100\, I_{max} / \Delta t^2`, about 2200 N m/rad for a
+segment of 0.2 m, radius 0.05 m and 1.57 kg at :math:`\Delta t` = 1/60 s. A
+joint to the world or to a kinematic body is not relieved. In Newton's
+bend-stiffness sweep at that step (bend stiffness 50, 500 and 5000 N m/rad),
+the tips rest 4 mm, 71 mm and 160 mm below SolverVBD's; with
+``body_kappa=1e8``, libuipc's stiffness, within 1 mm. Pass a ``body_kappa`` for
+which :math:`4 \kappa V` is far above the rods' bend and twist stiffness.
+
+What it costs: the bend and twist of a joint take a projection of an 18 x 18
+matrix in every Newton iteration, about 0.25 ms for one joint, 0.5 ms for 64 and
+3.7 ms for 2000 on an RTX PRO 5000, where the rest of the frame of 2000 bodies
+takes 3.5 ms per iteration.
+
 .. _ipc-joint-terms:
 
 Mimic joints, fixed tendons and joint friction
@@ -1305,8 +1380,6 @@ Refused joints
 Refused with :class:`NotImplementedError` when the solver is built; the message
 names the joint and its degree of freedom, and says what to change:
 
-- rod joints: libuipc's rods are finite elements, not joints between two affine
-  bodies (use SolverVBD or SolverKamino for rods);
 - D6 joints other than those above, and D6 joints of three angular axes that
   are not orthonormal;
 - a distance joint whose lower bound is above its upper;
@@ -1318,7 +1391,12 @@ names the joint and its degree of freedom, and says what to change:
 - ``joint_friction`` other than 0 on free and distance joints and on D6 joints
   that become free or ball joints;
 - a negative ``joint_effort_limit`` on a driven degree of freedom, and with
-  ``enable_joint_effort_limit=False`` one below 1e6.
+  ``enable_joint_effort_limit=False`` one below 1e6;
+- on a rod joint's degrees of freedom, as SolverKamino refuses them: joint
+  friction, armature, limits, a ``joint_stiffness`` or ``joint_damping`` other
+  than 0, a target mode other than ``NONE``, and a negative ``joint_target_ke``
+  or ``joint_target_kd``; and a rod joint not of the layout
+  :meth:`~newton.ModelBuilder.add_joint_rod` makes (:ref:`ipc-rods`).
 
 A ``joint_velocity_limit`` below Newton's default 1e6 is not enforced: the
 solver warns once, with :class:`~newton.NewtonWarning`, and runs. Newton's URDF
@@ -1945,6 +2023,8 @@ features use. It takes these without reading them:
   gains act whatever it says (on free joints and on D6 joints that become ball or
   free joints, a mode other than ``NONE`` is refused);
 - ``joint_velocity_limit``, of which the solver warns once (:ref:`ipc-refused-joints`);
+- ``joint_effort_limit`` of a rod joint's degrees of freedom: a rod's gains are
+  its material, which no drive's bound limits (:ref:`ipc-rods`);
 - ``joint_limit_kd`` with ``enable_joint_limit_damping=False``;
 - ``Control.joint_act``;
 - the tendons' ``solreffriction`` and ``solimpfriction``, fixed and spatial; the
@@ -1961,8 +2041,9 @@ substeps in a CUDA graph and checks every substep's status:
 
    python -m newton.examples cloth_ipc
 
-Eleven other examples take ``--solver ipc``: ``basic_dzhanibekov``,
+Fourteen other examples take ``--solver ipc``: ``basic_dzhanibekov``,
 ``basic_joints``, ``basic_mimic_joint``, ``basic_pendulum``, ``basic_shapes``,
+``cable_initial_rest_pose``, ``cable_plectoneme``, ``cable_y_junction``,
 ``cloth_hanging``, ``balance_bird``, ``sensor_imu``,
 ``softbody_dropping_to_cloth``, ``softbody_gift`` and ``softbody_hanging``, for
 example ``python -m newton.examples basic_pendulum --solver ipc``. Add
