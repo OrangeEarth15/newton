@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
 import unittest
 import warnings
 from typing import Any
@@ -27,7 +28,7 @@ from newton._src.solvers.vbd.rigid_vbd_kernels import (
     update_rod_dahl_state,
 )
 from newton._src.utils import is_graph_capture_allocation_enabled
-from newton.tests.unittest_utils import add_function_test, get_test_devices
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices, requires
 
 devices = get_test_devices()
 
@@ -273,6 +274,14 @@ def _drive_gripper_boxes_graph_kernel(
 # -----------------------------------------------------------------------------
 
 
+def _solver(model, solver_fn=None, **vbd_options):
+    """The solver a case steps: SolverVBD with the case's ``vbd_options``, or ``solver_fn(model)`` (another solver the
+    case runs with, registered at the end of this file)."""
+    if solver_fn is None:
+        return newton.solvers.SolverVBD(model, **vbd_options)
+    return solver_fn(model)
+
+
 def _run_sim_loop(simulate_fn, num_steps, device):
     """Run a simulation loop with optional graph capture.
 
@@ -297,15 +306,16 @@ def _run_sim_loop(simulate_fn, num_steps, device):
             simulate_fn()
 
 
-def _simulate_sinusoidal_anchor(model, anchor, anchor_z, device):
-    """Step SolverVBD while the kinematic ``anchor`` body oscillates along X; return the final state."""
+def _simulate_sinusoidal_anchor(model, anchor, anchor_z, device, solver_fn=None):
+    """Step SolverVBD (or ``solver_fn(model)``) while the kinematic ``anchor`` body oscillates along X; return the final
+    state."""
     state0 = model.state()
     state1 = model.state()
     control = model.control()
     collision_pipeline = newton.CollisionPipeline(model)
     contacts = collision_pipeline.contacts()
 
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
 
     # Smoothly move the anchor with substeps (mirrors cable example pattern).
     frame_dt = 1.0 / 60.0
@@ -838,7 +848,7 @@ def _cable_loop_connectivity_impl(test: unittest.TestCase, device):
             )
 
 
-def _cable_bend_stiffness_impl(test: unittest.TestCase, device):
+def _cable_bend_stiffness_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: bend stiffness sweep should have a noticeable effect on tip position."""
     # From soft to stiff. Build multiple cables in one model.
     bend_values = [5.0e1, 5.0e2, 5.0e3]
@@ -884,7 +894,7 @@ def _cable_bend_stiffness_impl(test: unittest.TestCase, device):
     control = model.control()
     collision_pipeline = newton.CollisionPipeline(model)
     contacts = collision_pipeline.contacts()
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
 
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
@@ -936,13 +946,13 @@ def _cable_bend_stiffness_impl(test: unittest.TestCase, device):
     )
 
 
-def _cable_sagging_and_stability_impl(test: unittest.TestCase, device):
+def _cable_sagging_and_stability_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: pinned chain should sag under gravity while remaining numerically stable."""
     segment_length = 0.2
     model, state0, state1, control, _rod_bodies = _build_cable_chain(device, num_links=6, segment_length=segment_length)
     collision_pipeline = newton.CollisionPipeline(model)
     contacts = collision_pipeline.contacts()
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
     sim_dt = frame_dt / sim_substeps
@@ -979,7 +989,7 @@ def _cable_sagging_and_stability_impl(test: unittest.TestCase, device):
     test.assertTrue(np.all(z_final < upper_bound))
 
 
-def _cable_twist_response_impl(test: unittest.TestCase, device):
+def _cable_twist_response_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: twisting the anchored capsule should induce rotation in the child while preserving attachment."""
     segment_length = 0.2
 
@@ -1030,7 +1040,7 @@ def _cable_twist_response_impl(test: unittest.TestCase, device):
     collision_pipeline = newton.CollisionPipeline(model)
     contacts = collision_pipeline.contacts()
 
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
 
     # Disable gravity to isolate twist response
     model.set_gravity((0.0, 0.0, 0.0))
@@ -1139,7 +1149,7 @@ def _cable_twist_response_impl(test: unittest.TestCase, device):
     )
 
 
-def _two_layer_cable_pile_collision_impl(test: unittest.TestCase, device):
+def _two_layer_cable_pile_collision_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: two-layer straight cable pile should form two vertical layers.
 
     Creates a 2x2 cable pile (2 cables per layer, 2 layers) forming a sharp/cross
@@ -1240,8 +1250,9 @@ def _two_layer_cable_pile_collision_impl(test: unittest.TestCase, device):
     collision_pipeline = newton.CollisionPipeline(model)
     contacts = collision_pipeline.contacts()
 
-    solver = newton.solvers.SolverVBD(
+    solver = _solver(
         model,
+        solver_fn,
         iterations=10,
         friction_epsilon=0.1,
     )
@@ -1327,7 +1338,7 @@ def _two_layer_cable_pile_collision_impl(test: unittest.TestCase, device):
     )
 
 
-def _cable_ball_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device):
+def _cable_ball_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: BALL joint should keep rod start endpoint attached to a kinematic anchor."""
     builder = newton.ModelBuilder()
     builder.default_shape_cfg.ke = 1.0e4
@@ -1389,7 +1400,7 @@ def _cable_ball_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device
     model = builder.finalize(device=device)
     model.set_gravity((0.0, 0.0, -9.81))
 
-    state0 = _simulate_sinusoidal_anchor(model, anchor, float(anchor_pos[2]), device)
+    state0 = _simulate_sinusoidal_anchor(model, anchor, float(anchor_pos[2]), device, solver_fn)
 
     err = _compute_ball_joint_anchor_error(model, state0.body_q, j_ball)
     test.assertLess(err, 1.0e-3, f"BALL joint: final anchor error {err:.6f} m > 1e-3 m")
@@ -1435,7 +1446,7 @@ def _cable_ball_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device
     )
 
 
-def _cable_fixed_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device):
+def _cable_fixed_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: FIXED joint should keep rod start frame welded to a kinematic anchor.
 
     Two cables (+X and +Y) are attached to the same anchor sphere with fixed joints.
@@ -1524,7 +1535,7 @@ def _cable_fixed_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, devic
     model = builder.finalize(device=device)
     model.set_gravity((0.0, 0.0, -9.81))
 
-    state0 = _simulate_sinusoidal_anchor(model, anchor, float(anchor_pos[2]), device)
+    state0 = _simulate_sinusoidal_anchor(model, anchor, float(anchor_pos[2]), device, solver_fn)
 
     pos_err_x, ang_err_x = _compute_fixed_joint_frame_error(model, state0.body_q, j_fixed_x)
     test.assertLess(pos_err_x, 1.0e-3, f"FIXED joint (X): pos error {pos_err_x:.6f}")
@@ -1585,7 +1596,7 @@ def _cable_fixed_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, devic
     )
 
 
-def _cable_revolute_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device):
+def _cable_revolute_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: REVOLUTE joint should keep rod start endpoint attached and perpendicular axes aligned.
 
     Two cables (+X and +Y) are attached to the same anchor sphere with revolute joints.
@@ -1681,7 +1692,7 @@ def _cable_revolute_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, de
     model = builder.finalize(device=device)
     model.set_gravity((0.0, 0.0, -9.81))
 
-    state0 = _simulate_sinusoidal_anchor(model, anchor, float(anchor_pos[2]), device)
+    state0 = _simulate_sinusoidal_anchor(model, anchor, float(anchor_pos[2]), device, solver_fn)
 
     pos_err_x, ang_perp_err_x, _ = _compute_revolute_joint_error(model, state0.body_q, j_revolute_x)
     test.assertLess(pos_err_x, 1.0e-3, f"REVOLUTE joint (X): pos error {pos_err_x:.6f}")
@@ -1750,7 +1761,7 @@ def _cable_revolute_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, de
     )
 
 
-def _cable_revolute_drive_tracks_target_impl(test: unittest.TestCase, device):
+def _cable_revolute_drive_tracks_target_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: revolute drive (target_ke/kd + target_pos) should track target angle on a cable.
 
     A single cable hangs from a kinematic sphere anchor via a revolute joint (Y-axis)
@@ -1836,7 +1847,7 @@ def _cable_revolute_drive_tracks_target_impl(test: unittest.TestCase, device):
     tp[dof_idx] = target_angle
     control.joint_target_q = wp.array(tp, dtype=float, device=device)
 
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
 
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
@@ -1877,7 +1888,7 @@ def _cable_revolute_drive_tracks_target_impl(test: unittest.TestCase, device):
     )
 
 
-def _cable_revolute_drive_limit_impl(test: unittest.TestCase, device):
+def _cable_revolute_drive_limit_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: revolute drive with limits should clamp rotation within bounds.
 
     Vertical cable hanging -Z from a static kinematic anchor. Revolute joint (Y-axis)
@@ -1965,7 +1976,7 @@ def _cable_revolute_drive_limit_impl(test: unittest.TestCase, device):
     tp[dof_idx] = target_angle
     control.joint_target_q = wp.array(tp, dtype=float, device=device)
 
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
 
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
@@ -2011,7 +2022,7 @@ def _cable_revolute_drive_limit_impl(test: unittest.TestCase, device):
     )
 
 
-def _cable_prismatic_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device):
+def _cable_prismatic_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: PRISMATIC joint should keep perpendicular position constrained and rotation locked.
 
     Single cable along world +X. The prismatic free axis is world Y (perpendicular to
@@ -2085,8 +2096,9 @@ def _cable_prismatic_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, d
     collision_pipeline = newton.CollisionPipeline(model)
     contacts = collision_pipeline.contacts()
 
-    solver = newton.solvers.SolverVBD(
+    solver = _solver(
         model,
+        solver_fn,
         iterations=10,
     )
 
@@ -2156,7 +2168,7 @@ def _cable_prismatic_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, d
     )
 
 
-def _cable_prismatic_drive_tracks_target_impl(test: unittest.TestCase, device):
+def _cable_prismatic_drive_tracks_target_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: prismatic drive (target_ke/kd + target_pos) should track target displacement on a cable.
 
     A single cable hangs from a kinematic sphere anchor via a prismatic joint (X-axis)
@@ -2242,7 +2254,7 @@ def _cable_prismatic_drive_tracks_target_impl(test: unittest.TestCase, device):
     tp[dof_idx] = target_displacement
     control.joint_target_q = wp.array(tp, dtype=float, device=device)
 
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
 
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
@@ -2283,7 +2295,7 @@ def _cable_prismatic_drive_tracks_target_impl(test: unittest.TestCase, device):
     )
 
 
-def _cable_prismatic_drive_limit_impl(test: unittest.TestCase, device):
+def _cable_prismatic_drive_limit_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: prismatic drive with limits should clamp displacement within bounds.
 
     Vertical cable hanging -Z from a static kinematic anchor. Prismatic joint (X-axis)
@@ -2371,7 +2383,7 @@ def _cable_prismatic_drive_limit_impl(test: unittest.TestCase, device):
     tp[dof_idx] = target_displacement
     control.joint_target_q = wp.array(tp, dtype=float, device=device)
 
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
 
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
@@ -2417,7 +2429,7 @@ def _cable_prismatic_drive_limit_impl(test: unittest.TestCase, device):
     )
 
 
-def _cable_d6_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device):
+def _cable_d6_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: D6 joint (free linear X + free angular Y), locked DOFs stay locked
     and free DOFs respond to their drivers.
 
@@ -2497,7 +2509,7 @@ def _cable_d6_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device):
     collision_pipeline = newton.CollisionPipeline(model)
     contacts = collision_pipeline.contacts()
 
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
 
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
@@ -2580,7 +2592,7 @@ def _cable_d6_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device):
     )
 
 
-def _cable_d6_joint_all_locked_impl(test: unittest.TestCase, device):
+def _cable_d6_joint_all_locked_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: D6 joint with all DOFs locked should behave like a fixed joint.
 
     Vertical cable hanging -Z from a kinematic anchor. D6 joint with no free axes
@@ -2644,7 +2656,7 @@ def _cable_d6_joint_all_locked_impl(test: unittest.TestCase, device):
     model = builder.finalize(device=device)
     model.set_gravity((0.0, 0.0, -9.81))
 
-    state0 = _simulate_sinusoidal_anchor(model, anchor, float(anchor_pos[2]), device)
+    state0 = _simulate_sinusoidal_anchor(model, anchor, float(anchor_pos[2]), device, solver_fn)
 
     pos_err, ang_err = _compute_fixed_joint_frame_error(model, state0.body_q, j_d6)
     test.assertLess(pos_err, 1.0e-3, "D6 all-locked: position error too large")
@@ -2669,7 +2681,7 @@ def _cable_d6_joint_all_locked_impl(test: unittest.TestCase, device):
     )
 
 
-def _cable_d6_joint_locked_x_impl(test: unittest.TestCase, device):
+def _cable_d6_joint_locked_x_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: D6 joint with X linear locked, Y/Z free, all angular locked.
 
     Vertical cable hanging -Z from a kinematic anchor. D6 joint with
@@ -2741,7 +2753,7 @@ def _cable_d6_joint_locked_x_impl(test: unittest.TestCase, device):
 
     locked_axis_local = wp.vec3(1.0, 0.0, 0.0)
 
-    state0 = _simulate_sinusoidal_anchor(model, anchor, float(anchor_pos[2]), device)
+    state0 = _simulate_sinusoidal_anchor(model, anchor, float(anchor_pos[2]), device, solver_fn)
 
     # Position error along the locked X axis.
     X_wp, X_wc = _get_joint_world_frames(model, state0.body_q, j_d6)
@@ -2795,7 +2807,7 @@ def _cable_d6_joint_locked_x_impl(test: unittest.TestCase, device):
     )
 
 
-def _cable_d6_drive_tracks_target_impl(test: unittest.TestCase, device):
+def _cable_d6_drive_tracks_target_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: D6 drive (target_ke/kd + target_pos) should track targets on a cable.
 
     A single cable hangs from a kinematic sphere anchor via a D6 joint (1 linear X + 1 angular Y)
@@ -2888,7 +2900,7 @@ def _cable_d6_drive_tracks_target_impl(test: unittest.TestCase, device):
     tp[ang_dof_idx] = target_angle
     control.joint_target_q = wp.array(tp, dtype=float, device=device)
 
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
 
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
@@ -2937,7 +2949,7 @@ def _cable_d6_drive_tracks_target_impl(test: unittest.TestCase, device):
     )
 
 
-def _cable_d6_drive_limit_impl(test: unittest.TestCase, device):
+def _cable_d6_drive_limit_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: D6 drive with limits should clamp DOFs within bounds.
 
     Vertical cable hanging -Z from a static kinematic anchor. D6 joint with
@@ -3045,7 +3057,7 @@ def _cable_d6_drive_limit_impl(test: unittest.TestCase, device):
     tp[qd_s + 1] = target_angle
     control.joint_target_q = wp.array(tp, dtype=float, device=device)
 
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
 
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
@@ -3104,7 +3116,7 @@ def _cable_d6_drive_limit_impl(test: unittest.TestCase, device):
     )
 
 
-def _cable_kinematic_gripper_picks_capsule_impl(test: unittest.TestCase, device):
+def _cable_kinematic_gripper_picks_capsule_impl(test: unittest.TestCase, device, solver_fn=None):
     """Kinematic friction regression: moving kinematic grippers should lift a dynamic capsule.
 
     - two kinematic box "fingers" close on a capsule and then lift upward
@@ -3193,8 +3205,9 @@ def _cable_kinematic_gripper_picks_capsule_impl(test: unittest.TestCase, device)
     collision_pipeline = newton.CollisionPipeline(model)
     contacts = collision_pipeline.contacts()
 
-    solver = newton.solvers.SolverVBD(
+    solver = _solver(
         model,
+        solver_fn,
         iterations=5,
     )
 
@@ -3280,7 +3293,7 @@ def _cable_kinematic_gripper_picks_capsule_impl(test: unittest.TestCase, device)
     )
 
 
-def _cable_graph_y_junction_spanning_tree_impl(test: unittest.TestCase, device):
+def _cable_graph_y_junction_spanning_tree_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable graph: Y-junction should build (and simulate) with wrap_in_articulation=True."""
     builder = newton.ModelBuilder()
     builder.default_shape_cfg.ke = 1.0e5
@@ -3370,7 +3383,7 @@ def _cable_graph_y_junction_spanning_tree_impl(test: unittest.TestCase, device):
 
     state0, state1 = model.state(), model.state()
     control = model.control()
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
 
     q_init = state0.body_q.numpy()
     z_init_min = float(np.min(q_init[rod_bodies, 2]))
@@ -3510,7 +3523,7 @@ def _rod_eval_fk_reconstructs_body_state_impl(test: unittest.TestCase, device):
     )
 
 
-def _rod_vbd_joint_f_applies_six_dof_wrench_impl(test: unittest.TestCase, device):
+def _rod_vbd_joint_f_applies_six_dof_wrench_impl(test: unittest.TestCase, device, solver_fn=None):
     """Verify VBD applies a Rod wrench and its reaction at each body's COM."""
 
     child_mass = 2.0
@@ -3535,7 +3548,7 @@ def _rod_vbd_joint_f_applies_six_dof_wrench_impl(test: unittest.TestCase, device
     builder.color()
     model = builder.finalize(device=device)
 
-    solver = newton.solvers.SolverVBD(model)
+    solver = _solver(model, solver_fn)
     state_0, state_1 = model.state(), model.state()
     control = model.control()
 
@@ -3574,7 +3587,7 @@ def _rod_vbd_joint_f_applies_six_dof_wrench_impl(test: unittest.TestCase, device
     np.testing.assert_allclose(angular_momentum, 0.0, atol=1.0e-5)
 
 
-def _cable_rod_ring_closed_in_articulation_impl(test: unittest.TestCase, device):
+def _cable_rod_ring_closed_in_articulation_impl(test: unittest.TestCase, device, solver_fn=None):
     """Closed ring via add_rod(closed=True) should build and simulate."""
     builder = newton.ModelBuilder()
     builder.default_shape_cfg.ke = 1.0e4
@@ -3630,7 +3643,7 @@ def _cable_rod_ring_closed_in_articulation_impl(test: unittest.TestCase, device)
     # Drop the ring onto the ground and ensure stable simulation.
     state0, state1 = model.state(), model.state()
     control = model.control()
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
 
     frame_dt = 1.0 / 60.0
     sim_substeps = 6
@@ -3792,7 +3805,7 @@ def _cable_rod_graph_body_frame_origin_impl(test: unittest.TestCase, device):
     test.assertEqual((strict.body_count, strict.joint_count, strict.shape_count), (0, 0, 0))
 
 
-def _rod_control_target_q_does_not_override_structural_rest_impl(test: unittest.TestCase, device):
+def _rod_control_target_q_does_not_override_structural_rest_impl(test: unittest.TestCase, device, solver_fn=None):
     """Verify Control.joint_target_q does not override Model-owned Rod structural rest."""
     rest_rotation = wp.quat_from_axis_angle(wp.normalize(wp.vec3(1.0, 2.0, -1.0)), 0.35)
     initial_position = wp.vec3(0.08, 0.04, 0.12)
@@ -3824,7 +3837,7 @@ def _rod_control_target_q_does_not_override_structural_rest_impl(test: unittest.
     control_target[target_start + 3 : target_start + 7] = np.asarray(initial_rotation)
     control.joint_target_q.assign(control_target)
 
-    solver = newton.solvers.SolverVBD(model, iterations=5)
+    solver = _solver(model, solver_fn, iterations=5)
     state_0, state_1 = model.state(), model.state()
     solver.step(state_0, state_1, control, None, 1.0 / 600.0)
 
@@ -3896,7 +3909,7 @@ def _rod_notify_reference_pose_refreshes_structural_rest_impl(test: unittest.Tes
     test.assertGreater(float(np.linalg.norm(state_out.body_qd.numpy()[child, 3:])), 1.0e-5)
 
 
-def _cable_generic_rest_pose_is_structural_rest_impl(test: unittest.TestCase, device):
+def _cable_generic_rest_pose_is_structural_rest_impl(test: unittest.TestCase, device, solver_fn=None):
     """Verify generic Rod rest coordinates produce zero wrench at structural rest."""
     rest_angles = wp.vec3(0.21, -0.16, 0.13)
     rest_rotation = wp.quat_from_euler(rest_angles, 2, 1, 0)
@@ -3962,7 +3975,7 @@ def _cable_generic_rest_pose_is_structural_rest_impl(test: unittest.TestCase, de
     model = builder.finalize(device=device)
 
     state_0, state_1 = model.state(), model.state()
-    newton.solvers.SolverVBD(model, iterations=5).step(state_0, state_1, model.control(), None, 1.0 / 240.0)
+    _solver(model, solver_fn, iterations=5).step(state_0, state_1, model.control(), None, 1.0 / 240.0)
     np.testing.assert_allclose(
         state_1.body_qd.numpy()[[parent, child]],
         0.0,
@@ -3971,7 +3984,7 @@ def _cable_generic_rest_pose_is_structural_rest_impl(test: unittest.TestCase, de
     )
 
 
-def _cable_rod_separate_rest_and_initial_pose_impl(test: unittest.TestCase, device):
+def _cable_rod_separate_rest_and_initial_pose_impl(test: unittest.TestCase, device, solver_fn=None):
     """Verify rod rest geometry is independent and authored frames are aligned."""
 
     def builder_rest_rotation(builder: newton.ModelBuilder, joint: int) -> wp.quat:
@@ -4130,7 +4143,7 @@ def _cable_rod_separate_rest_and_initial_pose_impl(test: unittest.TestCase, devi
         test.assertAlmostEqual(float(shape_scale[shape_ids[0], 1]), expected_half_length, places=6)
 
     state_0, state_1 = model.state(), model.state()
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
     solver.step(state_0, state_1, model.control(), None, 1.0 / 600.0)
     test.assertGreater(float(np.linalg.norm(state_1.body_qd.numpy()[rod_bodies[1]])), 1.0e-5)
 
@@ -4329,7 +4342,7 @@ def _collect_rigid_body_contact_forces_impl(test: unittest.TestCase, device):
     test.assertTrue(np.any(force_norms > 1.0e-8), msg="Expected at least one non-zero rigid contact force")
 
 
-def _cable_world_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device):
+def _cable_world_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: joints with parent=-1 (world) should anchor rod start to a fixed world frame.
 
     Builds a short cable rod for each joint type (BALL, FIXED, REVOLUTE, PRISMATIC), attaches
@@ -4436,7 +4449,7 @@ def _cable_world_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, devic
         collision_pipeline = newton.CollisionPipeline(model)
         contacts = collision_pipeline.contacts()
 
-        solver = newton.solvers.SolverVBD(model, iterations=10)
+        solver = _solver(model, solver_fn, iterations=10)
 
         def simulate(
             _solver=solver,
@@ -4515,7 +4528,7 @@ def _cable_world_joint_attaches_rod_endpoint_impl(test: unittest.TestCase, devic
             )
 
 
-def _joint_enabled_toggle_impl(test: unittest.TestCase, device):
+def _joint_enabled_toggle_impl(test: unittest.TestCase, device, solver_fn=None):
     """VBD: disabling a joint lets the cable detach; re-enabling pulls it back.
 
     Uses a BALL joint between a kinematic anchor sphere and a short cable (rod).
@@ -4581,7 +4594,7 @@ def _joint_enabled_toggle_impl(test: unittest.TestCase, device):
     collision_pipeline = newton.CollisionPipeline(model)
     contacts = collision_pipeline.contacts()
 
-    solver = newton.solvers.SolverVBD(model, iterations=10)
+    solver = _solver(model, solver_fn, iterations=10)
 
     sim_dt = 1.0 / 60.0 / 4
 
@@ -4619,7 +4632,7 @@ def _joint_enabled_toggle_impl(test: unittest.TestCase, device):
     )
 
 
-def _cable_fixed_joint_tracks_moving_kinematic_impl(test: unittest.TestCase, device):
+def _cable_fixed_joint_tracks_moving_kinematic_impl(test: unittest.TestCase, device, solver_fn=None):
     """Cable VBD: fixed joint tracks a translating-and-rotating kinematic body.
 
     A short cable is attached via a FIXED joint to a kinematic body that
@@ -4677,7 +4690,7 @@ def _cable_fixed_joint_tracks_moving_kinematic_impl(test: unittest.TestCase, dev
     collision_pipeline = newton.CollisionPipeline(model)
     contacts = collision_pipeline.contacts()
 
-    solver = newton.solvers.SolverVBD(model, iterations=20)
+    solver = _solver(model, solver_fn, iterations=20)
 
     frame_dt = 1.0 / 60.0
     sim_substeps = 10
@@ -6671,7 +6684,7 @@ def _split_cable_discrete_cantilever_moment_law_matches_beam_limit(test, device)
     test.assertLess(abs(fine_ratio - 1.0), 0.03)
 
 
-def _split_cable_kinematic_arc_yields_uniform_curvature(test, device):
+def _split_cable_kinematic_arc_yields_uniform_curvature(test, device, solver_fn=None):
     """Kinematically-driven cantilever should settle to a uniform-curvature arc.
 
     Clamp the root and place the tip on an analytic discrete arc. The
@@ -6751,7 +6764,7 @@ def _split_cable_kinematic_arc_yields_uniform_curvature(test, device):
 
     builder.color()
     model = builder.finalize(device=device)
-    solver = newton.solvers.SolverVBD(model, iterations=30)
+    solver = _solver(model, solver_fn, iterations=30)
     state_0 = model.state()
     state_1 = model.state()
     control = model.control()
@@ -7841,6 +7854,74 @@ add_function_test(
     _split_cable_dahl_full_step_state_stays_in_active_subspace,
     devices=devices,
 )
+
+# SolverIPC, with libuipc-warp's rod joints, in the cases that step a solver on rods (CUDA devices only). A case that
+# cannot pass is an expected failure, registered with its cause.
+_IPC = requires("uipc_warp")(newton.solvers.SolverIPC)
+# the cable's ends are kinematic bodies with mass that carry its load: placed where their state is (a jump), as the
+# other solvers place them, where SolverIPC's default aim lets them give under the load ("Kinematic bodies" in
+# docs/solvers/ipc.rst)
+_IPC_JUMP = requires("uipc_warp")(lambda model: newton.solvers.SolverIPC(model, kinematic_motion="jump"))
+_D6 = "SolverIPC refuses the model's D6 joint, which locks what no joint of SolverIPC locks"
+for _name, _impl, _solver_fn, _cause in (
+    ("test_cable_sagging_and_stability", _cable_sagging_and_stability_impl, _IPC, None),
+    ("test_cable_bend_stiffness", _cable_bend_stiffness_impl, _IPC, None),
+    ("test_cable_twist_response", _cable_twist_response_impl, _IPC_JUMP, None),
+    (
+        "test_two_layer_cable_pile_collision",
+        _two_layer_cable_pile_collision_impl,
+        _IPC,
+        "the piled capsules start in contact (bodies 43 and 76 4e-9 m apart), a start SolverIPC refuses",
+    ),
+    ("test_cable_ball_joint_attaches_rod_endpoint", _cable_ball_joint_attaches_rod_endpoint_impl, _IPC, None),
+    ("test_cable_fixed_joint_attaches_rod_endpoint", _cable_fixed_joint_attaches_rod_endpoint_impl, _IPC, None),
+    ("test_cable_revolute_joint_attaches_rod_endpoint", _cable_revolute_joint_attaches_rod_endpoint_impl, _IPC, None),
+    ("test_cable_revolute_drive_tracks_target", _cable_revolute_drive_tracks_target_impl, _IPC, None),
+    ("test_cable_revolute_drive_limit", _cable_revolute_drive_limit_impl, _IPC, None),
+    ("test_cable_prismatic_joint_attaches_rod_endpoint", _cable_prismatic_joint_attaches_rod_endpoint_impl, _IPC, None),
+    ("test_cable_prismatic_drive_tracks_target", _cable_prismatic_drive_tracks_target_impl, _IPC, None),
+    ("test_cable_prismatic_drive_limit", _cable_prismatic_drive_limit_impl, _IPC, None),
+    ("test_cable_d6_joint_attaches_rod_endpoint", _cable_d6_joint_attaches_rod_endpoint_impl, _IPC, _D6),
+    ("test_cable_d6_joint_all_locked", _cable_d6_joint_all_locked_impl, _IPC, None),
+    ("test_cable_d6_joint_locked_x", _cable_d6_joint_locked_x_impl, _IPC, _D6),
+    ("test_cable_d6_drive_tracks_target", _cable_d6_drive_tracks_target_impl, _IPC, _D6),
+    ("test_cable_d6_drive_limit", _cable_d6_drive_limit_impl, _IPC, _D6),
+    (
+        "test_cable_kinematic_gripper_picks_capsule",
+        _cable_kinematic_gripper_picks_capsule_impl,
+        _IPC,
+        "the grippers have no mass, so they jump, and friction does not act on a jump",
+    ),
+    ("test_cable_graph_y_junction_spanning_tree", _cable_graph_y_junction_spanning_tree_impl, _IPC, None),
+    ("test_rod_joint_f_applies_six_dof_wrench", _rod_vbd_joint_f_applies_six_dof_wrench_impl, _IPC, None),
+    ("test_cable_rod_ring_closed_in_articulation", _cable_rod_ring_closed_in_articulation_impl, _IPC, None),
+    (
+        "test_rod_control_target_q_does_not_override_structural_rest",
+        _rod_control_target_q_does_not_override_structural_rest_impl,
+        _IPC,
+        None,
+    ),
+    ("test_cable_generic_rest_pose_is_structural_rest", _cable_generic_rest_pose_is_structural_rest_impl, _IPC, None),
+    ("test_cable_rod_separate_rest_and_initial_pose", _cable_rod_separate_rest_and_initial_pose_impl, _IPC, None),
+    (
+        "test_cable_world_joint_attaches_rod_endpoint",
+        _cable_world_joint_attaches_rod_endpoint_impl,
+        _IPC,
+        "SolverIPC's fixed joint holds its frames together, where Newton's joint coordinates are 0; the case measures the "
+        "turn from the frames' initial relative rotation, 90 degrees here, which SolverVBD keeps",
+    ),
+    ("test_joint_enabled_toggle", _joint_enabled_toggle_impl, _IPC, None),
+    ("test_cable_fixed_joint_tracks_moving_kinematic", _cable_fixed_joint_tracks_moving_kinematic_impl, _IPC, None),
+    (
+        "test_split_cable_kinematic_arc_yields_uniform_curvature",
+        _split_cable_kinematic_arc_yields_uniform_curvature,
+        _IPC,
+        "SolverIPC's segments are affine bodies, which at the default stiffness, lowered for the step, stretch by 0.11% "
+        "under this cable's bend, over the case's 0.1% (with body_kappa=1e10 it passes)",
+    ),
+):
+    _func = _impl if _cause is None else unittest.expectedFailure(functools.partial(_impl))
+    add_function_test(TestCable, f"{_name}_ipc", _func, devices=get_cuda_test_devices(), solver_fn=_solver_fn)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=True)

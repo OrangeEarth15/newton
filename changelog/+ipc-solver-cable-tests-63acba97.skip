@@ -1,0 +1,1 @@
+Test-only: Newton's cable tests run with ``SolverIPC``'s rod joints, each case that cannot pass an expected failure with its cause; no user-facing change.
