@@ -14,6 +14,7 @@ Success criteria:
 
 Runs:
 - `python -m newton.examples cable_y_junction`
+- `python -m newton.examples cable_y_junction --solver ipc`
 """
 
 from __future__ import annotations
@@ -132,6 +133,8 @@ class Example:
             config = newton.solvers.SolverKamino.Config.from_model(self.model, dynamics_solver=self.kamino_backend)
             config.use_collision_detector = False
             self.solver = newton.solvers.SolverKamino(self.model, config=config)
+        elif self.solver_type == "ipc":
+            self.solver = newton.solvers.SolverIPC(self.model)
         else:
             self.solver = newton.solvers.SolverVBD(
                 self.model,
@@ -239,7 +242,7 @@ class Example:
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
-    parser.add_argument("--solver", choices=["vbd", "kamino"], default="vbd", help="Cable dynamics solver.")
+    parser.add_argument("--solver", choices=["vbd", "kamino", "ipc"], default="vbd", help="Cable dynamics solver.")
     parser.add_argument(
         "--kamino-backend", choices=["lox", "scc"], default="lox", help="Kamino dynamics solver backend."
     )

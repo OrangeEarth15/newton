@@ -861,6 +861,35 @@ add_example_test(
 )
 
 
+# SolverIPC, with libuipc-warp's rod joints (CUDA devices only). cable_twist and cable_pile do not offer it: the
+# twisted cables start on the ground plane, a start SolverIPC refuses, and the default contact lists of the pile's
+# capsules are longer than libuipc-warp's limit of 2^28 pairs per list
+add_example_test(
+    TestCableExamples,
+    name="cable.example_cable_y_junction",
+    devices=cuda_test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 20, "solver": "ipc", "requires": ("uipc_warp",)},
+    test_suffix="ipc",
+)
+add_example_test(
+    TestCableExamples,
+    name="cable.example_cable_initial_rest_pose",
+    devices=cuda_test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 120, "solver": "ipc", "requires": ("uipc_warp",)},
+    test_suffix="ipc",
+)
+add_example_test(
+    TestCableExamples,
+    name="cable.example_cable_plectoneme",
+    devices=cuda_test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 20, "solver": "ipc", "requires": ("uipc_warp",)},
+    test_suffix="ipc",
+)
+
+
 class TestTendonExamples(unittest.TestCase):
     """Exercise the experimental massless tendon examples."""
 

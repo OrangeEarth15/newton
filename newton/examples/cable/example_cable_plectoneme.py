@@ -24,6 +24,7 @@ Success criteria:
 
 Runs:
 - `python -m newton.examples cable_plectoneme`
+- `python -m newton.examples cable_plectoneme --solver ipc`
 """
 
 import math
@@ -201,6 +202,8 @@ class Example:
             # Integrating the projected twist keeps the strands from passing through each other at peak supercoiling
             config.lox.projected_twist_fraction = 1.0
             self.solver = newton.solvers.SolverKamino(self.model, config=config)
+        elif self.solver_type == "ipc":
+            self.solver = newton.solvers.SolverIPC(self.model)
         else:
             self.solver = newton.solvers.SolverVBD(
                 self.model,
@@ -368,7 +371,7 @@ class Example:
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
-    parser.add_argument("--solver", choices=["vbd", "kamino"], default="vbd", help="Cable dynamics solver.")
+    parser.add_argument("--solver", choices=["vbd", "kamino", "ipc"], default="vbd", help="Cable dynamics solver.")
     parser.add_argument("--iterations", dest="iterations", type=int, default=None)
     parser.add_argument("--substeps", dest="substeps", type=int, default=None)
     parser.set_defaults(num_frames=int(Example.FPS * Example.TOTAL_TIME))
