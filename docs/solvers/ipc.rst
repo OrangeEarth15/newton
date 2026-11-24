@@ -10,9 +10,11 @@ IPC
 rigid bodies with Incremental Potential Contact (IPC): each step is an implicit
 time step in which a barrier energy keeps surfaces apart, so that no surface
 passes through another. The solver runs on
-`libuipc-warp <https://github.com/OrangeEarth15/libuipc-warp>`_, a Warp
+`libuipc-warp <https://gitlab-master.nvidia.com/sarawang/libuipc-warp>`_, a Warp
 implementation of the libuipc simulator, through its array interface; no libuipc
-build is needed.
+build is needed. libuipc-warp is NVIDIA-internal: its repository is on NVIDIA's
+GitLab, its GitHub mirror is private, and installing it needs access to the
+GitLab repository (:ref:`ipc-stepping`).
 
 .. experimental::
 
@@ -60,12 +62,24 @@ compare it with Newton's other solvers.
 Construction and stepping
 -------------------------
 
-SolverIPC needs the optional ``libuipc-warp`` package, 0.4.4 or newer; a
-development build such as 0.4.4.dev0 counts as its release. Building the first
-solver imports it, and raises :class:`ImportError` when it is missing, older,
-or lacks one of the calls the solver makes; the message names what is missing
-and where to install it from. Build the model on a CUDA device and step it as
-any other solver:
+SolverIPC runs on the optional ``libuipc-warp`` package. SolverIPC needs
+libuipc-warp's main branch (0.4.4.dev0 or later) until 0.5.0 is released.
+libuipc-warp is NVIDIA-internal and has no package on PyPI: install it from its
+GitLab repository, to which you need access, into the environment of Newton:
+
+.. code-block:: console
+
+   git clone ssh://git@gitlab-master.nvidia.com:12051/sarawang/libuipc-warp.git
+   pip install -e ./libuipc-warp
+
+Over HTTPS (``https://gitlab-master.nvidia.com/sarawang/libuipc-warp.git``) the
+clone needs a GitLab access token. Its README gives the requirements: Linux, an
+NVIDIA driver that supports CUDA 12.4 or newer, and Python 3.11 to 3.13.
+
+Building the first solver imports libuipc-warp, and raises
+:class:`ImportError` when it is missing, older, or lacks one of the calls the
+solver makes; the message names what is missing. Build the model on a CUDA
+device and step it as any other solver:
 
 .. code-block:: python
 
@@ -116,10 +130,11 @@ solves the step again; when the step failed, it raises :class:`RuntimeError`.
 A captured step can do neither, and reports through the ``STATUS`` observable
 instead (see :ref:`ipc-status`).
 
-The ``contacts`` argument of :meth:`~newton.solvers.SolverIPC.step` is not read:
-the solver detects its own contacts. Pass ``None``, or with ``CONTACT_F``
-requested, the buffer that receives the solver's contacts (see
-:ref:`ipc-contact-output`).
+Pass ``None`` as the ``contacts`` argument of
+:meth:`~newton.solvers.SolverIPC.step`: the solver detects its own contacts and
+reads none from it. With the ``CONTACT_F`` observable requested, pass a
+:class:`~newton.Contacts` buffer instead: the step writes its contact rows into
+it (see :ref:`ipc-contact-output`).
 
 .. _ipc-arguments:
 
@@ -147,8 +162,9 @@ other solvers.
        (:ref:`ipc-contact`).
    * - ``adaptive_kappa``
      - ``False``
-     - Keep the stiffness in libuipc's range for the model and the step size,
-       as libuipc does (:ref:`ipc-contact`).
+     - ``True``: use libuipc's stiffness range, a lower bound from the model
+       and the step size and an upper bound 100 times it, as libuipc does
+       (:ref:`ipc-contact`). Not libuipc's adaptive stiffness.
    * - ``thickness``
      - 0
      - The contact thickness [m] of the vertices of cloth and tetrahedra
@@ -159,8 +175,8 @@ other solvers.
        (:ref:`ipc-contact-damping`).
    * - ``eps_velocity``
      - 0.01
-     - The friction's smoothing speed [m/s]: below it, static friction acts
-       as a stiff spring (:ref:`ipc-contact`).
+     - The friction's smoothing speed [m/s]: below it the friction force is
+       viscous, growing from zero with the sliding speed (:ref:`ipc-contact`).
    * - ``newton_velocity_tol``
      - ``None``: 0.05
      - The Newton loop ends when an update moves no vertex faster than this
@@ -179,8 +195,9 @@ other solvers.
      - The PCG's tolerance, relative to its first residual.
    * - ``semi_implicit``, ``semi_implicit_k_min``
      - ``None`` (on), 6
-     - libuipc's early exit: after ``semi_implicit_k_min`` Newton iterations
-       the loop ends once CCD admits a full update (:ref:`ipc-tolerances`).
+     - libuipc's early exit: after ``semi_implicit_k_min`` Newton iterations,
+       the loop ends once the steps taken add up to a full update
+       (:ref:`ipc-tolerances`).
    * - ``integrator``
      - ``"bdf1"``
      - Implicit Euler, or ``"bdf2"`` (:ref:`ipc-bdf2`).
@@ -292,7 +309,12 @@ The status is a mask of :class:`~newton.solvers.SolverIPC.StatusBits`. A bit of
   thickness, or a state written since the last step put surfaces through each
   other or within their contact thickness (:ref:`ipc-start`).
 - ``INVALID_CCD_STEP``: CCD admitted no update, or a move written since the
-  last step met a surface (:ref:`ipc-kinematic-bodies`).
+  last step met a surface (:ref:`ipc-kinematic-bodies`). It is the same bit,
+  ``1 << 4``, as libuipc-warp's ``FrameStatusFlags.INVALID_TOI``, which the
+  engine names after the time of impact (TOI) that CCD computes; libuipc-warp's
+  `array interface guide
+  <https://gitlab-master.nvidia.com/sarawang/libuipc-warp/-/blob/main/docs/array-api.md#how-a-frame-ended>`__
+  describes that flag.
 - ``TRAVERSAL_EXHAUSTED``: a search of the collision tree ran out of its node
   budget, so contact candidates are missing.
 
@@ -419,10 +441,17 @@ gain less velocity than that in a step, as in slow sliding against friction,
 lower the tolerance; otherwise the body creeps at about ``eps_velocity``. The solver lowers its defaults itself in
 two cases: an entry of a coupled solver with proxies takes 5e-4 m/s, 1e-3 1/s
 and no semi-implicit exit (:ref:`ipc-coupling`), and a model with friction on its
-joints or tendons takes 0.4 ``eps_velocity`` (:ref:`ipc-joint-terms`). The
-semi-implicit exit, on by default as in libuipc, ends the loop after
-``semi_implicit_k_min`` iterations once CCD admits a full update, without the
-tolerance test.
+joints or tendons takes 0.4 ``eps_velocity`` (:ref:`ipc-joint-terms`).
+
+The semi-implicit exit, on by default as in libuipc, can end the loop before the
+tolerance test passes. After the first ``semi_implicit_k_min`` Newton
+iterations, every iteration multiplies a factor :math:`\beta`, which starts at
+1, by :math:`1 - \alpha`, where :math:`\alpha` is the length of the step the
+iteration took (1 for the full Newton update), and the loop ends once
+:math:`\beta \le 10^{-3}` (libuipc's ``newton/semi_implicit/beta_tol``). So the
+first full step that CCD and the line search allow after that point ends the
+loop, and so do shorter steps whose factors :math:`1 - \alpha` multiply to
+:math:`10^{-3}` or less.
 
 .. _ipc-d-hat:
 
@@ -538,8 +567,9 @@ it follows ``state_in`` (:ref:`ipc-kinematic-bodies`). An inactive particle on
 no cloth or tetrahedron collides with nothing, as in Newton.
 
 A tetrahedron is libuipc's stable Neo-Hookean element. Its Lamé parameters are
-``tet_materials[:, 0]`` (``k_mu``) and ``tet_materials[:, 1]`` (``k_lambda``);
-libuipc stores the second as ``k_lambda + k_mu``, and the solver passes it so.
+``tet_materials[:, 0]`` (``k_mu``) and ``tet_materials[:, 1]`` (``k_lambda``).
+libuipc's stable Neo-Hookean element takes ``mu`` and ``lambda + mu`` as its two
+coefficients, so the solver passes ``k_mu`` and ``k_lambda + k_mu``.
 ``tet_materials[:, 2]`` (``k_damp``) damps the rate of the strain
 (:ref:`ipc-damping`). Each connected group of tetrahedra, like each connected
 cloth, is one body that collides with itself, as finite elements do in
@@ -708,7 +738,12 @@ and the shape's for a particle and a shape, and
 semi-implicit, Featherstone and XPBD solvers. Friction is libuipc's lagged
 friction: the normal force and the contact basis of a pair are taken at the
 step's start, and the friction force is smoothed below the sliding speed
-``eps_velocity``. Below that speed static friction acts as a stiff spring, so a
+``eps_velocity``. Below that speed the friction force is viscous: it grows from
+zero with the sliding speed :math:`v`, about as
+:math:`2 \mu N v / \epsilon_v` at small speeds, with :math:`\epsilon_v` =
+``eps_velocity`` and :math:`N` the normal force, and reaches :math:`\mu N` at
+:math:`\epsilon_v`. Over a step this is a spring on the step's tangential
+displacement of stiffness about :math:`2 \mu N / (\epsilon_v \Delta t)`. So a
 body held by friction creeps at a speed below ``eps_velocity``.
 
 The contact thickness is the distance at which the barrier becomes infinite:
@@ -726,13 +761,17 @@ The contact thickness is the distance at which the barrier becomes infinite:
   radii are sphere radii, often larger than the spacing of a cloth.
 
 The contact stiffness, the barrier's :math:`\kappa`, is ``kappa`` for every
-pair, taken as given. libuipc does not take a stiffness as given: it keeps it in
-a range :math:`[\kappa_{lo}, 100\,\kappa_{lo}]` with
+pair, taken as given. libuipc does not take a stiffness as given: it clamps it
+into a range it computes from the scene, here called libuipc's stiffness range,
+:math:`[\kappa_{lo}, 100\,\kappa_{lo}]` with
 :math:`\kappa_{lo} = c\,\bar m / \Delta t^2`, where :math:`\bar m` is the mean
 mass of the vertices and :math:`c` a factor of the scene's diagonal and
-``d_hat``. A scene that sets no contact model takes :math:`\kappa_{lo}`, and a
-stiffness the user gives is clamped into the range. With
-``adaptive_kappa=True`` the solver does the same: ``kappa=None`` takes
+``d_hat`` (libuipc-warp's
+`options guide <https://gitlab-master.nvidia.com/sarawang/libuipc-warp/-/blob/main/docs/options.md#contact-stiffness>`__
+gives the formula). A scene that sets no contact model takes
+:math:`\kappa_{lo}`, and a stiffness the user gives is clamped into the range.
+``adaptive_kappa=True`` means "use libuipc's stiffness range": the solver then
+does the same: ``kappa=None`` takes
 :math:`\kappa_{lo}`, a given ``kappa`` is clamped into the range, and the first
 step that clamps it warns with :class:`~newton.NewtonWarning`. The range
 follows every step's ``dt``, also in captured steps, and comes from the masses
@@ -743,6 +782,12 @@ libuipc-warp's array path, where libuipc counts the mass of every body, fixed or
 not. :meth:`~newton.solvers.SolverIPC.contact_stiffness` gives the stiffness of a
 step of any ``dt``. With independent worlds every world takes the range of the
 same world alone (:ref:`ipc-worlds`).
+
+``adaptive_kappa`` is not libuipc's adaptive stiffness, which is a different
+mechanism: in libuipc a contact model with a negative resistance asks for a
+stiffness that starts at ``contact/adaptive/init_kappa`` and is recomputed in
+every frame within the range. SolverIPC does not offer it; its ``kappa`` is
+positive.
 
 A face that presses on a triangulated surface is a patch of contact terms, one
 per vertex or edge in range. Their resultant need not pass through the centre of
@@ -1624,11 +1669,16 @@ implicit Euler step whose start becomes the history: the first step, a step from
 a state the solver did not write last, the step after
 :meth:`~newton.solvers.SolverIPC.reset`, and a step after a change of gravity.
 A step from a new state therefore applies the whole impulse of its forces, as in
-Newton's other solvers, which are one-step methods. libuipc instead starts the
-history from rest, without acceleration: a constant force from rest then gets
-two thirds of its impulse in the first step, and the velocity lags half a step's
-impulse behind for good. libuipc-warp's array path offers both starts, and the
-solver takes the implicit Euler start.
+Newton's other solvers, which are one-step methods. libuipc instead fills the
+history with the start state, and libuipc-warp's default start puts it one step
+back at the start velocity, :math:`x - \Delta t\,v`. From rest the two are the
+same: the history holds no acceleration, so a constant force gets two thirds of
+its impulse in the first step, and the velocity stays half a step's impulse
+behind from then on. From a moving start libuipc's history also loses a third of
+the first step's motion, :math:`\tfrac{2}{3} \Delta t\,v` instead of
+:math:`\Delta t\,v`. libuipc-warp offers its default start and the implicit
+Euler start (its ``bdf2_start`` option), and the solver takes the implicit Euler
+start.
 
 A change of gravity (:meth:`~newton.solvers.SolverIPC.notify_model_changed` with
 ``MODEL_PROPERTIES``) starts the history anew in the worlds whose gravity
@@ -1679,7 +1729,7 @@ method's own, in the paper, the authors' code and libuipc alike, and it gains
 energy where ``d_hat`` exceeds the distance a body travels in a step: a cube
 dropped 0.4 m onto the ground in steps of 1/1800 s leaves at 4.4 times its impact
 speed of 2.8 m/s with ``d_hat`` 1 cm, at 0.7 times with 1 mm, and in steps of
-1/100 s at 0.33 times with 1 cm. Keep ``d_hat`` well below the distance a body
+1/100 s at 0.33 times (0.93 m/s) with 1 cm. Keep ``d_hat`` well below the distance a body
 moves in a step.
 
 **Resting contact.** libuipc's default decay of an opened pair's weight, 0.3,
@@ -1688,8 +1738,8 @@ the fourth, so a
 resting contact that opens for a moment joins again at the surface and is pushed
 out again: a stack of two 0.1 m boxes in steps of 1/100 s keeps rocking with
 ``d_hat`` 5 mm or 2 mm, in most runs until its upper box falls off, on libuipc as
-here. SolverIPC takes the paper's decay factor 0.9 instead, which keeps a pair
-for 43 updates: such a stack came to rest in eight runs of eight, where 0.3
+here. SolverIPC takes the paper's decay factor 0.9 instead, which keeps an
+opened pair for 43 outer updates and drops it at the 44th: such a stack came to rest in eight runs of eight, where 0.3
 brought it to rest in none. The libuipc-warp engine keeps libuipc's 0.3 for
 libuipc's scenes.
 

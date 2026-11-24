@@ -252,7 +252,7 @@ formulation.
 :class:`~newton.solvers.SolverIPC` finds its own contacts and reads ``mu``, and
 ``kd`` only with ``contact_damping="material"``. Its contact stiffness is the
 barrier's: the solver's ``kappa`` for every pair, taken as given, or with
-``adaptive_kappa`` kept in libuipc's scene-adaptive range, as libuipc keeps it.
+``adaptive_kappa=True`` kept in libuipc's stiffness range, as libuipc keeps it.
 It takes ``margin`` as the contact thickness of a shape's surface and
 :attr:`~newton.Model.particle_radius` as that of a particle on no cloth or
 tetrahedron, so that two shapes rest the sum of their margins apart. It does not
