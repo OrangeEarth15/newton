@@ -287,6 +287,7 @@ def _check_supported(model: Model, joints: _JointOptions, options: features.Feat
                 "activations."
             )
     _check_joints(model, joints)
+    features.check(model, options, "joints")
     features.check(model, options, "springs")
     _check_springs(model)
     features.check(model, options, "attachments")

@@ -24,8 +24,10 @@ rests and enabled flags at its next replay; a reset starts the Dahl hysteresis o
 as SolverVBD's does. The joints give ``BODY_PARENT_F`` their terms (``parent_terms``).
 
 SolverIPC refuses, on a rod's degree of freedom, joint friction, armature, a ``joint_stiffness`` or ``joint_damping``
-other than 0, a target mode other than NONE, a negative gain and a finite limit, as SolverKamino does. The other hooks
-are those of ``features`` (its docstring).
+other than 0, a target mode other than NONE, a negative gain, a finite limit and an effort limit below Newton's default
+(1e6), as SolverKamino does: a rod's response is its material. It refuses the Dahl attributes other than 0 on a joint
+that is not a rod joint, where SolverVBD does not read them either, and a negative one on a rod joint, so that every
+input takes effect or is refused. The other hooks are those of ``features`` (its docstring).
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ import warp as wp
 
 from newton import MAXVAL, JointTargetMode, JointType, ModelFlags
 
+from ..kernels import _EFFORT_LIMIT
 from ..scene import _quat_to_matrix_np
 
 if TYPE_CHECKING:
@@ -80,15 +83,38 @@ def _dahl(model: Model) -> tuple:
 
 
 def check(model: Model, options: FeatureOptions, at: str) -> None:
-    """Nothing: the rod joints' degrees of freedom are checked through ``joint_refusal`` and their layout by
-    ``take_rods``."""
+    """At ``"joints"``: ``NotImplementedError`` for a Dahl attribute (``model.vbd.dahl_eps_max``, ``dahl_tau``) other
+    than 0 on a joint that is not a rod joint, which nothing would read, and for a negative one, or one that is not a
+    number, on a rod joint. The rod joints' degrees of freedom are checked through ``joint_refusal`` and their layout
+    by ``take_rods``."""
+    eps_max, tau = _dahl(model)
+    if at != "joints" or eps_max is None or tau is None or model.joint_count == 0:
+        return
+    joint_type = model.joint_type.numpy()
+    rod = joint_type == int(JointType.ROD)
+    for name, values in (("dahl_eps_max", eps_max.numpy()), ("dahl_tau", tau.numpy())):
+        other = np.flatnonzero(~rod & (values != 0.0))
+        if len(other):
+            j = int(other[0])
+            raise NotImplementedError(
+                f"SolverIPC: the {JointType(int(joint_type[j])).name} joint {j} has model.vbd.{name} "
+                f"{float(values[j])!r}; set it to 0. Dahl hysteresis acts on rod joints only, as in SolverVBD."
+            )
+        bad = np.flatnonzero(rod & ~(values >= 0.0))
+        if len(bad):
+            j = int(bad[0])
+            raise NotImplementedError(
+                f"SolverIPC: the ROD joint {j} has model.vbd.{name} {float(values[j])!r}; make it 0 or positive. A rod "
+                "joint has Dahl hysteresis where dahl_eps_max and dahl_tau are both above 0."
+            )
 
 
 def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
     """The first degree of freedom of a rod joint refused in ``category``: ``"friction"``, a ``joint_friction`` other
     than 0; ``"armature"``, a ``joint_armature`` other than 0; ``"drive"``, a ``joint_stiffness`` or ``joint_damping``
-    other than 0, a target mode other than NONE, or a ``joint_target_ke`` or ``joint_target_kd`` that is negative or
-    not a number; ``"limit"``, a finite bound with a ``joint_limit_ke`` above 0."""
+    other than 0, a target mode other than NONE, a ``joint_target_ke`` or ``joint_target_kd`` that is negative or not
+    a number, or a ``joint_effort_limit`` below Newton's default 1e6, which bounds a drive's force where a rod has no
+    drive; ``"limit"``, a finite bound with a ``joint_limit_ke`` above 0."""
     rod = dofs.kind == int(JointType.ROD)
     if not rod.any():
         return None
@@ -129,6 +155,15 @@ def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
                     "make it 0 or positive. A rod's stiffness and damping are not negative",
                 )
             )
+        effort = dofs.value("joint_effort_limit")
+        found.append(
+            dofs.refusal(
+                np.flatnonzero(rod & ~(effort >= _EFFORT_LIMIT)),
+                lambda d: f"joint_effort_limit {float(effort[d])!r}",
+                f"raise it to {_EFFORT_LIMIT:g}, Newton's default. A rod's stiffness and damping are its material, "
+                "which no drive's effort limit bounds",
+            )
+        )
         found = [r for r in found if r is not None]
         return min(found, key=lambda r: r[0]) if found else None
     if category == "limit":

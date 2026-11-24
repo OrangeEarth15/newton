@@ -17,11 +17,11 @@ nothing:
 
 - ``check(model, options, at)``: raise ``NotImplementedError`` for what the module refuses of ``model`` at the check
   ``at`` names, among the solver's own checks: ``"tendons"`` (after the body variants, before the muscles),
-  ``"constraints"`` (before MuJoCo's equality rows), ``"springs"`` and ``"attachments"`` (before the other checks of
-  springs and of particle-body attachments) and ``"shapes"`` (the last check of the model), when the solver is built
-  and when it builds its solve again; the constraints and the attachments also when ``notify_model_changed`` reports
-  ``CONSTRAINT_PROPERTIES``; and ``"options"``, among the checks of the constructor's options. ``options`` is
-  ``FeatureOptions``.
+  ``"constraints"`` (before MuJoCo's equality rows), ``"joints"`` (after the joints' own checks), ``"springs"`` and
+  ``"attachments"`` (before the other checks of springs and of particle-body attachments) and ``"shapes"`` (the last
+  check of the model), when the solver is built and when it builds its solve again; the constraints and the attachments
+  also when ``notify_model_changed`` reports ``CONSTRAINT_PROPERTIES``; and ``"options"``, among the checks of the
+  constructor's options. ``options`` is ``FeatureOptions``.
 - ``joint_refusal(category, dofs)``: what the module refuses of the joints' degrees of freedom in ``category``, as
   ``(dof, message)`` for the first such degree of freedom, or None. ``joints._check_joints`` asks for the categories
   ``"friction"``, then ``"armature"``, ``"drive"`` and ``"limit"``, among its own checks, and raises the refusal of

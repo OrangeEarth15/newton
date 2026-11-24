@@ -380,8 +380,9 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
   it with the cubic limit of its joints, and takes one with both bounds negative as a free joint. See
   :ref:`ipc-distance-joints`.
 | :sup:`20` SolverIPC takes rod joints with Newton's strain, without its cap on the bend, and SolverVBD's Dahl
-  hysteresis; it raises ``NotImplementedError`` for friction, armature, limits, ``joint_stiffness``, ``joint_damping``
-  and target modes on their degrees of freedom, as SolverKamino does. See :ref:`ipc-rods`.
+  hysteresis; it raises ``NotImplementedError`` for friction, armature, limits, ``joint_stiffness``, ``joint_damping``,
+  target modes and an effort limit below 1e6 on their degrees of freedom, as SolverKamino does, and for SolverVBD's
+  Dahl attributes on other joints. See :ref:`ipc-rods`.
 
 **Joint properties**
 
@@ -473,14 +474,14 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
      - |no| :sup:`15`
 
 | :sup:`2` Not enforced for BALL joints in SemiImplicit.
-| :sup:`15` SolverIPC takes these properties on revolute and prismatic joints, on ball joints (per axis of the
-  parent's joint frame, on the rotation vector of the joint's rotation), and on D6 joints of one axis or of two
-  angular axes (universal joints); it raises ``NotImplementedError`` for them on free joints, on D6 joints of three
-  angular axes and on rod joints, but for a rod joint's ``joint_rest_q``, its rest, and its effort limit, which it does
-  not read. Joint friction is libuipc's smoothed friction, which creeps below ``eps_velocity``; a model with joint
+| :sup:`15` SolverIPC takes these properties on revolute and prismatic joints, on ball joints (per axis of the parent's
+  joint frame, on the rotation vector of the joint's rotation), and on D6 joints of one axis or of two angular axes
+  (universal joints); it raises ``NotImplementedError`` for them on free joints, on D6 joints of three angular axes and
+  on rod joints, but for a rod joint's ``joint_rest_q``, its rest, and an effort limit of 1e6 or more, which bounds
+  nothing. Joint friction is libuipc's smoothed friction, which creeps below ``eps_velocity``; a model with joint
   friction takes tighter Newton tolerances. An effort limit below 1e6 bounds the drive's force as decided at the start
-  of every step (where MuJoCo clamps it), so a step that crosses the bound takes it one step late. The solver warns of
-  a velocity limit below 1e6, which it does not enforce. See :ref:`ipc-joints`.
+  of every step (where MuJoCo clamps it), so a step that crosses the bound takes it one step late. The solver warns of a
+  velocity limit below 1e6, which it does not enforce. See :ref:`ipc-joints`.
 | :sup:`16` SolverIPC enforces a limit, of a revolute, prismatic or universal joint's coordinate, as libuipc's cubic
   penalty, set to push back with ``joint_limit_ke`` times the overshoot at an overshoot of 1e-3 rad or m, more steeply
   beyond, and damps a joint that starts a step past a limit by ``joint_limit_kd``, as Featherstone and SemiImplicit

@@ -19,8 +19,9 @@
 * The solve: captured steps equal eager ones; a step solved again on lists grown after an overflow takes the rods and
   their hysteresis; gains and rests written after the solver was built take effect at the next step; a disabled rod
   joint acts on nothing; two independent worlds step as each alone; a reset starts the hysteresis anew.
-* The refusals: joint friction, armature, ``joint_stiffness``, ``joint_damping``, a target mode, negative gains and
-  finite limits on a rod's degrees of freedom; a rod joint of another layout than ``add_joint_rod``'s.
+* The refusals: joint friction, armature, ``joint_stiffness``, ``joint_damping``, a target mode, negative gains,
+  finite limits and an effort limit below 1e6 on a rod's degrees of freedom; a rod joint of another layout than
+  ``add_joint_rod``'s; SolverVBD's Dahl attributes other than 0 on another joint, or negative on a rod joint.
 """
 
 import unittest
@@ -422,8 +423,9 @@ def test_grown_lists_keep_the_rods(test, device):
         )
         builder.add_rod(rod=straight, bend_stiffness=2.0, bend_damping=0.1)
         model = builder.finalize(device=device)
-        model.vbd.dahl_eps_max.fill_(0.3)
-        model.vbd.dahl_tau.fill_(0.05)
+        rods = model.joint_type.numpy() == int(newton.JointType.ROD)  # the first segment hangs on a free joint
+        model.vbd.dahl_eps_max.assign(np.where(rods, 0.3, 0.0).astype(np.float32))
+        model.vbd.dahl_tau.assign(np.where(rods, 0.05, 0.0).astype(np.float32))
         solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
         regrown = []
         regrow = solver._regrow
@@ -512,7 +514,9 @@ def test_independent_worlds(test, device):
 
 
 def test_refusals(test, device):
-    """What SolverIPC refuses of a rod joint, each with its message."""
+    """What SolverIPC refuses of a rod joint, each with its message: among them an effort limit below Newton's default
+    on a rod's degree of freedom, and SolverVBD's Dahl attributes other than 0 on a joint that is not a rod joint or
+    negative on one, which would otherwise take no effect."""
 
     def model_of(dof=None, mode=None, layout=False):
         builder = newton.ModelBuilder()
@@ -529,6 +533,25 @@ def test_refusals(test, device):
             builder.joint_axis[s], builder.joint_axis[s + 1] = builder.joint_axis[s + 1], builder.joint_axis[s]
         return builder.finalize(device=device)
 
+    def with_dahl(on, eps_max=0.0, tau=0.0):
+        """A hinge to the world and a rod joint below it, SolverVBD's Dahl attributes 0 but on the joint ``on``."""
+        builder = newton.ModelBuilder()
+        newton.solvers.SolverVBD.register_custom_attributes(builder)
+        top = builder.add_link(xform=wp.transform((0.0, 0.0, 1.0), wp.quat_identity()))
+        builder.add_shape_box(top, hx=0.1, hy=0.1, hz=0.1)
+        hinge = builder.add_joint_revolute(-1, top, axis=(1.0, 0.0, 0.0))
+        bottom = builder.add_link(xform=wp.transform((0.0, 0.0, 0.5), wp.quat_identity()))
+        builder.add_shape_box(bottom, hx=0.1, hy=0.1, hz=0.1)
+        rod = builder.add_joint_rod(top, bottom, bend_stiffness=1.0)
+        builder.add_articulation([hinge, rod])
+        model = builder.finalize(device=device)
+        j = {"hinge": hinge, "rod": rod}[on]
+        for array, value in ((model.vbd.dahl_eps_max, eps_max), (model.vbd.dahl_tau, tau)):
+            values = np.zeros(model.joint_count, np.float32)
+            values[j] = value
+            array.assign(values)
+        return model
+
     takes = "SolverIPC's rod joints take the rod's material response only, as SolverKamino's do"
     remedy = "A rod's stiffness and damping are its joint_target_ke and joint_target_kd, its rest joint_rest_q"
     for name, model, message in (
@@ -539,6 +562,10 @@ def test_refusals(test, device):
         ("target mode", model_of(mode=newton.JointTargetMode.POSITION), "DOF 3 of the ROD joint 0 has the target mode POSITION; set it to NONE. A rod joint has no drive."),
         ("negative gain", model_of({"target_kd": (1, -1.0)}), "DOF 1 of the ROD joint 0 has joint_target_kd -1.0; make it 0 or positive."),
         ("limit", model_of({"limit_lower": (3, -0.5)}), f"DOF 3 of the ROD joint 0 has the limits [-0.5, {newton.MAXVAL!r}] with limit_ke 10000.0; set limit_ke to 0, or the bounds to -MAXVAL and MAXVAL. {takes}."),
+        ("effort limit", model_of({"effort_limit": (2, 100.0)}), "DOF 2 of the ROD joint 0 has joint_effort_limit 100.0; raise it to 1e+06, Newton's default. A rod's stiffness and damping are its material, which no drive's effort limit bounds."),
+        ("Dahl on another joint", with_dahl("hinge", eps_max=0.5), "the REVOLUTE joint 0 has model.vbd.dahl_eps_max 0.5; set it to 0. Dahl hysteresis acts on rod joints only, as in SolverVBD."),
+        ("Dahl's tau on another joint", with_dahl("hinge", tau=0.25), "the REVOLUTE joint 0 has model.vbd.dahl_tau 0.25; set it to 0."),
+        ("a negative Dahl attribute", with_dahl("rod", tau=-0.5), "the ROD joint 1 has model.vbd.dahl_tau -0.5; make it 0 or positive."),
         ("layout", model_of(layout=True), "the ROD joint 0 does not have three linear and three angular axes X, Y and Z in order"),
     ):  # fmt: skip
         with test.subTest(name):

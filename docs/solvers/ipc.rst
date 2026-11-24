@@ -1200,8 +1200,9 @@ bend and twist SolverVBD's Dahl hysteresis: a stress that lags the strain, so
 that a rod bent and released keeps part of its bend. Within a step the stress is
 linear in the strain, from its value and slope at the step's start; at its end
 it follows the step's own change of strain, as in SolverVBD. A
-:meth:`~newton.solvers.SolverIPC.reset` starts it anew, also per world. On other
-joints the attributes are not read, as in SolverVBD.
+:meth:`~newton.solvers.SolverIPC.reset` starts it anew, also per world. On
+other joints SolverVBD leaves the attributes unread; SolverIPC refuses them
+there, other than 0, as it refuses a negative one on a rod joint.
 
 ``joint_q`` and ``joint_qd`` of a rod joint are a free joint's (the child's
 anchor frame in the parent's), as :func:`newton.eval_ik` computes them, and
@@ -1394,9 +1395,13 @@ names the joint and its degree of freedom, and says what to change:
   ``enable_joint_effort_limit=False`` one below 1e6;
 - on a rod joint's degrees of freedom, as SolverKamino refuses them: joint
   friction, armature, limits, a ``joint_stiffness`` or ``joint_damping`` other
-  than 0, a target mode other than ``NONE``, and a negative ``joint_target_ke``
-  or ``joint_target_kd``; and a rod joint not of the layout
-  :meth:`~newton.ModelBuilder.add_joint_rod` makes (:ref:`ipc-rods`).
+  than 0, a target mode other than ``NONE``, a negative ``joint_target_ke`` or
+  ``joint_target_kd``, and a ``joint_effort_limit`` below Newton's default 1e6,
+  which would bound a drive and a rod has none; and a rod joint not of the
+  layout :meth:`~newton.ModelBuilder.add_joint_rod` makes (:ref:`ipc-rods`);
+- SolverVBD's Dahl attributes (``model.vbd.dahl_eps_max``, ``dahl_tau``) other
+  than 0 on a joint that is not a rod joint, which SolverVBD leaves unread, and
+  negative on a rod joint.
 
 A ``joint_velocity_limit`` below Newton's default 1e6 is not enforced: the
 solver warns once, with :class:`~newton.NewtonWarning`, and runs. Newton's URDF
@@ -2023,8 +2028,6 @@ features use. It takes these without reading them:
   gains act whatever it says (on free joints and on D6 joints that become ball or
   free joints, a mode other than ``NONE`` is refused);
 - ``joint_velocity_limit``, of which the solver warns once (:ref:`ipc-refused-joints`);
-- ``joint_effort_limit`` of a rod joint's degrees of freedom: a rod's gains are
-  its material, which no drive's bound limits (:ref:`ipc-rods`);
 - ``joint_limit_kd`` with ``enable_joint_limit_damping=False``;
 - ``Control.joint_act``;
 - the tendons' ``solreffriction`` and ``solimpfriction``, fixed and spatial; the
