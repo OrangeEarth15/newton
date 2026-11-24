@@ -254,6 +254,24 @@ def test_friction_takes_tight_default_tolerances(test, device):
     test.assertFalse(joint_terms._has_friction(_sliders(device)))
 
 
+def test_tolerances_given_at_their_default_values_are_kept(test, device):
+    """A model with joint friction keeps a Newton tolerance the caller gives, also one equal to SolverIPC's default
+    (0.05 m/s and 0.1 1/s), with a NewtonWarning as for any tolerance above 0.4 eps_velocity, and lowers only the one
+    left unset to 0.4 eps_velocity."""
+    model, _ = _hinged_box(device, friction=2.0)
+    bound = 0.4 * _EPS_V
+    for given, expected in (
+        ({"newton_velocity_tol": 0.05, "newton_transrate_tol": 0.1}, (0.05, 0.1)),
+        ({"newton_velocity_tol": 0.05}, (0.05, bound)),
+        ({"newton_transrate_tol": 0.1}, (bound, 0.1)),
+    ):
+        with test.subTest(**given):
+            with test.assertWarnsRegex(newton.NewtonWarning, "creeps instead of sliding"):
+                solver = newton.solvers.SolverIPC(model, **given)
+            tolerances = (solver._config.newton_velocity_tol, solver._config.newton_transrate_tol)
+            test.assertEqual(tolerances, expected)
+
+
 _EQUALITY = """
 <mujoco>
   <worldbody>
@@ -475,6 +493,7 @@ for name, func in (
     ("test_mimic_coefficients_change_in_place", test_mimic_coefficients_change_in_place),
     ("test_joint_friction", test_joint_friction),
     ("test_friction_takes_tight_default_tolerances", test_friction_takes_tight_default_tolerances),
+    ("test_tolerances_given_at_their_default_values_are_kept", test_tolerances_given_at_their_default_values_are_kept),
     ("test_joint_equality_rows_repeating_a_mimic", test_joint_equality_rows_repeating_a_mimic),
     ("test_parent_force_holds_the_friction", test_parent_force_holds_the_friction),
     ("test_grown_lists_keep_the_terms_inputs", test_grown_lists_keep_the_terms_inputs),

@@ -1,0 +1,1 @@
+SolverIPC keeps a Newton tolerance passed to its constructor whatever its value: a model with joint or tendon friction lowered one passed equal to its default (0.05 or 0.1) as if it had been left unset. Unreleased behaviour, so no release note.

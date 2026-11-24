@@ -1183,9 +1183,8 @@ friction needs a lower tolerance: 1.2 times the friction needs 0.25
 above the friction. The cost is Newton iterations: a chain of hinged links with
 friction falling next to a box resting on the ground takes 5.5 per step instead
 of 4.0. The solver lowers the tolerances without a warning. A tolerance passed
-to the constructor is kept, and one above 0.4 ``eps_velocity`` gets a
-:class:`~newton.NewtonWarning`; a tolerance passed at its default value counts
-as left at its default.
+to the constructor is kept, also when it equals the default, and one above 0.4
+``eps_velocity`` gets a :class:`~newton.NewtonWarning`.
 
 New coefficients of the mimic relations and tendons (``CONSTRAINT_PROPERTIES``,
 ``TENDON_PROPERTIES``), and the mimic penalties of new masses, take effect in

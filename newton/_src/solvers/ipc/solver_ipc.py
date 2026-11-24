@@ -667,6 +667,11 @@ class SolverIPC(SolverBase, CouplingInterface):
         # an entry of a coupled solver with proxies takes converged steps unless told otherwise: a proxy's feedback is
         # the force of the step's contact terms at its end (docs/solvers/ipc.rst > "Coupling")
         tolerances = _PROXY_TOLERANCES if _proxy_bodies(model).any() or _proxy_particles(model).any() else _TOLERANCES
+        # the Newton tolerances the caller gave, which a model with joint friction keeps (features.joint_terms)
+        self._tolerances_given = {
+            "newton_velocity_tol": newton_velocity_tol is not None,
+            "newton_transrate_tol": newton_transrate_tol is not None,
+        }
         if newton_velocity_tol is None:
             newton_velocity_tol = tolerances["newton_velocity_tol"]
         if newton_transrate_tol is None:

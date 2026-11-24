@@ -21,12 +21,13 @@ Newton's ``joint_q``, with convex potentials of ``L``:
 
 A model with friction on any degree of freedom of any joint (``joint_friction`` over all of them, revolute, prismatic,
 ball or other, whichever module holds it) or on a fixed tendon takes Newton tolerances of at most
-``_FRICTION_TOLERANCE`` times ``eps_velocity`` where it leaves them at their default (``_friction_tolerances``).
+``_FRICTION_TOLERANCE`` times ``eps_velocity`` where the caller leaves them unset (``_friction_tolerances``).
 libuipc's Newton loop ends when its step is below the tolerance, and within its smoothing band the friction is so stiff
 that Newton's steps there are short, the first from rest about ``f / (2 F)`` times ``eps_velocity`` for a load ``f``
 above the friction ``F``: at the default tolerances the loop would end inside the band, and a joint loaded beyond its
-friction would creep instead of sliding. A tolerance given above the bound gets a ``NewtonWarning``. MuJoCo's JOINT equality rows that repeat the
-mimic rows Newton's importers made of them are held by those (``held_equality_rows``).
+friction would creep instead of sliding. A tolerance the caller gives is kept whatever its value, and one above the
+bound gets a ``NewtonWarning``. MuJoCo's JOINT equality rows that repeat the mimic rows Newton's importers made of them
+are held by those (``held_equality_rows``).
 
 Refused: Newton's own tendons (``ModelBuilder.add_tendon``, spatial), MuJoCo's spatial tendons and actuators that
 drive a tendon, a mimic or tendon over a joint that becomes no revolute or prismatic joint, and the friction of free
@@ -476,19 +477,11 @@ def build(solver: SolverIPC, scene) -> None:
         )
 
 
-def _default_tolerances() -> dict:
-    """SolverIPC's default Newton tolerances, without and with a coupled solver's proxies, by name."""
-    from ..solver_ipc import _PROXY_TOLERANCES, _TOLERANCES  # noqa: PLC0415 (the solver imports this package)
-
-    names = ("newton_velocity_tol", "newton_transrate_tol")
-    return {name: (_TOLERANCES[name], _PROXY_TOLERANCES[name]) for name in names}
-
-
 def _friction_tolerances(solver: SolverIPC, friction: bool) -> list[str]:
-    """With ``friction`` (``_has_friction``), the Newton tolerances that are at SolverIPC's default and above
-    ``_FRICTION_TOLERANCE`` times ``eps_velocity`` lowered to it in the solver's config, which the solve about to be
-    built takes; without, the defaults this function lowered before put back. A tolerance the caller gave, which is not
-    a default, is left as it is (a value equal to a default is taken as the default); returned are those of them above
+    """With ``friction`` (``_has_friction``), the Newton tolerances the caller left at their default (``None``) that are
+    above ``_FRICTION_TOLERANCE`` times ``eps_velocity`` lowered to it in the solver's config, which the solve about to
+    be built takes; without, the defaults this function lowered before put back. A tolerance the caller gave is left as
+    it is, whatever its value, a default's among them (``solver._tolerances_given``); returned are those of them above
     the bound, as ``"name value"``."""
     config = solver._config
     lowered = getattr(solver, "_friction_tolerances_of", None)  # the defaults this function lowered
@@ -499,13 +492,13 @@ def _friction_tolerances(solver: SolverIPC, friction: bool) -> list[str]:
         return []
     if lowered is not None:
         return []
-    defaults, bound = _default_tolerances(), _FRICTION_TOLERANCE * config.eps_velocity
+    bound = _FRICTION_TOLERANCE * config.eps_velocity
     velocity, transrate = config.newton_velocity_tol, config.newton_transrate_tol
     loose = []
     for name, value in (("newton_velocity_tol", velocity), ("newton_transrate_tol", transrate)):
         if value <= bound:
             continue
-        if value not in defaults[name]:
+        if solver._tolerances_given[name]:
             loose.append(f"{name} {value:g}")
         elif name == "newton_velocity_tol":
             config.newton_velocity_tol = bound
