@@ -278,6 +278,14 @@ def _check_supported(model: Model, joints: _JointOptions, options: features.Feat
     features.check(model, options, "shapes")
 
 
+def _has_contact(layout) -> bool:
+    """Whether the engine of a scene laid out as ``layout`` (an ``ArrayLayout``) has contact: its contact primitives are
+    the finite-element vertices (particles, cloth and tetrahedra) and the surface vertices of the colliding shapes of the
+    bodies and the obstacles, and without any of them the half planes have nothing to meet either."""
+    bodies, obstacles = layout.body_vertex_offsets, layout.obstacle_offsets
+    return bool(layout.n_fem or bodies[-1] > bodies[0] or obstacles[-1] > obstacles[0])
+
+
 class SolverIPC(SolverBase, CouplingInterface):
     """Incremental Potential Contact solver for soft bodies, cloth and rigid bodies.
 
@@ -688,8 +696,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         options = {"bdf2_start": "bdf1"} if integrator == "bdf2" else {}
         # the moves of kinematic bodies and particles between steps, and of a coupled solver's proxies, are swept from
         # where the last step left them: the barrier's step sweeps them at its start and fails on one that meets a
-        # surface (docs/solvers/ipc.rst > "Kinematic bodies"); AL-IPC's collision-free sweeps carry the kinematic
-        # bodies along and push what they meet (docs/solvers/ipc.rst > "AL-IPC contact")
+        # surface (docs/solvers/ipc.rst > "Kinematic bodies"), where its engine has contact (_make_engine); AL-IPC's
+        # collision-free sweeps carry the kinematic bodies along and push what they meet (docs/solvers/ipc.rst >
+        # "AL-IPC contact")
         self._al_sweep = contact_constitution == "al-ipc"
         options["al_sweep_kinematic" if self._al_sweep else "sweep_kinematic"] = True
         # body_rotation="rigid": the rigid bodies' rotation as a rigid body's flight (docs/solvers/ipc.rst >
@@ -697,7 +706,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._rigid_rotation = body_rotation == "rigid"
         if self._rigid_rotation:
             options["affine_rotation"] = "rigid"
-        self._options = uipc_warp.EngineOptions(**options) if options else None
+        self._engine_options = options  # EngineOptions' arguments, which _make_engine gives every engine
         self._adaptive_kappa = bool(adaptive_kappa)
         self._thickness = float(thickness)
         self._cloth_strain_rate = float(cloth_strain_rate)
@@ -1068,8 +1077,14 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._forces = self._uipc_warp.arrays.ExternalAcceleration("newton_forces", self._force_blocks, device)
             inputs["elements"].append(self._forces)
         features.engine_inputs(self, inputs)  # the feature modules' element groups
+        options = dict(self._engine_options)
+        if not _has_contact(self._scene.layout()):
+            # the barrier's sweep of kinematic moves has no surface to sweep against, and libuipc-warp warns of an
+            # option that has no effect
+            options.pop("sweep_kinematic", None)
+        engine_options = self._uipc_warp.EngineOptions(**options) if options else None
         self._engine = self._uipc_warp.make_engine(
-            self._config, self._options, **inputs, device=device, capacity=capacity
+            self._config, engine_options, **inputs, device=device, capacity=capacity
         )
         if not np.array_equal(self._gravity, self._layout_gravity):
             # notify_model_changed changed gravity since the scene's parts were laid out with theirs: an engine built

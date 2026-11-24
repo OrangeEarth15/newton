@@ -630,9 +630,6 @@ add_basic_example_test(
     use_viewer=True,
     test_suffix="ipc",
 )
-# SolverIPC (an expected failure): in this model without contact libuipc-warp warns on stderr that the kinematic sweep
-# SolverIPC asks it for has no effect, output the test does not allow
-expect_example_failure(TestBasicExamples, "basic.example_basic_mimic_joint", "ipc")
 
 add_example_batch(
     TestBasicExamples,
@@ -749,9 +746,6 @@ add_basic_example_test(
     use_viewer=True,
     test_suffix="ipc",
 )
-# SolverIPC (an expected failure): in this model without contact libuipc-warp warns on stderr that the kinematic sweep
-# SolverIPC asks it for has no effect, output the test does not allow
-expect_example_failure(TestBasicExamples, "basic.example_basic_dzhanibekov", "ipc")
 
 add_basic_example_test(
     name="basic.example_basic_multi_solver_overlay",

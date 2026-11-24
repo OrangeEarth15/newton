@@ -519,6 +519,28 @@ def test_import_requires_the_kinematic_sweep(test, device):
         newton.solvers.SolverIPC._uipc_warp = imported
 
 
+def test_model_without_contact_asks_for_no_sweep(test, device):
+    """The barrier's sweep of kinematic moves needs a contact surface to sweep against, and SolverIPC asks libuipc-warp
+    for it only where the engine has one: a hinged box whose shape collides with nothing builds and steps without a
+    warning, where libuipc-warp warned that the option had no effect; the same box whose shape collides builds and steps
+    without one too, with the sweep that test_jump_through_a_surface_fails_the_step holds to its work."""
+    for collide in (False, True):
+        builder = newton.ModelBuilder()
+        cfg = newton.ModelBuilder.ShapeConfig(has_shape_collision=collide, has_particle_collision=collide)
+        pose = wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity())
+        link = builder.add_link(xform=pose)
+        builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+        builder.add_articulation([builder.add_joint_revolute(-1, link, parent_xform=pose)])
+        model = builder.finalize(device=device)
+        with test.subTest(collide=collide):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                solver = newton.solvers.SolverIPC(model)
+                s0, s1 = model.state(), model.state()
+                solver.step(s0, s1, None, None, 0.01)
+            test.assertEqual([f"{w.category.__name__}: {w.message}" for w in caught], [])
+
+
 def test_refused_first_step_takes_state_in_again(test, device):
     """With kinematic_motion="aim" a first step that the start check refuses, its state_in putting a kinematic box
     through a body, leaves the next step the first: the step again from the model's state, where the box is clear,
@@ -665,6 +687,7 @@ for name, func in (
     ("test_al_ipc_takes_aims_without_aiming_bodies", test_al_ipc_takes_aims_without_aiming_bodies),
     ("test_jump_through_a_surface_fails_the_step", test_jump_through_a_surface_fails_the_step),
     ("test_import_requires_the_kinematic_sweep", test_import_requires_the_kinematic_sweep),
+    ("test_model_without_contact_asks_for_no_sweep", test_model_without_contact_asks_for_no_sweep),
     ("test_refused_first_step_takes_state_in_again", test_refused_first_step_takes_state_in_again),
     ("test_aims_pass_the_twist_through", test_aims_pass_the_twist_through),
     ("test_default_picks_the_mode_per_solver", test_default_picks_the_mode_per_solver),
