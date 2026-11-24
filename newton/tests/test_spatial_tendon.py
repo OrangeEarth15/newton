@@ -5,11 +5,130 @@ import unittest
 import warnings
 
 import numpy as np
+import warp as wp
 
 import newton
 from newton.selection import ArticulationView
 from newton.solvers import SolverMuJoCo
 from newton.tests.unittest_utils import MUJOCO_MODULES, requires
+
+# the models of the tests that simulate, which TestSpatialTendonIPC simulates with SolverIPC too
+SIMULATION_MJCF = """<?xml version="1.0" ?>
+<mujoco model="spatial_tendon_spring_test">
+  <option timestep="0.002" gravity="0 0 0"/>
+  <worldbody>
+    <body name="base" pos="0 0 1">
+      <joint name="j1" type="hinge" axis="0 1 0"/>
+      <geom type="capsule" size="0.02 0.1"/>
+      <site name="s0" pos="0.1 0 0"/>
+      <body name="link2" pos="0 0 0.2">
+        <joint name="j2" type="hinge" axis="0 1 0"/>
+        <geom type="capsule" size="0.02 0.1"/>
+        <site name="s1" pos="0.1 0 0"/>
+      </body>
+    </body>
+  </worldbody>
+  <tendon>
+    <spatial name="sp1" stiffness="500" damping="50" springlength="0.01">
+      <site site="s0"/>
+      <site site="s1"/>
+    </spatial>
+  </tendon>
+</mujoco>
+"""
+
+ACTUATOR_MJCF = """<?xml version="1.0" ?>
+<mujoco model="spatial_tendon_actuator">
+  <option timestep="0.002" gravity="0 0 0"/>
+
+  <worldbody>
+    <body name="base" pos="0 0 0.5">
+      <joint name="j1" type="hinge" axis="0 1 0"/>
+      <geom type="capsule" size="0.02 0.1"/>
+      <site name="s0" pos="0.1 0 0"/>
+
+      <body name="link2" pos="0 0 0.2">
+        <joint name="j2" type="hinge" axis="0 1 0"/>
+        <geom type="capsule" size="0.02 0.1"/>
+        <site name="s1" pos="0.1 0 0"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <tendon>
+    <spatial name="sp_act" damping="10">
+      <site site="s0"/>
+      <site site="s1"/>
+    </spatial>
+  </tendon>
+
+  <actuator>
+    <position name="act1" tendon="sp_act" kp="1000"/>
+  </actuator>
+</mujoco>
+"""
+
+MIXED_MJCF = """<?xml version="1.0" ?>
+<mujoco model="mixed_tendons">
+  <option timestep="0.002" gravity="0 0 0"/>
+
+  <worldbody>
+    <body name="base" pos="0 0 0.5">
+      <joint name="j1" type="hinge" axis="0 1 0"/>
+      <geom type="capsule" size="0.02 0.1"/>
+      <site name="s0" pos="0.1 0 0"/>
+
+      <body name="link2" pos="0 0 0.2">
+        <joint name="j2" type="hinge" axis="0 1 0"/>
+        <geom type="capsule" size="0.02 0.1"/>
+        <site name="s1" pos="0.1 0 0"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <tendon>
+    <fixed name="fixed_t" stiffness="100">
+      <joint joint="j1" coef="1"/>
+      <joint joint="j2" coef="-1"/>
+    </fixed>
+    <spatial name="spatial_t" stiffness="200" damping="10">
+      <site site="s0"/>
+      <site site="s1"/>
+    </spatial>
+  </tendon>
+</mujoco>
+"""
+
+DISAMBIGUATION_MJCF = """<?xml version="1.0" ?>
+<mujoco model="disambiguation_test">
+  <option timestep="0.002" gravity="0 0 0"/>
+
+  <worldbody>
+    <body name="base" pos="0 0 0.5">
+      <joint name="j1" type="hinge" axis="0 1 0"/>
+      <geom type="capsule" size="0.02 0.1"/>
+      <!-- Geom and site share the same name "shared_name" -->
+      <geom name="shared_name" type="cylinder" size="0.03 0.01" pos="0 0 0.05"
+            contype="0" conaffinity="0"/>
+      <site name="shared_name" pos="0.1 0 0"/>
+
+      <body name="link2" pos="0 0 0.2">
+        <joint name="j2" type="hinge" axis="0 1 0"/>
+        <geom type="capsule" size="0.02 0.1"/>
+        <site name="s1" pos="0.1 0 0"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <tendon>
+    <spatial name="disambig_tendon">
+      <site site="shared_name"/>
+      <geom geom="shared_name"/>
+      <site site="s1"/>
+    </spatial>
+  </tendon>
+</mujoco>
+"""
 
 
 class TestMujocoSpatialTendon(unittest.TestCase):
@@ -432,29 +551,7 @@ class TestMujocoSpatialTendon(unittest.TestCase):
         """Verify that a spatial tendon with stiffness exerts forces and moves joints."""
         # Use an explicit springlength shorter than the initial tendon length
         # so the spring pulls the joints from the start.
-        mjcf = """<?xml version="1.0" ?>
-<mujoco model="spatial_tendon_spring_test">
-  <option timestep="0.002" gravity="0 0 0"/>
-  <worldbody>
-    <body name="base" pos="0 0 1">
-      <joint name="j1" type="hinge" axis="0 1 0"/>
-      <geom type="capsule" size="0.02 0.1"/>
-      <site name="s0" pos="0.1 0 0"/>
-      <body name="link2" pos="0 0 0.2">
-        <joint name="j2" type="hinge" axis="0 1 0"/>
-        <geom type="capsule" size="0.02 0.1"/>
-        <site name="s1" pos="0.1 0 0"/>
-      </body>
-    </body>
-  </worldbody>
-  <tendon>
-    <spatial name="sp1" stiffness="500" damping="50" springlength="0.01">
-      <site site="s0"/>
-      <site site="s1"/>
-    </spatial>
-  </tendon>
-</mujoco>
-"""
+        mjcf = SIMULATION_MJCF
         individual_builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         individual_builder.add_mjcf(mjcf, ignore_inertial_definitions=True, parse_sites=True)
 
@@ -505,36 +602,7 @@ class TestMujocoSpatialTendon(unittest.TestCase):
     @requires(*MUJOCO_MODULES)
     def test_spatial_tendon_with_actuator(self):
         """Verify that an actuator can target a spatial tendon."""
-        mjcf = """<?xml version="1.0" ?>
-<mujoco model="spatial_tendon_actuator">
-  <option timestep="0.002" gravity="0 0 0"/>
-
-  <worldbody>
-    <body name="base" pos="0 0 0.5">
-      <joint name="j1" type="hinge" axis="0 1 0"/>
-      <geom type="capsule" size="0.02 0.1"/>
-      <site name="s0" pos="0.1 0 0"/>
-
-      <body name="link2" pos="0 0 0.2">
-        <joint name="j2" type="hinge" axis="0 1 0"/>
-        <geom type="capsule" size="0.02 0.1"/>
-        <site name="s1" pos="0.1 0 0"/>
-      </body>
-    </body>
-  </worldbody>
-
-  <tendon>
-    <spatial name="sp_act" damping="10">
-      <site site="s0"/>
-      <site site="s1"/>
-    </spatial>
-  </tendon>
-
-  <actuator>
-    <position name="act1" tendon="sp_act" kp="1000"/>
-  </actuator>
-</mujoco>
-"""
+        mjcf = ACTUATOR_MJCF
         individual_builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         individual_builder.add_mjcf(mjcf, ignore_inertial_definitions=True)
 
@@ -565,36 +633,7 @@ class TestMujocoSpatialTendon(unittest.TestCase):
     @requires(*MUJOCO_MODULES)
     def test_mixed_fixed_and_spatial_tendons(self):
         """Verify that fixed and spatial tendons coexist correctly."""
-        mjcf = """<?xml version="1.0" ?>
-<mujoco model="mixed_tendons">
-  <option timestep="0.002" gravity="0 0 0"/>
-
-  <worldbody>
-    <body name="base" pos="0 0 0.5">
-      <joint name="j1" type="hinge" axis="0 1 0"/>
-      <geom type="capsule" size="0.02 0.1"/>
-      <site name="s0" pos="0.1 0 0"/>
-
-      <body name="link2" pos="0 0 0.2">
-        <joint name="j2" type="hinge" axis="0 1 0"/>
-        <geom type="capsule" size="0.02 0.1"/>
-        <site name="s1" pos="0.1 0 0"/>
-      </body>
-    </body>
-  </worldbody>
-
-  <tendon>
-    <fixed name="fixed_t" stiffness="100">
-      <joint joint="j1" coef="1"/>
-      <joint joint="j2" coef="-1"/>
-    </fixed>
-    <spatial name="spatial_t" stiffness="200" damping="10">
-      <site site="s0"/>
-      <site site="s1"/>
-    </spatial>
-  </tendon>
-</mujoco>
-"""
+        mjcf = MIXED_MJCF
         individual_builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         individual_builder.add_mjcf(mjcf, ignore_inertial_definitions=True)
 
@@ -769,36 +808,7 @@ class TestMujocoSpatialTendon(unittest.TestCase):
     @requires(*MUJOCO_MODULES)
     def test_spatial_tendon_site_geom_disambiguation(self):
         """Verify that sites and geoms sharing the same name are correctly disambiguated."""
-        mjcf = """<?xml version="1.0" ?>
-<mujoco model="disambiguation_test">
-  <option timestep="0.002" gravity="0 0 0"/>
-
-  <worldbody>
-    <body name="base" pos="0 0 0.5">
-      <joint name="j1" type="hinge" axis="0 1 0"/>
-      <geom type="capsule" size="0.02 0.1"/>
-      <!-- Geom and site share the same name "shared_name" -->
-      <geom name="shared_name" type="cylinder" size="0.03 0.01" pos="0 0 0.05"
-            contype="0" conaffinity="0"/>
-      <site name="shared_name" pos="0.1 0 0"/>
-
-      <body name="link2" pos="0 0 0.2">
-        <joint name="j2" type="hinge" axis="0 1 0"/>
-        <geom type="capsule" size="0.02 0.1"/>
-        <site name="s1" pos="0.1 0 0"/>
-      </body>
-    </body>
-  </worldbody>
-
-  <tendon>
-    <spatial name="disambig_tendon">
-      <site site="shared_name"/>
-      <geom geom="shared_name"/>
-      <site site="s1"/>
-    </spatial>
-  </tendon>
-</mujoco>
-"""
+        mjcf = DISAMBIGUATION_MJCF
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         builder.add_mjcf(mjcf, parse_sites=True)
         model = builder.finalize()
@@ -937,6 +947,86 @@ class TestMujocoSpatialTendon(unittest.TestCase):
             self.assertGreater(len(wrap_warnings), 0, "Expected a warning about out-of-bounds wrap range")
             # The tendon should have been skipped
             self.assertEqual(solver.mj_model.ntendon, 0)
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "SolverIPC runs on CUDA devices only")
+class TestSpatialTendonIPC(unittest.TestCase):
+    """The tests above that simulate a spatial tendon, with SolverIPC, which takes MuJoCo's spatial tendons as
+    libuipc-warp's (their length and moment arms are MuJoCo's): the same models and the same checks."""
+
+    @staticmethod
+    def _run(model, steps, dt=0.002):
+        # Newton tolerances of 1e-6: the models turn freely about their first joint, which drifts a world by its
+        # Newton step's error within SolverIPC's default tolerances (3.5e-3 rad over the simulation test's 500 steps)
+        solver = newton.solvers.SolverIPC(model, newton_velocity_tol=1e-6, newton_transrate_tol=1e-6)
+        state_in, state_out = model.state(), model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_in)
+        for _ in range(steps):
+            solver.step(state_in, state_out, model.control(), None, dt)
+            state_in, state_out = state_out, state_in
+        return state_in
+
+    @requires("uipc_warp")
+    def test_spatial_tendon_simulation_ipc(self):
+        """test_spatial_tendon_simulation with SolverIPC: the spring pulls the joints, both worlds alike."""
+        individual_builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        individual_builder.add_mjcf(SIMULATION_MJCF, ignore_inertial_definitions=True, parse_sites=True)
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        for _ in range(2):
+            builder.add_world(individual_builder)
+        model = builder.finalize()
+        q_initial = model.joint_q.numpy().copy()
+        joint_q = self._run(model, 500).joint_q.numpy()
+        self.assertGreater(np.max(np.abs(joint_q - q_initial)), 0.001, "Tendon spring should have moved joints")
+        self.assertTrue(np.all(np.isfinite(joint_q)), "Joint positions should be finite")
+        n = len(joint_q) // 2
+        np.testing.assert_allclose(joint_q[:n], joint_q[n:], rtol=0, atol=1e-3)
+
+    # SolverIPC (an expected failure): it reads no MuJoCo actuator controls, so it refuses an actuator that drives a
+    # tendon (NotImplementedError when the solver is built)
+    @unittest.expectedFailure
+    @requires("uipc_warp")
+    def test_spatial_tendon_with_actuator_ipc(self):
+        """test_spatial_tendon_with_actuator with SolverIPC."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        builder.add_mjcf(ACTUATOR_MJCF, ignore_inertial_definitions=True)
+        joint_q = self._run(builder.finalize(), 200).joint_q.numpy()
+        self.assertTrue(np.all(np.isfinite(joint_q)), "Joint positions should be finite")
+
+    @requires("uipc_warp")
+    def test_mixed_fixed_and_spatial_tendons_ipc(self):
+        """test_mixed_fixed_and_spatial_tendons with SolverIPC: a fixed and a spatial tendon in each of two worlds."""
+        individual_builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        individual_builder.add_mjcf(MIXED_MJCF, ignore_inertial_definitions=True)
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        for _ in range(2):
+            builder.add_world(individual_builder)
+        joint_q = self._run(builder.finalize(), 200).joint_q.numpy()
+        self.assertTrue(np.all(np.isfinite(joint_q)), "Joint positions should be finite")
+
+    @requires("uipc_warp")
+    def test_spatial_tendon_site_geom_disambiguation_ipc(self):
+        """test_spatial_tendon_site_geom_disambiguation with SolverIPC: the path's geom entry is the cylinder, not the
+        site of the same name, which SolverIPC would refuse there; the solver takes the model and steps."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        builder.add_mjcf(DISAMBIGUATION_MJCF, parse_sites=True)
+        joint_q = self._run(builder.finalize(), 10).joint_q.numpy()
+        self.assertTrue(np.all(np.isfinite(joint_q)))
+
+    @requires("uipc_warp")
+    def test_spatial_tendon_multi_world_wrap_offsets_ipc(self):
+        """test_spatial_tendon_multi_world_wrap_offsets with SolverIPC: in three worlds of the model whose tendon wraps a
+        cylinder, every world's tendon acts on its own world's bodies, so the worlds, set swinging alike, move alike."""
+        individual_builder = newton.ModelBuilder()
+        individual_builder.add_mjcf(TestMujocoSpatialTendon.SPATIAL_TENDON_MJCF, parse_sites=True)
+        builder = newton.ModelBuilder()
+        for _ in range(3):
+            builder.add_world(individual_builder)
+        model = builder.finalize()
+        model.joint_qd.assign(np.tile([1.0, -2.0], 3).astype(np.float32))
+        joint_q = self._run(model, 100).joint_q.numpy().reshape(3, -1)
+        self.assertGreater(np.abs(joint_q[0]).max(), 1e-2, "the joints have swung")
+        np.testing.assert_allclose(joint_q[1:], np.broadcast_to(joint_q[0], (2, joint_q.shape[1])), rtol=0, atol=1e-5)
 
 
 if __name__ == "__main__":

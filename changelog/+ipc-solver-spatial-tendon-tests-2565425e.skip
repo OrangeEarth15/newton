@@ -1,0 +1,1 @@
+Run SolverIPC in Newton's spatial tendon tests that simulate: the spring that moves two joints in two worlds, fixed and spatial tendons together, a path whose geom and site share a name, and three worlds whose tendons wrap a cylinder; the tendon actuator, which SolverIPC refuses, is an expected failure.
