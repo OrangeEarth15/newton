@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import gc
+import inspect
 import logging
 import re
 import warnings
@@ -84,7 +85,6 @@ from .scene import (
     _check_independent_content,
     _check_springs,
     _collect_planes,
-    _default_d_hat,
     _default_kinematic_motion,
     _element_inputs_now,
     _engine_dyadic,
@@ -96,6 +96,7 @@ from .scene import (
     _proxy_bodies,
     _proxy_particles,
     _scene_inputs_now,
+    _set_d_hats,
     _spreads,
     _subscene_of_shape,
     _vertex_gravity,
@@ -160,9 +161,11 @@ def _capabilities(uipc_warp) -> dict[str, bool]:
     """Whether libuipc-warp has the capabilities SolverIPC calls that a build of ``_UIPC_WARP_MINIMUM`` may lack, a
     development build among them, by name: the rotation of rigid bodies as a rigid body's (``body_rotation="rigid"``,
     the default), the sweeps of kinematic moves (the barrier's, ``sweep_kinematic``, and AL-IPC's), the frame
-    restart (an entry of a coupler that restarts its steps) and the check of the positions written between steps."""
+    restart (an entry of a coupler that restarts its steps), the check of the positions written between steps and a
+    ``d_hat`` per part of the scene (the default ``d_hat`` of every shape and particle)."""
     options = uipc_warp.EngineOptions.names()
     engine = uipc_warp.SimEngine
+    scene = uipc_warp.arrays.ArrayScene
     try:
         import uipc_warp.ext.start_check  # noqa: PLC0415
 
@@ -176,6 +179,10 @@ def _capabilities(uipc_warp) -> dict[str, bool]:
         and hasattr(engine, "place_kinematic"),
         "the frame restart (SimEngine.enable_frame_restart)": hasattr(engine, "enable_frame_restart"),
         "the start check of written positions (uipc_warp.ext.start_check)": start_check,
+        "ArrayScene's d_hat per part": all(
+            "d_hat" in inspect.signature(add).parameters
+            for add in (scene.add_vertices, scene.add_obstacle, scene.add_affine_body)
+        ),
     }
 
 
@@ -382,9 +389,9 @@ class SolverIPC(SolverBase, CouplingInterface):
             follows each step's ``dt`` (see :ref:`ipc-contact`); with independent
             worlds every world's own range, that of the world alone (see
             :ref:`ipc-worlds`).
-        d_hat: Barrier activation distance [m]. ``None`` takes libuipc's
-            0.01 m, or less for a model with small colliding features (see
-            :ref:`ipc-d-hat`).
+        d_hat: Barrier activation distance [m] of every shape and particle.
+            ``None`` gives each its own: libuipc's 0.01 m, or less where it
+            or what it can touch is small (see :ref:`ipc-d-hat`).
         thickness: Contact thickness of the vertices of cloth and tetrahedra
             [m]; free particles take their radius and shapes their margin
             (see :ref:`ipc-contact`).
@@ -474,8 +481,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         ``newton_velocity_tol * dt``: lower the tolerance where a body
         should gain less velocity per step (:ref:`ipc-tolerances`). A
         resting contact settles just inside ``d_hat``, which by default
-        stays below the smallest colliding features (:ref:`ipc-d-hat`). The
-        barrier needs a gap at the start (:ref:`ipc-start`).
+        stays below the small features each part can touch
+        (:ref:`ipc-d-hat`). The barrier needs a gap at the start
+        (:ref:`ipc-start`).
     """
 
     class ObservableKind(SolverBase.ObservableKind):
@@ -905,8 +913,6 @@ class SolverIPC(SolverBase, CouplingInterface):
         # global world's, which every part overrides with the gravity of its own world
         self._gravity = self._layout_gravity = _world_gravity(self)
         self._config.gravity = tuple(self._gravity[-1])
-        if not self._d_hat_given:
-            self._config.d_hat = _default_d_hat(model)
 
         # several local worlds: one subscene each, all of them meeting the global entities' subscene 0; libuipc-warp
         # solves them apart from each other (independent worlds) unless coupled_worlds asks for one solve
@@ -918,6 +924,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             kappa_corridor=self._adaptive_kappa, independent_subscenes=self._independent
         )
         elements = _contact_elements(model, self._worlds, self._aims)
+        _set_d_hats(self, elements)  # every shape's and particle's d_hat, and the solve's
         for _ in range(1, elements.count):
             scene.contact_element()
         if self._worlds is not None:

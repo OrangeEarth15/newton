@@ -219,6 +219,128 @@ def test_default_d_hat_follows_small_free_particles(test, device):
         test.assertEqual(newton.solvers.SolverIPC(particles(**kwargs))._config.d_hat, 0.01, kwargs)
 
 
+def _vertex_d_hat(solver):
+    """The d_hat of every vertex as the solver's scene gives it to libuipc-warp, and the scene's layout."""
+    return solver._scene.engine_inputs(solver._config, "cpu")["d_hat"], solver._scene.layout()
+
+
+def test_d_hat_per_shape(test, device):
+    """Without a d_hat argument every shape and particle takes a d_hat of its own, as a libuipc geometry takes its meta
+    d_hat: libuipc's 0.01 m, lowered to a quarter of its own size and of the size of every part it can touch, so that a
+    pair, which takes the mean of its two values, stays below both parts' shares.
+
+    A box of half size 0.1 m and one of 8 mm on the ground, in collision groups that never meet: the large box's
+    vertices carry 0.01 m and it rests 5 to 10 mm above the ground, the small box's carry 2 mm and it rests less than
+    2 mm above it. With one value per model the large box took the small one's 2 mm. In one group both carry 2 mm on
+    every vertex, the model's value as before.
+    """
+
+    def model(groups):
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(collision_group=-1))  # meets both groups
+        for (half, x), group in zip(((0.1, 0.0), (0.008, 0.5)), groups, strict=True):
+            body = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, half + 0.02), wp.quat_identity()))
+            cfg = newton.ModelBuilder.ShapeConfig(collision_group=group)
+            builder.add_shape_box(body, hx=half, hy=half, hz=half, cfg=cfg)
+        return builder.finalize(device=device)
+
+    solver = newton.solvers.SolverIPC(model((1, 1)))
+    test.assertAlmostEqual(solver._config.d_hat, 0.002)
+    np.testing.assert_array_equal(_vertex_d_hat(solver)[0], solver._config.d_hat)
+
+    m = model((1, 2))
+    solver = newton.solvers.SolverIPC(m)
+    d_hat, layout = _vertex_d_hat(solver)
+    offsets = layout.body_vertex_offsets
+    np.testing.assert_array_equal(d_hat[offsets[0] : offsets[1]], 0.01)
+    np.testing.assert_allclose(d_hat[offsets[1] : offsets[2]], 0.002, rtol=1.0e-6)  # a float32 half size
+    test.assertEqual(solver._config.d_hat, d_hat[offsets[1]])  # the solve's: the smallest
+    s0, s1 = m.state(), m.state()
+    for _ in range(60):
+        solver.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+    z = s0.body_q.numpy()[:, 2].astype(np.float64)
+    large, small = z[0] - 0.1, z[1] - 0.008
+    test.assertGreater(large, 0.005)
+    test.assertLess(large, 0.01)
+    test.assertGreater(small, 0.0)
+    test.assertLess(small, 0.002)
+
+
+def test_d_hat_per_world(test, device):
+    """With several worlds the shapes of a world take the d_hat of what they can touch, their world and the global
+    shapes, as with the world alone: a box of half size 8 mm in world 0 (2 mm) and one of 0.1 m in world 1 (0.01 m)
+    over the global ground plane, which has none (a vertex and a half plane take the vertex's). World 1's box carries
+    0.01 m, and its run stays within 1e-6 m of the run of world 1 alone, where with one value per model it took world
+    0's 2 mm. A global static box that both worlds can touch takes the smallest value of the worlds, so that each of its
+    pairs stays below both parts' shares."""
+
+    def world(half):
+        content = newton.ModelBuilder()
+        _box_body(content, (0.0, 0.0, half + 0.02), (half, half, half))
+        return content
+
+    def model(*contents, global_box=False):
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        if global_box:
+            builder.add_shape_box(
+                -1, xform=wp.transform(wp.vec3(1.0, 0.0, 0.05), wp.quat_identity()), hx=0.05, hy=0.05, hz=0.05
+            )
+        for content in contents:
+            builder.add_world(content)
+        return builder.finalize(device=device)
+
+    both, alone = model(world(0.008), world(0.1)), model(world(0.1))
+    solver = newton.solvers.SolverIPC(both)
+    test.assertTrue(solver._independent)
+    d_hat, layout = _vertex_d_hat(solver)
+    offsets = layout.body_vertex_offsets
+    np.testing.assert_allclose(d_hat[offsets[0] : offsets[1]], 0.002, rtol=1.0e-6)
+    np.testing.assert_array_equal(d_hat[offsets[1] : offsets[2]], 0.01)
+    solver_alone = newton.solvers.SolverIPC(alone)
+    np.testing.assert_array_equal(_vertex_d_hat(solver_alone)[0], 0.01)
+    states = [(both.state(), both.state()), (alone.state(), alone.state())]
+    for _ in range(40):
+        for k, (s, (s0, s1)) in enumerate(zip((solver, solver_alone), states, strict=True)):
+            s.step(s0, s1, None, None, 0.01)
+            states[k] = (s1, s0)
+        q_both, q_alone = states[0][0].body_q.numpy(), states[1][0].body_q.numpy()
+        test.assertLess(np.abs(q_both[1, :3] - q_alone[0, :3]).max(), 1.0e-6)
+    test.assertGreater(q_alone[0, 2] - 0.1, 0.005)  # world 1's box rests inside its own 0.01 m
+
+    solver = newton.solvers.SolverIPC(model(world(0.008), world(0.1), global_box=True))
+    d_hat, layout = _vertex_d_hat(solver)
+    shared = d_hat[layout.obstacle_offsets[0] : layout.obstacle_offsets[1]]
+    np.testing.assert_allclose(shared, 0.002, rtol=1.0e-6)
+    np.testing.assert_array_equal(d_hat[layout.body_vertex_offsets[1] : layout.body_vertex_offsets[2]], 0.01)
+
+
+def test_cloth_takes_one_d_hat(test, device):
+    """The particles of a cloth take one d_hat, the smallest of its particles, since libuipc needs one value on the
+    particles of a contact triangle: a cloth of 2 cm cells with three particles attached to a sphere of radius 4 mm,
+    beside a box of half size 0.2 m. The attached particles do not collide with the sphere, so alone they would keep
+    0.01 m; every particle of the cloth takes the 1 mm of the others, and the solver builds (libuipc-warp refuses a
+    contact triangle whose particles differ)."""
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    _cloth(builder, 10, 0.02, 0.5)
+    ball = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.6), wp.quat_identity()))
+    builder.add_shape_sphere(ball, radius=0.004)
+    _box_body(builder, (1.0, 0.0, 0.6), (0.2, 0.2, 0.2))
+    for particle in range(3):
+        builder.add_attachment_particle_body(particle, ball, stiffness=10.0)
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model)
+    d_hat, _ = _vertex_d_hat(solver)
+    np.testing.assert_allclose(d_hat[: model.particle_count], 0.001, rtol=1.0e-6)
+    test.assertEqual(len(np.unique(d_hat[: model.particle_count])), 1)
+    s0, s1 = model.state(), model.state()
+    for _ in range(2):
+        solver.step(s0, s1, None, None, 0.01)
+        s0, s1 = s1, s0
+
+
 def test_overflow_grows(test, device):
     """Contact lists that overflow grow: at once in an eager step, after grow() when the step is captured.
 
@@ -802,6 +924,9 @@ for name, func in (
     ("test_status_bits_of_a_later_libuipc_warp", test_status_bits_of_a_later_libuipc_warp),
     ("test_default_d_hat_follows_small_features", test_default_d_hat_follows_small_features),
     ("test_default_d_hat_follows_small_free_particles", test_default_d_hat_follows_small_free_particles),
+    ("test_d_hat_per_shape", test_d_hat_per_shape),
+    ("test_d_hat_per_world", test_d_hat_per_world),
+    ("test_cloth_takes_one_d_hat", test_cloth_takes_one_d_hat),
     ("test_overflow_grows", test_overflow_grows),
     ("test_grown_lists_keep_a_changed_gravity", test_grown_lists_keep_a_changed_gravity),
     ("test_teleport_equals_fresh_solver", test_teleport_equals_fresh_solver),

@@ -6,7 +6,8 @@
 What the solver simulates (its particles, elements, kinematic bodies and a coupled solver's proxies) and the worlds
 as libuipc subscenes; particles and tetrahedra, cloth with Newton's rest shapes, springs, and the stitches of
 particle-body attachments and springs of rest length 0; shapes triangulated into meshes, rigid bodies as affine bodies
-with their dyadic masses and orthogonality stiffness, static planes as half planes; and the default ``d_hat``.
+with their dyadic masses and orthogonality stiffness, static planes as half planes; and the default ``d_hat`` of
+every shape and particle.
 """
 
 from __future__ import annotations
@@ -28,10 +29,11 @@ if TYPE_CHECKING:
     from .solver_ipc import SolverIPC
 
 
-# libuipc's barrier activation distance (contact/d_hat) [m]. The default d_hat stays below the shares of the smallest
-# colliding shape's half-size or free particle's radius and of the median edge of the cloth and tetrahedral meshes at
-# which the barrier spans the feature: a contact list overflows from about half the radius of a small sphere, a mesh
-# stretches from one edge length, and a free particle rests up to d_hat above what it rests on
+# libuipc's barrier activation distance (contact/d_hat) [m]. The default d_hat of a feature stays below the shares of
+# its own size and of the size of every feature it can touch at which the barrier spans the feature (a colliding
+# shape's half-size, a free particle's radius, the median edge of the cloth and tetrahedral meshes): a contact list
+# overflows from about half the radius of a small sphere, a mesh stretches from one edge length, and a free particle
+# rests up to d_hat above what it rests on
 _D_HAT = 0.01
 _D_HAT_SHAPE_SHARE = 0.25
 _D_HAT_MESH_SHARE = 0.5
@@ -56,49 +58,38 @@ def _colliding_shapes(model: Model) -> np.ndarray:
     return (flags & mask) != 0
 
 
-def _default_d_hat(model: Model) -> float:
-    """libuipc's d_hat, or less when the model has smaller colliding features [m]: a quarter of the smallest half-size of
-    a colliding shape other than a plane (a sphere's or capsule's radius, the smaller of a cylinder's or cone's radius
-    and half height, a box's or ellipsoid's smallest half extent, half of a mesh's thinnest extent that is not zero) and
-    of the smallest radius of a free particle that collides (an ACTIVE particle on no cloth triangle or tetrahedron the
-    solver simulates, in a model whose shapes collide with particles or whose particles collide with each other), and
-    half the median rest length of the edges of the cloth triangles and tetrahedra the solver simulates
-    (``_own_elements``)."""
-    size = np.inf
-    if model.shape_count:
-        types, scale = model.shape_type.numpy(), model.shape_scale.numpy().astype(np.float64)
-        for s in np.flatnonzero(_colliding_shapes(model)):
-            t, sc = int(types[s]), scale[s]
-            if t in (GeoType.BOX, GeoType.ELLIPSOID):
-                half = sc.min()
-            elif t in (GeoType.SPHERE, GeoType.CAPSULE):
-                half = sc[0]
-            elif t in (GeoType.CYLINDER, GeoType.CONE):
-                half = min(sc[0], sc[1])
-            elif t in (GeoType.MESH, GeoType.CONVEX_MESH) and model.shape_source[s] is not None:
-                extent = np.ptp(np.asarray(model.shape_source[s].vertices, np.float64).reshape(-1, 3) * sc, axis=0)
-                extent = extent[extent > 0.0]
-                half = 0.5 * extent.min() if len(extent) else np.inf
-            else:
-                continue
-            if half > 0.0:
-                size = min(size, float(half))
-    own_tris, own_tets, _ = _own_elements(model)
-    if model.particle_count:
-        meets_shapes = model.shape_count and np.any(
-            _colliding_shapes(model) & ((model.shape_flags.numpy() & int(ShapeFlags.COLLIDE_PARTICLES)) != 0)
-        )
-        if meets_shapes or (model.particle_count > 1 and model.particle_grid is not None):
-            on_mesh = np.zeros(model.particle_count, bool)
-            for cells, own, k in ((model.tri_indices, own_tris, 3), (model.tet_indices, own_tets, 4)):
-                if own.any():
-                    on_mesh[cells.numpy().reshape(-1, k)[own].reshape(-1)] = True
-            active = (model.particle_flags.numpy() & int(ParticleFlags.ACTIVE)) != 0
-            radius = model.particle_radius.numpy().astype(np.float64)[~on_mesh & active]
-            radius = radius[radius > 0.0]
-            if len(radius):
-                size = min(size, float(radius.min()))
-    d_hat = min(_D_HAT, _D_HAT_SHAPE_SHARE * size)
+def _shape_half_sizes(model: Model) -> np.ndarray:
+    """The half-size [m] of every shape by which its default d_hat is lowered: a sphere's or capsule's radius, the
+    smaller of a cylinder's or cone's radius and half height, a box's or ellipsoid's smallest half extent, half of a
+    mesh's thinnest extent that is not zero; ``inf`` for a plane, a height field and a shape that does not collide."""
+    half = np.full(model.shape_count, np.inf)
+    if not model.shape_count:
+        return half
+    types, scale = model.shape_type.numpy(), model.shape_scale.numpy().astype(np.float64)
+    for s in np.flatnonzero(_colliding_shapes(model)):
+        t, sc = int(types[s]), scale[s]
+        if t in (GeoType.BOX, GeoType.ELLIPSOID):
+            h = sc.min()
+        elif t in (GeoType.SPHERE, GeoType.CAPSULE):
+            h = sc[0]
+        elif t in (GeoType.CYLINDER, GeoType.CONE):
+            h = min(sc[0], sc[1])
+        elif t in (GeoType.MESH, GeoType.CONVEX_MESH) and model.shape_source[s] is not None:
+            extent = np.ptp(np.asarray(model.shape_source[s].vertices, np.float64).reshape(-1, 3) * sc, axis=0)
+            extent = extent[extent > 0.0]
+            h = 0.5 * extent.min() if len(extent) else np.inf
+        else:
+            continue
+        if h > 0.0:
+            half[s] = float(h)
+    return half
+
+
+def _median_edges(model: Model, own_tris: np.ndarray, own_tets: np.ndarray, subscene: np.ndarray, count: int):
+    """The median rest length [m] of the edges of the cloth triangles and tetrahedra the solver simulates in each of
+    ``count`` subscenes, an edge in the subscene of its lower particle (``subscene``: that of every particle); ``inf``
+    where a subscene has none of positive length."""
+    median = np.full(count, np.inf)
     edges = []
     if own_tris.any():
         t = model.tri_indices.numpy().reshape(-1, 3)[own_tris]
@@ -106,14 +97,101 @@ def _default_d_hat(model: Model) -> float:
     if own_tets.any():
         t = model.tet_indices.numpy().reshape(-1, 4)[own_tets]
         edges.append(np.concatenate([t[:, [a, b]] for a in range(3) for b in range(a + 1, 4)]))
-    if edges:
-        e = np.unique(np.sort(np.concatenate(edges), axis=1), axis=0)
-        x = model.particle_q.numpy().astype(np.float64)
-        length = np.linalg.norm(x[e[:, 0]] - x[e[:, 1]], axis=1)
-        length = length[length > 0.0]
-        if len(length):
-            d_hat = min(d_hat, _D_HAT_MESH_SHARE * float(np.median(length)))
-    return d_hat
+    if not edges:
+        return median
+    e = np.unique(np.sort(np.concatenate(edges), axis=1), axis=0)
+    x = model.particle_q.numpy().astype(np.float64)
+    length = np.linalg.norm(x[e[:, 0]] - x[e[:, 1]], axis=1)
+    where = subscene[e[:, 0]]
+    where, length = where[length > 0.0], length[length > 0.0]
+    order = np.argsort(where, kind="stable")
+    keys, starts = np.unique(where[order], return_index=True)
+    for k, part in zip(keys, np.split(length[order], starts[1:]), strict=True):
+        median[k] = float(np.median(part))
+    return median
+
+
+def _mesh_minimum(n: int, cells: list[np.ndarray], values: np.ndarray) -> np.ndarray:
+    """``values``, one per particle, with every particle of a connected mesh of ``cells`` (arrays of rows of particle
+    indices) at the smallest value of that mesh: the connected components by union and find, with every link hooking
+    the larger root to the smaller one and every particle then pointed at its root."""
+    links = [np.stack([np.repeat(c[:, 0], c.shape[1] - 1), c[:, 1:].reshape(-1)]) for c in cells if len(c)]
+    if not links:
+        return values
+    a, b = np.concatenate(links, axis=1)
+    root = np.arange(n)
+    while not np.array_equal(root[a], root[b]):
+        ra, rb = root[a], root[b]
+        np.minimum.at(root, np.maximum(ra, rb), np.minimum(ra, rb))
+        while not np.array_equal(root[root], root):
+            root = root[root]
+    low = np.full(n, np.inf)
+    np.minimum.at(low, root, values)
+    return low[root]
+
+
+def _set_d_hats(solver: SolverIPC, elements: _ContactElements) -> None:
+    """The default ``d_hat`` of every shape and particle, and of the solve (:ref:`ipc-d-hat`), unless the solver was
+    given one: ``_shape_d_hat`` (one per shape) and ``_particle_d_hat`` (one per particle), None with a given
+    ``d_hat``, and ``_config.d_hat``, the smallest of them.
+
+    A feature's cap is a quarter of the half-size of a colliding shape (``_shape_half_sizes``), a quarter of the radius
+    of a free particle that collides (ACTIVE, on no cloth triangle or tetrahedron the solver simulates, its contact
+    element colliding with something), and half the median rest edge of the cloth and tetrahedra of a world for their
+    particles (``_median_edges``). A feature takes libuipc's 0.01 m, lowered to its own cap and to the cap of every
+    feature it can touch: one of a contact element that its element collides with (``elements.enabled``), in its own
+    world or the global one, and for a global feature in any world. libuipc takes the mean of the two values of a pair,
+    which then stays below the caps of both features. The particles of a connected cloth or soft body take the smallest
+    value of its particles, since libuipc needs one value on the particles of a contact triangle."""
+    model = solver.model
+    solver._shape_d_hat = solver._particle_d_hat = None
+    if solver._d_hat_given:
+        return
+    worlds, n = solver._worlds, model.particle_count
+    count = 1 if worlds is None else worlds.count
+    shapes = np.flatnonzero(elements.shape >= 0)
+    shape_sub = np.zeros(model.shape_count, np.int64)
+    particle_sub = np.zeros(n, np.int64)
+    if worlds is not None:
+        shape_sub = worlds.subscene(model.shape_world.numpy()) if model.shape_count else shape_sub
+        particle_sub = worlds.subscene(model.particle_world.numpy()) if n else particle_sub
+    # the caps
+    shape_cap = _D_HAT_SHAPE_SHARE * _shape_half_sizes(model)
+    particle_cap = np.full(n, np.inf)
+    own_tris, own_tets, _ = _own_elements(model)
+    if n:
+        active = (model.particle_flags.numpy() & int(ParticleFlags.ACTIVE)) != 0
+        radius = model.particle_radius.numpy().astype(np.float64)
+        collides = elements.enabled[elements.particle].any(axis=1)
+        free = ~elements.on_mesh & active & collides & (radius > 0.0)
+        particle_cap[free] = _D_HAT_SHAPE_SHARE * radius[free]
+        mesh_cap = _D_HAT_MESH_SHARE * _median_edges(model, own_tris, own_tets, particle_sub, count)
+        particle_cap[elements.on_mesh] = mesh_cap[particle_sub[elements.on_mesh]]
+    # the smallest cap of every contact element in every subscene, and what a feature of each can touch
+    smallest = np.full((elements.count, count), np.inf)
+    np.minimum.at(smallest, (elements.shape[shapes], shape_sub[shapes]), shape_cap[shapes])
+    np.minimum.at(smallest, (elements.particle, particle_sub), particle_cap)
+    near = np.minimum(smallest, smallest[:, :1])  # a world meets itself and the global subscene 0
+    near[:, 0] = smallest.min(axis=1)  # the global subscene meets every world
+    reach = np.full_like(smallest, np.inf)
+    for e in range(elements.count):
+        if elements.enabled[e].any():
+            reach[e] = near[elements.enabled[e]].min(axis=0)
+    shape_d_hat = np.full(model.shape_count, _D_HAT)
+    shape_d_hat[shapes] = np.minimum(
+        _D_HAT, np.minimum(shape_cap[shapes], reach[elements.shape[shapes], shape_sub[shapes]])
+    )
+    particle_d_hat = np.minimum(_D_HAT, np.minimum(particle_cap, reach[elements.particle, particle_sub]))
+    cells = [
+        indices.numpy().reshape(-1, k)[own]
+        for indices, own, k in ((model.tri_indices, own_tris, 3), (model.tet_indices, own_tets, 4))
+        if own.any()
+    ]
+    particle_d_hat = _mesh_minimum(n, cells, particle_d_hat)
+    solver._shape_d_hat, solver._particle_d_hat = shape_d_hat, particle_d_hat
+    # the solve's: the smallest of the shapes it triangulates and of the particles (libuipc's contact/d_hat)
+    meshed = shapes[model.shape_type.numpy()[shapes] != int(GeoType.PLANE)] if len(shapes) else shapes
+    solver._config.d_hat = float(np.concatenate([[_D_HAT], shape_d_hat[meshed], particle_d_hat]).min())
 
 
 def _check_springs(model: Model) -> None:
@@ -626,6 +704,7 @@ def _add_particles_and_tets(solver: SolverIPC, scene, elements: _ContactElements
         mass=mass,
         fixed=solver._fixed_particle,
         thickness=np.where(elements.on_mesh, solver._thickness, radius),
+        d_hat=solver._particle_d_hat,
         contact_element=elements.particle,
         subscene_element=0 if solver._worlds is None else solver._worlds.subscene(model.particle_world.numpy()),
         gravity=solver._gravity[model.particle_world.numpy()],
@@ -987,6 +1066,7 @@ def _add_shapes_and_bodies(
                     v,
                     f,
                     thickness=margin[s],
+                    d_hat=None if solver._shape_d_hat is None else solver._shape_d_hat[s],
                     contact_element=elements.shape[s],
                     subscene_element=_subscene_of_shape(solver, s),
                 )
@@ -1042,6 +1122,9 @@ def _add_shapes_and_bodies(
         )
         solver._body_row_subscene[b] = np.atleast_1d(subscene)[0]
         thickness = np.concatenate([np.full(len(v), margin[s]) for v, _, s in parts]) if parts else 0.0
+        d_hat = None  # every vertex at the d_hat of its shape
+        if solver._shape_d_hat is not None and parts:
+            d_hat = np.concatenate([np.full(len(v), solver._shape_d_hat[s]) for v, _, s in parts])
         volume = sum(_closed_volume(v, f) for v, f, _ in parts)
         if volume <= 0.0:
             # no closed collision mesh: the volume of water of that mass
@@ -1064,6 +1147,7 @@ def _add_shapes_and_bodies(
             A_dot=W @ R,
             fixed=bool(solver._kinematic_body[b]) and b not in solver._aim_bodies,
             thickness=thickness,
+            d_hat=d_hat,
             contact_element=element,
             subscene_element=subscene,
             # a kinematic body moving toward its aim falls with nothing: gravity does not move it

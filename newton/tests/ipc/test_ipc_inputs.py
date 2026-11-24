@@ -1151,8 +1151,8 @@ class TestSolverIPCInputs(unittest.TestCase):
     def test_import_checks_the_version_and_the_capabilities(self):
         """Refuse a libuipc-warp older than the release SolverIPC is written for, naming it, and one without a
         capability SolverIPC calls (the rigid flight, AL-IPC's sweep of kinematic moves, the frame restart, the start
-        check of written positions), naming what it lacks; take a development build of the release. Every refusal
-        says where to install it from."""
+        check of written positions, a d_hat per part of the scene), naming what it lacks; take a development build of
+        the release. Every refusal says where to install it from."""
         import uipc_warp  # noqa: PLC0415
 
         imported = newton.solvers.SolverIPC._uipc_warp
@@ -1183,6 +1183,15 @@ class TestSolverIPCInputs(unittest.TestCase):
                 refused(r"lacks the frame restart \(SimEngine\.enable_frame_restart\)")
             with patch_sys_module("uipc_warp.ext.start_check", None):  # a build without the start check
                 refused(r"lacks the start check of written positions \(uipc_warp\.ext\.start_check\)")
+
+            class WithoutDHat:  # a scene of a build without a d_hat per part
+                def add_vertices(self, x, *, thickness=0.0):
+                    pass
+
+                add_obstacle = add_affine_body = add_vertices
+
+            with mock.patch.object(uipc_warp.arrays, "ArrayScene", WithoutDHat):
+                refused(r"lacks ArrayScene's d_hat per part")
         finally:
             newton.solvers.SolverIPC._uipc_warp = imported
 

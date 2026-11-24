@@ -44,7 +44,7 @@ What it costs:
   costs more than an explicit substep, and in exchange takes larger steps:
   Newton's ``cloth_ipc`` example takes two steps per 60 Hz frame.
 - Surfaces in contact rest a small gap apart, up to the barrier distance
-  ``d_hat``: 1 cm by default, less in a model with small parts (see
+  ``d_hat``: 1 cm by default, less near small parts (see
   :ref:`ipc-d-hat`).
 - Every pair of surfaces must start apart (see :ref:`ipc-start`).
 - Rigid bodies are libuipc's affine bodies, held close to rigid by a stiff
@@ -137,9 +137,10 @@ other solvers.
      - default
      - what it sets
    * - ``d_hat``
-     - ``None``: 0.01 m, or less for small parts
-     - The barrier distance [m]: the barrier acts on pairs closer than this,
-       and surfaces at rest stay up to this far apart (:ref:`ipc-d-hat`).
+     - ``None``: 0.01 m, or less near small parts
+     - The barrier distance [m] of every shape and particle: the barrier acts
+       on pairs closer than this, and surfaces at rest stay up to this far
+       apart (:ref:`ipc-d-hat`).
    * - ``kappa``
      - 1e9
      - The barrier stiffness [Pa] of every contact pair, taken as given
@@ -431,28 +432,48 @@ The barrier distance d_hat
 stiffness a surface at rest settles just inside it: the box above rests 9.3 mm
 over the ground with ``d_hat`` 1 cm, and in Newton's ``basic_shapes`` example a
 sphere rests 5.8 mm, a capsule 6.4 mm and a cylinder 8.5 mm above their rest
-heights. Pass a smaller ``d_hat`` for tighter contact. A smaller value makes
-the barrier steeper, which can take more Newton iterations, and leaves less room
+heights. Pass a smaller ``d_hat`` for tighter contact; the solver gives a
+``d_hat`` argument to every shape and particle. A smaller value makes the
+barrier steeper, which can take more Newton iterations, and leaves less room
 for a kinematic jump, which fails the step when it meets a surface (see
 :ref:`ipc-kinematic-bodies`).
 
-Without a ``d_hat`` argument the solver takes libuipc's 0.01 m, lowered for a
-model with small colliding parts to the smallest of:
+Without a ``d_hat`` argument every shape and particle gets a value of its own,
+as a libuipc geometry gets its meta ``d_hat``. Two surfaces in contact act
+below the mean of their two values, and a surface and a plane below the
+surface's value. A part's value is libuipc's 0.01 m, lowered to the smallest
+limit of the part itself and of every part it can touch:
 
-- a quarter of the smallest half-size of a colliding shape: a sphere's or
+- a colliding shape: a quarter of its half-size, which is a sphere's or
   capsule's radius, the smaller of a cylinder's or cone's radius and half
-  height, a box's or ellipsoid's smallest half extent, half of a mesh's
+  height, a box's or ellipsoid's smallest half extent, or half of a mesh's
   thinnest extent;
-- a quarter of the smallest radius of a free particle that collides;
-- half the median rest length of the edges of the cloth and tetrahedra.
+- a free particle that collides: a quarter of its radius;
+- the particles of cloth and tetrahedra: half the median rest length of the
+  edges of the cloth and tetrahedra of their world.
+
+A plane and a height field set no limit. Two parts can touch where Newton's
+collision groups, collide flags, filter pairs and particle contact let them
+collide, in one world or with a global part.
 
 A ``d_hat`` that spans a small shape lets it rest up to its own size away, and
 puts more contact pairs inside ``d_hat`` than the contact lists hold. One as long
 as the edges of a cloth or soft body puts its non-adjacent primitives inside
-``d_hat`` at rest, and the barrier stretches it. The rule keeps the default below
-both. It is chosen whenever the solve is built, from the whole model: every world
-of a model of several worlds takes the same ``d_hat``. libuipc can set ``d_hat``
-per geometry; SolverIPC has one value per model.
+``d_hat`` at rest, and the barrier stretches it. Since both values of a pair are
+below both parts' limits, so is their mean: the rule keeps every pair below
+both, and a part that can never touch a small one keeps its larger value. In a
+model whose parts can all touch each other every part gets the same value. The
+particles of one cloth or soft body take the smallest value among them, because
+libuipc needs one value on the corners of a contact triangle.
+
+With several worlds a world's parts get the values they would get with the
+world alone. A global shape other than a plane gets the smallest value of the
+worlds that can touch it, so the pairs of a world with such a shape can be
+closer than with the world alone. The values are chosen whenever the solve is
+built. The solver also keeps the smallest value of all parts as the value for
+the whole model, libuipc's ``contact/d_hat``, from which libuipc's stiffness
+range is computed (``adaptive_kappa``, :ref:`ipc-contact`); with independent
+worlds that range takes the smallest part of every world, not only of its own.
 
 .. _ipc-model-content:
 
@@ -1391,7 +1412,8 @@ leaves the other worlds as they were, bit for bit; the mask's global entry
 selects nothing. :meth:`~newton.solvers.SolverIPC.frame_stats` gives the counts
 of the step's loops: the Newton iterations of its slowest world. With
 ``adaptive_kappa=True`` every world takes libuipc's stiffness range of the same
-world alone, from the mass and extent of its own vertices and the global ones;
+world alone, from the mass and extent of its own vertices and the global ones
+and from the model's ``d_hat`` (:ref:`ipc-d-hat`);
 ``contact_stiffness(dt)`` then gives one value per world. MAS preconditions every
 world as the same world alone (:ref:`ipc-mas`), and AL-IPC runs every world's
 augmented-Lagrangian loop as the same world alone (:ref:`ipc-al-ipc`). The
