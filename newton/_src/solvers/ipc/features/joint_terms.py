@@ -20,7 +20,7 @@ Newton's ``joint_q``, with convex potentials of ``L``:
   that joint alone.
 
 A model with friction on any degree of freedom of any joint (``joint_friction`` over all of them, revolute, prismatic,
-ball or other, whichever module holds it) or on a fixed tendon takes Newton tolerances of at most
+ball or other, whichever module holds it) or on a tendon, fixed or spatial, takes Newton tolerances of at most
 ``_FRICTION_TOLERANCE`` times ``eps_velocity`` where the caller leaves them unset (``_friction_tolerances``).
 libuipc's Newton loop ends when its step is below the tolerance, and within its smoothing band the friction is so stiff
 that Newton's steps there are short, the first from rest about ``f / (2 F)`` times ``eps_velocity`` for a load ``f``
@@ -29,10 +29,10 @@ friction would creep instead of sliding. A tolerance the caller gives is kept wh
 bound gets a ``NewtonWarning``. MuJoCo's JOINT equality rows that repeat the mimic rows Newton's importers made of them
 are held by those (``held_equality_rows``).
 
-Refused: Newton's own tendons (``ModelBuilder.add_tendon``, spatial), MuJoCo's spatial tendons and actuators that
-drive a tendon, a mimic or tendon over a joint that becomes no revolute or prismatic joint, and the friction of free
-and distance joints (the ball module refuses that of ball joints). The hooks are those of ``features`` (its
-docstring); ``parent_terms`` gives the terms' forces to ``BODY_PARENT_F``.
+Refused: actuators that drive a tendon and a limit margin other than 0, of every MuJoCo tendon, a mimic or fixed
+tendon over a joint that becomes no revolute or prismatic joint, and the friction of free and distance joints (the ball
+module refuses that of ball joints). The ``tendons`` module holds MuJoCo's spatial tendons and refuses Newton's own. The
+hooks are those of ``features`` (its docstring); ``parent_terms`` gives the terms' forces to ``BODY_PARENT_F``.
 """
 
 from __future__ import annotations
@@ -166,24 +166,13 @@ def _tendon_actuators(model: Model) -> int:
 
 
 def check(model: Model, options: FeatureOptions, at: str) -> None:
-    """``NotImplementedError`` for what SolverIPC cannot hold of the tendons (``"tendons"``): Newton's own tendons,
-    MuJoCo's spatial tendons, actuators that drive a tendon, and a fixed tendon over a joint that becomes no revolute
-    or prismatic joint; and of the mimic relations (``"constraints"``): one between joints that are not both
-    revolute or prismatic joints (or D6 joints of one coordinate)."""
+    """``NotImplementedError`` for what SolverIPC cannot hold of MuJoCo's tendons (``"tendons"``): actuators that
+    drive a tendon, a limit margin other than 0, and a fixed tendon over a joint that becomes no revolute or prismatic
+    joint; and of the mimic relations (``"constraints"``): one between joints that are not both revolute or prismatic
+    joints (or D6 joints of one coordinate). The ``tendons`` module checks the spatial tendons and Newton's own."""
     one = _one_coordinate(model)
     if at == "tendons":
-        if model.tendon_count:
-            raise NotImplementedError(
-                f"SolverIPC: the model has {model.tendon_count} tendons of Newton's own (ModelBuilder.add_tendon); "
-                "remove them. SolverIPC simulates MuJoCo's fixed tendons, whose length is a linear combination of joint "
-                "coordinates, and no tendon routed through space."
-            )
         for t, joints, _ in _tendons(model):
-            if not len(joints):
-                raise NotImplementedError(
-                    f"SolverIPC: MuJoCo's tendon {t} of the model is a spatial tendon; remove it. SolverIPC simulates "
-                    "fixed tendons only, whose length is a linear combination of joint coordinates."
-                )
             bad = [int(j) for j in joints if not (0 <= j < model.joint_count) or one[j] < 0]
             if bad:
                 raise NotImplementedError(
@@ -301,12 +290,11 @@ class _Plan:
 
 def _has_friction(model: Model) -> bool:
     """Whether a degree of freedom of any joint, of whatever kind, has a ``joint_friction`` other than 0, or one of
-    MuJoCo's fixed tendons a friction loss: a model whose default Newton tolerances are lowered
+    MuJoCo's tendons, fixed or spatial, a friction loss: a model whose default Newton tolerances are lowered
     (``_friction_tolerances``)."""
     if model.joint_dof_count and model.joint_friction is not None and np.any(model.joint_friction.numpy() != 0.0):
         return True
-    fixed = [t for t, joints, _ in _tendons(model) if len(joints)]
-    return bool(fixed) and bool(np.any(model.mujoco.tendon_frictionloss.numpy()[fixed] != 0.0))
+    return bool(_tendons(model)) and bool(np.any(model.mujoco.tendon_frictionloss.numpy() != 0.0))
 
 
 def _signature(model: Model) -> tuple:

@@ -15,8 +15,8 @@ friction of revolute and prismatic joints, as libuipc-warp's joint coordinate te
 * Fixed tendons: the scene of Newton's ``test_fixed_tendon`` (two sliders, a tendon of stiffness 2 and damping 1
   toward 0) against implicit Euler's recurrence, in one world and in two, and a tendon's limit at its closed-form
   overshoot with the stiffness MuJoCo's solref gives.
-* What stays refused, by name: Newton's own tendons, MuJoCo's spatial tendons and tendon actuators, a mimic of joints
-  of several coordinates, a tendon's limit margin, and the friction of free joints.
+* What stays refused, by name: Newton's own tendons, tendon actuators, a mimic of joints of several coordinates, a
+  tendon's limit margin, and the friction of free joints.
 """
 
 import math

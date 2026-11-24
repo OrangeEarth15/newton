@@ -506,6 +506,8 @@ The solver simulates:
   drives, springs, damping, limits, armature, friction and
   :attr:`~newton.Control.joint_f`, mimic joints and MuJoCo's fixed tendons
   (:ref:`ipc-joints`);
+- MuJoCo's spatial tendons, through sites, around spheres and cylinders and over
+  pulleys (:ref:`ipc-spatial-tendons`);
 - external forces: :attr:`~newton.State.particle_f`,
   :attr:`~newton.State.body_f` and :attr:`~newton.Control.joint_f`, each held
   constant over the step, as libuipc holds its external forces. A body wrench
@@ -1212,12 +1214,12 @@ loop would end inside the band, and a joint loaded beyond its friction would
 creep instead of sliding: a box on a hinge with a friction of 2 N m under 3 N m
 would turn at 7.5e-3 rad/s instead of speeding up. A model with friction on any
 joint (a ``joint_friction`` other than 0 on any degree of freedom, whatever the
-joint's type) or on a fixed tendon therefore takes both tolerances at 0.4
-``eps_velocity`` (4e-3 by default) where they are left at their defaults. That
-is the largest at which a hinge or slider under 1.5 times its friction slides at
-:math:`(f - F) / I` within 1% whatever its axis: 0.7 ``eps_velocity`` suffices
-along a coordinate axis, and a diagonal axis needs 0.4. A load nearer the
-friction needs a lower tolerance: 1.2 times the friction needs 0.25
+joint's type) or on a tendon, fixed or spatial, therefore takes both tolerances
+at 0.4 ``eps_velocity`` (4e-3 by default) where they are left at their defaults.
+That is the largest at which a hinge or slider under 1.5 times its friction
+slides at :math:`(f - F) / I` within 1% whatever its axis: 0.7 ``eps_velocity``
+suffices along a coordinate axis, and a diagonal axis needs 0.4. A load nearer
+the friction needs a lower tolerance: 1.2 times the friction needs 0.25
 ``eps_velocity``, 1.1 times needs 0.1, so no single value serves every load
 above the friction. The cost is Newton iterations: a chain of hinged links with
 friction falling next to a box resting on the ground takes 5.5 per step instead
@@ -1232,11 +1234,68 @@ which joints they hold, or of which joints have friction, builds the solve
 again. The terms' forces through each joint are part of its ``BODY_PARENT_F``
 (:ref:`ipc-body-observables`).
 
-Refused: Newton's own tendons (:meth:`~newton.ModelBuilder.add_tendon`, routed
-through space), MuJoCo's spatial tendons and actuators that drive a tendon, a
-tendon over a joint that is no revolute or prismatic joint, a tendon's limit
-``margin`` other than 0, a mimic relation of a joint of more than one
+Refused: actuators that drive a tendon and a tendon's limit ``margin`` other
+than 0, of fixed and spatial tendons, a fixed tendon over a joint that is no
+revolute or prismatic joint, a mimic relation of a joint of more than one
 coordinate, and the friction of free and distance joints.
+:ref:`ipc-spatial-tendons` refuses Newton's own tendons.
+
+.. _ipc-spatial-tendons:
+
+MuJoCo's spatial tendons
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+A spatial tendon of MuJoCo is a cable whose length is that of a path: through
+sites, around spheres and cylinders on its way, and over pulleys. It pulls on
+every body it touches according to its length, as a robot hand's finger tendons
+do. The solver takes every tendon of type 1 of ``model.mujoco``
+(:func:`newton.solvers.mujoco.add_tendon_spatial`, and the MJCF and USD
+importers) as libuipc-warp's spatial tendons, whose length and moment arms are
+MuJoCo's.
+
+- **The path** is MuJoCo's: a site of a body, or of the world for a site of
+  body -1; a sphere or cylinder geom between two sites, which the path wraps
+  around where the straight line between them would cut the geom's circle,
+  around the shorter side, or with a ``sidesite`` on the side site's side, the
+  long way round if need be; and a pulley, whose ``divisor`` divides the length
+  of the branch after it.
+- **The coefficients** are a fixed tendon's (:ref:`ipc-joint-terms`): the
+  ``stiffness`` toward the ``springlength`` (the length at the model's pose for
+  -1), the ``damping``, ``armature`` and ``frictionloss``, and the limit with
+  its stiffness and damping. The inverse inertia :math:`w` that a limit's
+  ``solreflimit`` needs is the tendon's :math:`J H^{-1} J^T` at the model's
+  pose, MuJoCo's ``tendon_invweight0``, with :math:`J` its moment arms in joint
+  space and :math:`H` the joint-space inertia. A tendon's friction loss lowers
+  the default Newton tolerances as a joint's friction does.
+- **The forces.** A tendon under tension pulls each site toward its neighbours
+  along the path, and a geom's body at the points where the path touches the
+  geom. Every force is an energy of the step, so the step is implicit in all of
+  them. A tendon whose sites and geoms are all of the world has a constant
+  length and no force, as in MuJoCo.
+
+On the same models the lengths and moment arms agree with MuJoCo's to 2e-7 m,
+and the inverse weights with MuJoCo's ``tendon_invweight0`` to 3e-7 of
+themselves, over random poses of sphere and cylinder wraps with and without side
+sites, pulleys and sites of the world; a tendon spring that holds a hinged arm
+up against gravity rests it at MuJoCo's angle to 1e-6 rad. MuJoCo's limit and
+friction loss are soft constraints of its own solver; here the limit is a
+joint's cubic limit (:ref:`ipc-joints`) and the friction libuipc's smoothed
+friction, as for a fixed tendon.
+
+New coefficients (``TENDON_PROPERTIES``), and the limits' stiffness that new
+masses give (``BODY_INERTIAL_PROPERTIES``), take effect in place at
+``notify_model_changed``, also in graphs captured before; a change of a path,
+or of a site or geom it names (``SHAPE_PROPERTIES``), builds the solve again.
+
+Refused (:class:`NotImplementedError`): Newton's own tendons
+(:meth:`~newton.ModelBuilder.add_tendon`, routed over anchors, pinholes and
+rollers); a spatial tendon that wraps a geom other than a sphere or a cylinder,
+whose path MuJoCo's compiler refuses (a geom not between two sites, a site whose
+neighbours are pulleys only, two pulleys in a row, a pulley at the end or with a
+divisor that is not positive), or whose side site lies inside the geom it wraps
+at the model's pose: there MuJoCo wraps inside the geom, and SolverIPC wraps
+around its outside only. A side site of another body that comes inside the geom
+later keeps the outside wrap.
 
 .. _ipc-refused-joints:
 
@@ -1690,15 +1749,16 @@ acceleration. :class:`~newton.sensors.SensorIMU` reads ``body_qdd``.
 with the ``joint_f`` the solver applies to the child. The terms are those of the
 libuipc joint the joint maps onto (its penalty, drive and limit), of a universal
 joint (its anchor, lock and the terms of its angles), the stitch of a distance
-joint, and the ball terms, mimic relations, tendons and friction through the
-joint. A joint is a penalty (:ref:`ipc-joints`), so this is the force that holds
-the body where the step moved it: the body's momentum balance, to the Newton
+joint, and the ball terms, mimic relations, fixed tendons and friction through
+the joint; a spatial tendon pulls on the bodies themselves, as a contact does.
+A joint is a penalty (:ref:`ipc-joints`), so this is the force that holds the
+body where the step moved it: the body's momentum balance, to the Newton
 tolerance, not a rigid joint's force at every step. A 0.2 m box released 1 m
 below a hinge pulls on it with 57% of its weight in the first step of 5 ms with
 the default body stiffness, and with 94% with ``body_kappa=1e8``, within 1e-4 of
-the weight from the sixth step on: in the first steps the hinge also pulls on the
-box's affine stretch. Newton's ``test_parent_force``, which expects the weight
-from the first step, fails with SolverIPC for this reason.
+the weight from the sixth step on: in the first steps the hinge also pulls on
+the box's affine stretch. Newton's ``test_parent_force``, which expects the
+weight from the first step, fails with SolverIPC for this reason.
 
 A body's parent joint is the joint of an articulation whose child it is, or else
 the first joint whose child it is: a loop joint is no body's parent joint, a free
@@ -1829,8 +1889,8 @@ what to change:
 - body variants (:meth:`~newton.ModelBuilder.add_body_variants`): the solver
   triangulates the shapes when it builds the solve and finds its own contacts,
   so it cannot follow a variant row's shape;
-- muscles, Newton's own tendons, MuJoCo's spatial tendons and the tendons and
-  mimic relations :ref:`ipc-joint-terms` lists;
+- muscles, Newton's own tendons, and the tendons and mimic relations that
+  :ref:`ipc-joint-terms` and :ref:`ipc-spatial-tendons` list;
 - enabled MuJoCo equality rows that no loop joint or mimic relation holds
   (:ref:`ipc-joints`);
 - triangle or tetrahedron activations other than 0, which the solver does not
@@ -1887,9 +1947,9 @@ features use. It takes these without reading them:
 - ``joint_velocity_limit``, of which the solver warns once (:ref:`ipc-refused-joints`);
 - ``joint_limit_kd`` with ``enable_joint_limit_damping=False``;
 - ``Control.joint_act``;
-- the fixed tendons' ``solreffriction`` and ``solimpfriction``, of which the
-  solver warns once, as of the contact coefficients above, where a tendon with a
-  friction loss sets one to other than Newton's default.
+- the tendons' ``solreffriction`` and ``solimpfriction``, fixed and spatial; the
+  solver warns once of a fixed tendon's, as of the contact coefficients above,
+  where a tendon with a friction loss sets one to other than Newton's default.
 
 Examples
 --------

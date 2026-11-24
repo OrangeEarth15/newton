@@ -347,6 +347,8 @@ class SolverIPC(SolverBase, CouplingInterface):
       damping, limits, armature and :attr:`~newton.Control.joint_f`, D6 joints
       that lock what one of them locks, and distance joints of one length
       (:ref:`ipc-joints`);
+    - MuJoCo's spatial tendons, through sites, around spheres and cylinders
+      and over pulleys (:ref:`ipc-spatial-tendons`);
     - external forces (:attr:`~newton.State.particle_f`,
       :attr:`~newton.State.body_f`) and gravity per world;
     - content in several worlds, every world stepping as it would alone, or

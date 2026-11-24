@@ -187,11 +187,10 @@ def _refusal(test, model, **options):
 # (name, contents, the message), every refusal a feature module holds, alone in its model
 _MOVED = (
     (
-        "tendons (joint_terms)",
+        "tendons (tendons)",
         (_tendon,),
         "SolverIPC: the model has 1 tendons of Newton's own (ModelBuilder.add_tendon); remove them. SolverIPC simulates "
-        "MuJoCo's fixed tendons, whose length is a linear combination of joint coordinates, and no tendon routed "
-        "through space.",
+        "MuJoCo's fixed and spatial tendons, and not Newton's tendons routed over anchors, pinholes and rollers.",
     ),
     (
         "a mimic of joints of several coordinates (joint_terms)",
@@ -286,8 +285,8 @@ _MOVED = (
 
 def test_moved_refusals_keep_their_messages(test, device):
     """Every refusal a feature module holds raises NotImplementedError with the message it had before the modules
-    held it, when the solver is built: Newton's tendons, mimics of joints of several coordinates and the friction of
-    free joints (joint_terms), D6 joints that lock what no joint of SolverIPC locks, universal joints of axes that are
+    held it, when the solver is built: Newton's tendons (tendons; its message now names the spatial tendons SolverIPC
+    takes), mimics of joints of several coordinates and the friction of free joints (joint_terms), D6 joints that lock what no joint of SolverIPC locks, universal joints of axes that are
     not orthonormal and distance joints whose lower bound is above the upper (universal), the armature, drives and
     target mode of free joints, the friction, armature, damping and limits of D6 joints that become ball joints and
     the limits of ball joints (ball), and springs and attachments with a negative damping (damping)."""
