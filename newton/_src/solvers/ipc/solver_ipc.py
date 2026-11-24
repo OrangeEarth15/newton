@@ -122,9 +122,9 @@ else:
                 return method
 
 
-# The oldest libuipc-warp SolverIPC takes, its development builds counted as their release ("0.4.4.dev0" as 0.4.4), and
+# The oldest libuipc-warp SolverIPC takes, its development builds counted as their release ("0.5.0.dev0" as 0.5.0), and
 # where to install it from
-_UIPC_WARP_MINIMUM = (0, 4, 4)
+_UIPC_WARP_MINIMUM = (0, 5, 0)
 _UIPC_WARP_INSTALL = "pip install git+https://github.com/OrangeEarth15/libuipc-warp"
 # grow-and-redo attempts of an eager step whose contact lists keep overflowing, as libuipc-warp's FrameRunner
 _MAX_REGROWS = 8
@@ -377,7 +377,7 @@ class SolverIPC(SolverBase, CouplingInterface):
     (:ref:`ipc-contact-output`), and the solver is an entry of Newton's coupled
     solvers (:ref:`ipc-coupling`).
 
-    This solver requires the optional ``libuipc-warp`` package, 0.4.4 or newer (``import uipc_warp``).
+    This solver requires the optional ``libuipc-warp`` package, 0.5.0 or newer (``import uipc_warp``).
 
     Args:
         model: The model to simulate.

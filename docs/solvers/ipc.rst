@@ -62,8 +62,7 @@ compare it with Newton's other solvers.
 Construction and stepping
 -------------------------
 
-SolverIPC runs on the optional ``libuipc-warp`` package. SolverIPC needs
-libuipc-warp's main branch (0.4.4.dev0 or later) until 0.5.0 is released.
+SolverIPC runs on the optional ``libuipc-warp`` package, 0.5.0 or later.
 libuipc-warp is NVIDIA-internal and has no package on PyPI: install it from its
 GitLab repository, to which you need access, into the environment of Newton:
 

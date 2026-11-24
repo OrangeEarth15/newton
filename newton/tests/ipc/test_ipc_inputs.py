@@ -1164,13 +1164,13 @@ class TestSolverIPCInputs(unittest.TestCase):
 
         names = uipc_warp.EngineOptions.names()
         try:
-            for version in ("0.4.4.dev0", "0.4.4", "0.5.0", "1.0"):
+            for version in ("0.5.0.dev0", "0.5.0", "0.5.1.dev0", "1.0"):
                 with mock.patch.object(uipc_warp, "__version__", version):
                     newton.solvers.SolverIPC._uipc_warp = None
                     self.assertIs(newton.solvers.SolverIPC._import_uipc_warp(), uipc_warp)
-            for version in ("0.4.3", "0.3.0"):
+            for version in ("0.4.4.dev0", "0.4.4", "0.4.3"):
                 with mock.patch.object(uipc_warp, "__version__", version):
-                    refused(f"requires libuipc-warp 0\\.4\\.4 or newer, and the installed one is {version}")
+                    refused(f"requires libuipc-warp 0\\.5\\.0 or newer, and the installed one is {version}")
             for option in ("affine_rotation", "al_sweep_kinematic"):
                 without = tuple(name for name in names if name != option)
                 with mock.patch.object(uipc_warp.EngineOptions, "names", return_value=without):
