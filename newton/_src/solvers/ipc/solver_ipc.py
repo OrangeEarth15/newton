@@ -49,6 +49,7 @@ from .kernels import (
     _any_selected,
     _body_accelerations,
     _copy_status,
+    _count_step,
     _d6_joint_wrenches,
     _forget_kinematic_written,
     _gravity_changed,
@@ -747,7 +748,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         # (allocated with the request and with every engine built after it, outside any capture)
         self._contact_output = False
         self._contact_export = None
-        self._steps = 0  # steps taken, which the contact export's records follow (_contact_records)
+        # the steps taken, counted on the device (a captured step counts at every replay), which the contact export's
+        # records follow (contacts._contact_records)
+        self._step_count = wp.zeros(1, dtype=wp.int64, device=model.device)
         # an entry of a coupled solver (coupling_notify_iteration_restarts): the status bits of its steps since
         # check_status() last read them, and the scratch word of one step's bits
         self._sticky_status = self._step_status = None
@@ -1198,7 +1201,7 @@ class SolverIPC(SolverBase, CouplingInterface):
                     self._body_hold.zero_()
                 raise
             self._start_unchecked = False
-        self._steps += 1
+        wp.launch(_count_step, 1, outputs=[self._step_count], device=self.model.device)
         self._write_forces(state_in, control)
         _write_joint_controls(self, control, dt)
         _write_stitch_stiffness(self, dt)
@@ -2245,7 +2248,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         Zeroes ``out_body_f`` and adds, at every proxy body's index, the force at the end of the step of every contact
         term on the body's vertices, with its torque about the body's centre of mass in ``state_out``: the force this
         entry's content exerts on the proxy, as SolverVBD harvests it, rather than its change of momentum. Device work
-        only; call it after :meth:`step`.
+        only, without synchronization; call it after :meth:`step`, in the graph that holds the step or outside it after
+        a replay: the records are those of the last step, which the solver counts on the device.
         """
         del body_qd_before, state, contacts, dt
         out_body_f.zero_()
@@ -2286,7 +2290,8 @@ class SolverIPC(SolverBase, CouplingInterface):
     ) -> None:
         """The proxy particles' feedback of the step, from its contact forces (:ref:`ipc-coupling`): zeroes
         ``out_particle_f`` and adds, at every proxy particle's index, the force at the end of the step of every contact
-        term on the particle. Device work only; call it after :meth:`step`."""
+        term on the particle. Device work only, without synchronization; call it after :meth:`step`, in the graph that
+        holds the step or outside it after a replay (as :meth:`coupling_harvest_proxy_wrenches`)."""
         del particle_qd_before, state, state_out, contacts, dt
         out_particle_f.zero_()
         if self._engine is None or not self._proxy_particle.any() or particle_local_to_proxy_global.shape[0] == 0:

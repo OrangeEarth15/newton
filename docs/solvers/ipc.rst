@@ -1735,9 +1735,10 @@ keep an impact's feedback within 1% of the converged feedback, measured step by
 step for a box and a particle hitting a box at 0.5 and 2 m/s with steps of 1/60
 and 1/240 s, at about twice the Newton iterations; at the defaults without
 proxies an impact's feedback was up to 27 times the converged one. Pass the three
-arguments to choose other values. The harvest reads records that the contact
-export updates once per call of :meth:`~newton.solvers.SolverIPC.step`: capture
-the harvest in the same graph as the step, as Newton's couplers do.
+arguments to choose other values. The harvest reads the contact records of the
+last step. The solver counts its steps on the device and updates the records
+once per step, so a harvest outside the graph that holds the step, after a
+replay, reads the records of that replay.
 
 **Lagged and staggered passes.** With ``SolverCoupledProxy``'s lagged transfer,
 its default, a proxy resting on this entry's content does not come to rest with

@@ -1135,6 +1135,25 @@ def _keep_status(step: wp.array[wp.int32], kept: wp.array[wp.int32]):
 
 
 @wp.kernel
+def _count_step(count: wp.array[wp.int64]):
+    """One more step taken, counted on the device, so that a step captured in a graph counts at every replay."""
+    count[0] = count[0] + wp.int64(1)
+
+
+@wp.kernel
+def _records_due(count: wp.array[wp.int64], records_of: wp.array[wp.int64], due: wp.array[wp.int32]):
+    """``due[0]`` 1 when the contact records are not those of the last step (``records_of``, the step count when they
+    were written), else 0."""
+    due[0] = wp.where(records_of[0] != count[0], 1, 0)
+
+
+@wp.kernel
+def _records_written(count: wp.array[wp.int64], records_of: wp.array[wp.int64]):
+    """The contact records are those of the last step."""
+    records_of[0] = count[0]
+
+
+@wp.kernel
 def _nonzero_activations(
     tris: wp.array[wp.int32],
     tri_activations: wp.array[wp.float32],

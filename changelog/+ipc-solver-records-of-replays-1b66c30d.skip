@@ -1,0 +1,1 @@
+SolverIPC counts its steps on the device, so that the proxy feedback a coupled solver harvests outside a graph that holds the step is that of the last replay; it was the first replay's. Unreleased behaviour, so no release note.

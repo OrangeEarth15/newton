@@ -875,6 +875,70 @@ def test_proxy_feedback_is_the_contact_force(test, device):
     np.testing.assert_allclose(got[3], [0.0, 0.0, 0.02 * 9.81], atol=1e-3 * 0.02 * 9.81)
 
 
+def test_feedback_of_captured_steps(test, device):
+    """A coupled solver may capture an entry's step alone and harvest the proxies' feedback outside the graph, after
+    every replay. The harvest reads the records of the last replay: the solver counts its steps on the device and
+    brings the records up to date there. A proxy box resting on a box, pressed down by a body force 5 N larger at each
+    of four steps: the wrenches harvested after each of four replays of a captured step are those harvested after each
+    of four eager steps, from the same rest, to 1e-3 of the largest force, while each step's force differs from that of
+    the step before by more than ten times that."""
+    from newton.solvers.experimental.coupled import ModelView  # noqa: PLC0415
+
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    _box_body(builder, (0.0, 0.0, 0.1005), (0.2, 0.2, 0.1))
+    top = _box_body(builder, (0.0, 0.0, 0.2535), (0.05, 0.05, 0.05))
+    model = builder.finalize(device=device)
+    view = ModelView(model, "ipc")
+    view.mark_proxy_bodies(wp.array([top], dtype=int, device=device))
+    dt = 1.0 / 120.0
+    proxy_of_body = wp.array([-1, 0], dtype=int, device=device)
+
+    def at_rest():
+        solver = newton.solvers.SolverIPC(view, **_CONVERGED)
+        s0, s1 = view.state(), view.state()
+        for _ in range(120):
+            solver.step(s0, s1, None, None, dt)
+            s0, s1 = s1, s0
+        return solver, s0, s1
+
+    def press(state, k):
+        force = np.zeros((model.body_count, 6), np.float32)
+        force[top, 2] = -5.0 * k
+        state.body_f.assign(force)
+
+    def harvest(solver, state, state_out):
+        out = wp.zeros(1, dtype=wp.spatial_vector, device=device)
+        solver.coupling_harvest_proxy_wrenches(
+            proxy_of_body, out, body_qd_before=state.body_qd, state=state, state_out=state_out, contacts=None, dt=dt
+        )
+        return out.numpy()[0].astype(np.float64)
+
+    solver, s0, s1 = at_rest()
+    eager = []
+    for k in range(1, 5):
+        press(s0, k)
+        solver.step(s0, s1, None, None, dt)
+        eager.append(harvest(solver, s0, s1))
+        s0, s1 = s1, s0
+    eager = np.array(eager)
+    tolerance = 1e-3 * np.linalg.norm(eager[:, :3], axis=1).max()
+    change = np.abs(np.diff(eager[:, :3], axis=0)).max(axis=1)
+    test.assertGreater(change.min(), 10.0 * tolerance, f"the forces of the eager steps: {eager[:, :3].tolist()}")
+
+    solver, s0, s1 = at_rest()
+    with wp.ScopedCapture(device=device) as capture:
+        solver.step(s0, s1, None, None, dt)
+    replayed = []
+    for k in range(1, 5):
+        press(s0, k)
+        wp.capture_launch(capture.graph)
+        replayed.append(harvest(solver, s0, s1))
+        wp.copy(s0.body_q, s1.body_q)
+        wp.copy(s0.body_qd, s1.body_qd)
+    np.testing.assert_allclose(np.array(replayed), eager, rtol=0.0, atol=tolerance)
+
+
 @requires("uipc_warp")
 class TestSolverIPCCoupling(unittest.TestCase):
     """SolverIPC as an entry of Newton's coupled solvers: its view of the model, proxies and their feedback, the status
@@ -896,6 +960,7 @@ for name, func in (
     ("test_coupled_reset_is_the_solvers_reset", test_coupled_reset_is_the_solvers_reset),
     ("test_proxies_refuse_bdf2_and_al_ipc", test_proxies_refuse_bdf2_and_al_ipc),
     ("test_proxy_feedback_is_the_contact_force", test_proxy_feedback_is_the_contact_force),
+    ("test_feedback_of_captured_steps", test_feedback_of_captured_steps),
     ("test_coupled_entry_of_independent_worlds", test_coupled_entry_of_independent_worlds),
 ):
     add_function_test(TestSolverIPCCoupling, name, func, devices=devices)

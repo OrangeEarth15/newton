@@ -11,6 +11,7 @@ the rows of ``CONTACT_F``, one per contact term of a step with a force, from lib
 
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -20,7 +21,7 @@ import warp as wp
 from newton import Model, ModelBuilder, ParticleFlags, ShapeFlags, State
 from newton.solvers import SolverBase
 
-from .kernels import _contact_rows
+from .kernels import _contact_rows, _records_due, _records_written
 from .scene import _colliding_shapes, _kinematic_bodies, _own_elements, _proxy_bodies, _proxy_particles
 
 if TYPE_CHECKING:
@@ -430,8 +431,7 @@ def _make_contact_export(solver: SolverIPC) -> None:
     any capture: once a container requested ``CONTACT_F`` (:ref:`ipc-contact-output`), with what the contact rows read
     besides it, for a model whose contact holds a shape (one without has no rows); and for a coupled solver's proxies,
     whose feedback is the force of the contact terms on them (:ref:`ipc-coupling`). None otherwise."""
-    solver._contact_export = None
-    solver._export_step = -1  # the step whose records the export holds
+    solver._contact_export = solver._records_graph = None
     if solver._engine is None:
         return
     rows = solver._contact_output and len(solver._contact_shapes) > 0
@@ -439,6 +439,19 @@ def _make_contact_export(solver: SolverIPC) -> None:
         return
     device = solver.model.device
     solver._contact_export = solver._uipc_warp.arrays.ContactForces(solver._engine)
+    # the step count when the records were written (-1: never), and the flag of records not of the last step; outside a
+    # graph capture the records are brought up to date by a graph of their own, which decides on the device too
+    solver._records_of = wp.full(1, -1, dtype=wp.int64, device=device)
+    solver._records_stale = wp.zeros(1, dtype=wp.int32, device=device)
+    gc_enabled = gc.isenabled()
+    gc.disable()  # a collection inside the capture would record the release of other arrays
+    try:
+        with wp.ScopedCapture(device=device) as capture:
+            _refresh_records(solver)
+    finally:
+        if gc_enabled:
+            gc.enable()
+    solver._records_graph = capture.graph
     records = solver._contact_export.capacity
     blocks = max(1, min(-(-records // _CONTACT_ROW_BLOCK), 4 * device.sm_count))
     solver._contact_threads = blocks * _CONTACT_ROW_BLOCK
@@ -521,10 +534,27 @@ def _write_contacts(solver: SolverIPC, observables: SolverBase.Observables | Non
     )
 
 
-def _contact_records(solver: SolverIPC):
-    """libuipc-warp's ``ContactForces`` with the records of the last step: its ``update()`` enqueued once per step,
-    for the contact rows and the proxies' feedback alike."""
-    if solver._export_step != solver._steps:
+def _refresh_records(solver: SolverIPC) -> None:
+    """Enqueue the update of the contact records where they are not those of the last step: the step count and the
+    count when the records were written are compared on the device, and a conditional node runs ``update()``."""
+    device = solver.model.device
+    wp.launch(_records_due, 1, inputs=[solver._step_count, solver._records_of], outputs=[solver._records_stale],
+              device=device)  # fmt: skip
+
+    def update():
         solver._contact_export.update()
-        solver._export_step = solver._steps
+        wp.launch(_records_written, 1, inputs=[solver._step_count], outputs=[solver._records_of], device=device)
+
+    wp.capture_if(solver._records_stale, on_true=update)
+
+
+def _contact_records(solver: SolverIPC):
+    """libuipc-warp's ``ContactForces`` with the records of the last step, for the contact rows and the proxies' feedback
+    alike: ``update()`` runs once per step, decided on the device (``_refresh_records``), so that records read outside
+    a graph that holds the step are those of its last replay. Inside a capture the decision joins the caller's graph;
+    outside, the records' own graph is launched (no synchronization)."""
+    if solver.model.device.is_capturing:
+        _refresh_records(solver)
+    else:
+        wp.capture_launch(solver._records_graph)
     return solver._contact_export
