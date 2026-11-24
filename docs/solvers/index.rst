@@ -41,7 +41,7 @@ method details. For symptom-driven diagnosis and parameter tuning, start with
 Choosing a Solver
 -----------------
 
-MuJoCo, Kamino, and VBD currently have dedicated backend guides:
+MuJoCo, Kamino, VBD, and IPC currently have dedicated backend guides:
 
 - :doc:`MuJoCo <mujoco>` — generalized-coordinate rigid-body simulation and
   MuJoCo or MJCF workflows.
@@ -49,6 +49,8 @@ MuJoCo, Kamino, and VBD currently have dedicated backend guides:
   and hard frictional contacts; experimental.
 - :doc:`VBD <vbd>` — unified simulation of cloth, soft bodies, and rigid
   bodies in a single VBD-based solver; experimental.
+- :doc:`IPC <ipc>` — cloth, soft bodies, particles, and near-rigid bodies with
+  Incremental Potential Contact, which never lets surfaces cross; experimental.
 
 The other solver backends are documented through their linked API references
 and the comparison tables below.
@@ -182,17 +184,13 @@ Supported Features
   see :doc:`/concepts/determinism` for limitations and performance trade-offs.
 | :sup:`4` Simulated as MuJoCo flexes; particles that belong to no spring,
   triangle, or tetrahedron are not simulated. See :ref:`mujoco-flexes`.
-| :sup:`5` Incremental Potential Contact: barrier contact, or on request libuipc's augmented-Lagrangian contact, with
-  continuous collision detection between
-  soft bodies, cloth (with self-collision), particles, near-rigid affine bodies, static shapes, planes and
-  height fields, between the pairs that the collision groups, worlds and filter pairs let collide; springs and
-  particle-body attachments without damping; revolute, prismatic, fixed and ball joints as penalty energies; one
-  world besides the global
-  one, or several with ``coupled_worlds=True``, which keeps them apart in contact but solves them together, so that
-  a world's result depends on the others' iterations; on request its own contacts and their forces written into the
-  step's ``Contacts`` (``CONTACT_F``); an entry of the experimental coupled solvers, proxies included, whose passes
-  of a step after the first restart from the step's start kept on the device; requires the optional ``libuipc-warp``
-  package.
+| :sup:`5` Incremental Potential Contact (see :doc:`ipc`): a barrier, or on request libuipc's
+  augmented-Lagrangian contact, with continuous collision detection between soft bodies, cloth (with
+  self-collision), particles, near-rigid affine bodies, static shapes, planes and height fields, so that no surface
+  passes through another; surfaces at rest stay up to ``d_hat`` apart, and a model must start with its surfaces
+  apart. Joints are penalty energies; soft bodies are tetrahedra, whose activations are refused. Several worlds are
+  independent by default, each solved as it would be alone, or one solve with ``coupled_worlds=True``. Requires the
+  optional ``libuipc-warp`` package.
 
 .. experimental::
     :class:`~newton.solvers.SolverSteel`'s public API and behavior may change without prior notice.
@@ -251,15 +249,17 @@ formulation.
   :class:`~newton.solvers.SolverMuJoCo` when ``use_mujoco_contacts=False``. See
   :ref:`Hydroelastic Contacts`.
 
-:class:`~newton.solvers.SolverIPC` finds its own contacts and reads ``mu`` only:
-its contact stiffness is the barrier's, the solver's ``kappa`` for every pair,
-taken as given, or with ``adaptive_kappa`` kept in libuipc's scene-adaptive
-range as libuipc keeps it, with independent worlds in the range of each world
-alone.
+:class:`~newton.solvers.SolverIPC` finds its own contacts and reads ``mu``, and
+``kd`` only with ``contact_damping="material"``. Its contact stiffness is the
+barrier's: the solver's ``kappa`` for every pair, taken as given, or with
+``adaptive_kappa`` kept in libuipc's scene-adaptive range, as libuipc keeps it.
 It takes ``margin`` as the contact thickness of a shape's surface and
 :attr:`~newton.Model.particle_radius` as that of a particle on no cloth or
-tetrahedron, so that two shapes rest the sum of their margins apart; ``gap`` is
-not read, the solver's ``d_hat`` being its detection distance.
+tetrahedron, so that two shapes rest the sum of their margins apart. It does not
+read ``gap`` (its ``d_hat`` is its detection distance), ``ke``, ``kf``, ``ka``
+or ``kh``, and warns once when a colliding shape sets ``restitution``,
+``mu_static``, ``mu_torsional`` or ``mu_rolling`` to other than the default,
+since its contact has one friction coefficient and no restitution.
 
 .. _Joint feature support:
 
@@ -278,7 +278,7 @@ enforce joints as pairwise body constraints but do not use the articulation kine
 constraints, using a compliant augmented-Lagrangian (ALM) formulation.
 :class:`~newton.solvers.SolverIPC` holds joints as penalty energies between affine bodies (libuipc's
 affine-body joints), stiff in proportion to the mass of the dynamic bodies a joint joins, and writes
-``joint_q`` and ``joint_qd`` after every step.
+``joint_q`` and ``joint_qd`` after every step; see :ref:`ipc-joints`.
 :class:`~newton.solvers.SolverStyle3D` and :class:`~newton.solvers.SolverImplicitMPM` do not support joints.
 
 **Joint types**
@@ -372,11 +372,13 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
 
 | :sup:`1` DISTANCE joints are treated as FREE (no distance constraint enforcement).
 | :sup:`2` See :ref:`kamino-rod-joints` for the supported rod joint properties.
-| :sup:`17` SolverIPC takes a D6 joint that locks what one of libuipc's joints locks: no axis (fixed), one angular
-  axis (revolute), one linear axis (prismatic), three orthonormal angular axes (ball), or three orthonormal linear and
-  three orthonormal angular axes (no joint). Other D6 joints raise ``NotImplementedError``.
-| :sup:`18` SolverIPC holds a distance joint of one length (equal bounds) as libuipc's soft vertex stitch of that rest
-  length, and one with both bounds negative as a free joint; a range or a single bound raises ``NotImplementedError``.
+| :sup:`17` SolverIPC takes D6 joints of no axis (a fixed joint), one angular axis (a revolute joint), one linear
+  axis (a prismatic joint), two angular axes (a universal joint), three orthonormal angular axes (a ball joint) and
+  three orthonormal linear and three orthonormal angular axes (no joint). Other D6 joints raise
+  ``NotImplementedError``. See :ref:`ipc-d6-joints`.
+| :sup:`18` SolverIPC holds a distance joint of one length with a penalty, keeps one with a range or one bound inside
+  it with the cubic limit of its joints, and takes one with both bounds negative as a free joint. See
+  :ref:`ipc-distance-joints`.
 
 **Joint properties**
 
@@ -411,7 +413,7 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
      - |yes|
      - |no|
      - |yes|
-     - REVOLUTE, PRISMATIC :sup:`15`
+     - REVOLUTE, PRISMATIC, BALL, D6 :sup:`15`
    * - :attr:`~newton.Model.joint_stiffness` / :attr:`~newton.Model.joint_rest_q`
      - REVOLUTE, PRISMATIC, D6
      - REVOLUTE, PRISMATIC, D6
@@ -420,7 +422,7 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
      - Scalar joints and isotropic BALL springs
      - ROD ``joint_rest_q`` only
      - |no|
-     - REVOLUTE, PRISMATIC
+     - REVOLUTE, PRISMATIC, BALL, D6 :sup:`15`
    * - :attr:`~newton.Model.joint_friction`
      - |no|
      - |yes| :sup:`9`
@@ -429,7 +431,7 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
      - |yes|
      - |no|
      - |yes|
-     - |no| :sup:`15`
+     - REVOLUTE, PRISMATIC, BALL, D6 :sup:`15`
    * - :attr:`~newton.Model.joint_limit_lower` / :attr:`~newton.Model.joint_limit_upper`
      - |yes|
      - |yes| :sup:`10`
@@ -438,7 +440,7 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
      - |yes|
      - |yes|
      - |yes|
-     - REVOLUTE, PRISMATIC
+     - REVOLUTE, PRISMATIC, D6 :sup:`16`
    * - :attr:`~newton.Model.joint_limit_ke` / :attr:`~newton.Model.joint_limit_kd`
      - |yes|
      - |no|
@@ -456,7 +458,7 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
      - |yes|
      - |no|
      - |yes|
-     - REVOLUTE, PRISMATIC :sup:`15`
+     - REVOLUTE, PRISMATIC, BALL, D6 :sup:`15`
    * - :attr:`~newton.Model.joint_velocity_limit`
      - |no|
      - |yes| :sup:`12`
@@ -468,16 +470,18 @@ affine-body joints), stiff in proportion to the mass of the dynamic bodies a joi
      - |no| :sup:`15`
 
 | :sup:`2` Not enforced for BALL joints in SemiImplicit.
-| :sup:`15` SolverIPC takes the armature of a revolute or prismatic joint as the inertia of its coordinate, and
-  bounds the force of a drive by an effort limit below 1e6 as decided at the start of every step (where MuJoCo clamps
-  it), so that a step that crosses the bound takes it one step late. It warns of a velocity limit below 1e6, which
-  it does not enforce, and raises ``NotImplementedError`` instead of ignoring the property for armature on a ball or
-  free joint, for non-zero friction, and, with ``enable_joint_effort_limit=False``, for an effort limit below 1e6 on a
-  degree of freedom with a drive.
-| :sup:`16` SolverIPC enforces a limit as libuipc's cubic penalty, set to push back with ``joint_limit_ke`` times
-  the overshoot at an overshoot of 1e-3 rad or m, more steeply beyond, and damps a joint that starts a step past a
-  limit by ``joint_limit_kd``, as Featherstone and SemiImplicit do; with ``enable_joint_limit_damping=False``
-  ``joint_limit_kd`` is not read.
+| :sup:`15` SolverIPC takes these properties on revolute and prismatic joints, on ball joints (per axis of the
+  parent's joint frame, on the rotation vector of the joint's rotation), and on D6 joints of one axis or of two
+  angular axes (universal joints); it raises ``NotImplementedError`` for them on free joints and on D6 joints of three
+  angular axes. Joint friction is libuipc's smoothed friction, which creeps below ``eps_velocity``; a model with joint
+  friction takes tighter Newton tolerances. An effort limit below 1e6 bounds the drive's force as decided at the start
+  of every step (where MuJoCo clamps it), so a step that crosses the bound takes it one step late. The solver warns of
+  a velocity limit below 1e6, which it does not enforce. See :ref:`ipc-joints`.
+| :sup:`16` SolverIPC enforces a limit, of a revolute, prismatic or universal joint's coordinate, as libuipc's cubic
+  penalty, set to push back with ``joint_limit_ke`` times the overshoot at an overshoot of 1e-3 rad or m, more steeply
+  beyond, and damps a joint that starts a step past a limit by ``joint_limit_kd``, as Featherstone and SemiImplicit
+  do; with ``enable_joint_limit_damping=False`` ``joint_limit_kd`` is not read. It raises ``NotImplementedError`` for
+  limits on ball and free joints.
 
 SemiImplicit angular springs use principal coordinates in [-pi, pi). Crossing
 that boundary produces a force jump of ``2*pi*stiffness`` and can destabilize
@@ -508,7 +512,7 @@ motion; see :ref:`passive-joint-springs` for details.
      - |yes|
      - |yes| :sup:`7`
      - |yes|
-     - REVOLUTE, PRISMATIC
+     - REVOLUTE, PRISMATIC, BALL, D6 :sup:`15`
    * - :attr:`~newton.Model.joint_target_mode`
      - |no|
      - |no|
@@ -552,7 +556,7 @@ motion; see :ref:`passive-joint-springs` for details.
      - |yes|
      - |no|
      - |no|
-     - |no|
+     - 🟨 :sup:`19`
    * - Mimic joints
      - |yes| :sup:`3`
      - |yes| :sup:`13`
@@ -561,7 +565,7 @@ motion; see :ref:`passive-joint-springs` for details.
      - |yes| :sup:`6`
      - |yes| :sup:`5`
      - |no|
-     - |no|
+     - |yes| :sup:`19`
    * - Particle-body attachments
      - |no|
      - |no|
@@ -570,7 +574,7 @@ motion; see :ref:`passive-joint-springs` for details.
      - |no|
      - |yes| :sup:`14`
      - |no|
-     - |no|
+     - |yes| :sup:`14`
 
 | :sup:`3` Featherstone eliminates follower degrees of freedom from its reduced dynamics and transfers follower forces and inertia to the reference joint.
 | :sup:`4` SemiImplicit enforces joint-owned mimic relationships with penalty springs configured by ``joint_mimic_ke`` and ``joint_mimic_kd``.
@@ -585,6 +589,10 @@ motion; see :ref:`passive-joint-springs` for details.
 | :sup:`13` Steel enforces each mimic relationship within one articulation as one bilateral constraint row per follower coordinate; mimics of BALL, FREE, and DISTANCE joints and mimics across articulations are rejected. It also enforces loop-closing BALL joints as point constraints, loop-closing REVOLUTE joints as point constraints plus two hinge-axis constraints, and loop-closing FIXED joints as point constraints plus three rotation constraints. The propagation contact response (``articulated_contact_response="propagation"``) rejects loop-closing joints and solves mimic rows iteratively.
 | :sup:`14` See :ref:`Particle-body attachments` for authoring and semantics. Attachments spanning two
   solvers are coupled by :class:`~newton.solvers.experimental.coupled.SolverCoupledADMM` instead.
+| :sup:`19` SolverIPC holds a mimic relation as a penalty on the joint coordinates, stiff in proportion to the mass
+  the two joints join. It takes the CONNECT and WELD rows that Newton's importers turn into loop joints, by
+  SolverSteel's rule, and the JOINT rows that repeat a mimic relation; it raises ``NotImplementedError`` for every
+  other enabled equality row. See :ref:`ipc-joint-terms`.
 
 .. _Particle-body attachments:
 
@@ -625,7 +633,9 @@ and the body point, a term of each step's implicit solve, so a finite
 attachment is the spring of implicit Euler and its forces are equal and
 opposite. A hard attachment takes the penalty of SolverIPC's ball joint, and the
 attachment's ``damping`` resists the rate of the vector between the particle and
-the body point, as SolverVBD's (see :ref:`ipc-damping`).
+the body point, as SolverVBD's. An attached particle does not collide with its
+body, so that it may be attached on the body's surface (see
+:ref:`ipc-attachments`).
 
 When the endpoints of a finite-stiffness attachment belong to two different solvers in a coupled simulation,
 :class:`~newton.solvers.experimental.coupled.SolverCoupledADMM` turns the same
@@ -633,8 +643,10 @@ model rows into cross-solver interface constraints; see :ref:`ADMM coupling`.
 The two cases are mutually exclusive, so no attachment is applied twice, and a
 row whose body or particle is owned by no solver applies no force at all. The
 coupler also warns when both endpoints belong to one entry whose solver does not
-support attachments. Hard attachments require both endpoints in one VBD entry;
-the coupler raises an error for other ownership arrangements.
+support attachments. Hard attachments require both endpoints in one entry whose
+solver applies attachments (``coupling_supports_particle_body_attachments()``:
+SolverVBD and SolverIPC); the coupler raises an error for other ownership
+arrangements.
 
 .. _External forces:
 
