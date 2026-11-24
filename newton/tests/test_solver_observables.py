@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import functools
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -17,7 +18,13 @@ import newton
 from newton.selection import ArticulationView
 from newton.sensors import SensorContact
 from newton.solvers.experimental.coupled import SolverCoupled, SolverCoupledADMM
-from newton.tests.unittest_utils import MUJOCO_MODULES, add_function_test, get_test_devices, requires
+from newton.tests.unittest_utils import (
+    MUJOCO_MODULES,
+    add_function_test,
+    get_cuda_test_devices,
+    get_test_devices,
+    requires,
+)
 from newton.viewer import ViewerNull
 
 
@@ -806,24 +813,18 @@ def test_owned_and_external_pipelines(test, device):
                 np.testing.assert_array_equal(rows[soft_start + 1 :], 0.0)
 
 
-@requires(*MUJOCO_MODULES)
-def test_native_solvers_follow_step_contacts(test, device):
-    """Export MuJoCo and Kamino geometry and forces to the buffer each step uses."""
+def _test_follow_step_contacts(test, device, solvers, height=0.099):
+    """Export the geometry and forces of each ``(native, make_solver)`` of ``solvers(model)`` to the buffer each step
+    uses, for a ball of radius 0.1 m whose centre starts ``height`` above the ground."""
     builder = newton.ModelBuilder()
     builder.begin_world()
-    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.099), wp.quat_identity()))
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, height), wp.quat_identity()))
     builder.add_shape_sphere(body, radius=0.1, label="ball")
     builder.add_ground_plane()
     builder.end_world()
     model = builder.finalize(device=device)
     sensor = SensorContact(model, sensing_shapes="ball", request_contact_attributes=False)
-    kamino_native = newton.solvers.SolverKamino.Config(use_collision_detector=True)
-    for native, make_solver in (
-        (False, lambda: newton.solvers.SolverMuJoCo(model, use_mujoco_contacts=False)),
-        (True, lambda: newton.solvers.SolverMuJoCo(model)),
-        (False, lambda: newton.solvers.SolverKamino(model)),
-        (True, lambda: newton.solvers.SolverKamino(model, config=kamino_native)),
-    ):
+    for native, make_solver in solvers(model):
         solver = make_solver()
         with test.subTest(solver=type(solver).__name__, native=native):
             pipeline = newton.CollisionPipeline(model, rigid_contact_max=64, soft_contact_max=0)
@@ -841,6 +842,31 @@ def test_native_solvers_follow_step_contacts(test, device):
                 np.testing.assert_allclose(np.abs(sensor.total_force.numpy()[0]), np.abs(force), rtol=1.0e-5)
 
 
+@requires(*MUJOCO_MODULES)
+def test_native_solvers_follow_step_contacts(test, device):
+    """Export MuJoCo and Kamino geometry and forces to the buffer each step uses."""
+    kamino_native = newton.solvers.SolverKamino.Config(use_collision_detector=True)
+    _test_follow_step_contacts(
+        test,
+        device,
+        lambda model: (
+            (False, lambda: newton.solvers.SolverMuJoCo(model, use_mujoco_contacts=False)),
+            (True, lambda: newton.solvers.SolverMuJoCo(model)),
+            (False, lambda: newton.solvers.SolverKamino(model)),
+            (True, lambda: newton.solvers.SolverKamino(model, config=kamino_native)),
+        ),
+    )
+
+
+@requires("uipc_warp")
+def test_ipc_follows_step_contacts(test, device):
+    """Export SolverIPC's geometry and forces to the buffer each step uses. SolverIPC refuses a start inside the ground,
+    so the ball starts 5 mm above it, inside d_hat."""
+    _test_follow_step_contacts(
+        test, device, lambda model: ((True, lambda: newton.solvers.SolverIPC(model)),), height=0.105
+    )
+
+
 class TestContactObservableOwnership(unittest.TestCase):
     """Verify contact observables are owned by their Contacts, not by model-wide capacity."""
 
@@ -854,6 +880,15 @@ for _name, _func in (
     ("test_native_solvers_follow_step_contacts", test_native_solvers_follow_step_contacts),
 ):
     add_function_test(TestContactObservableOwnership, _name, _func, devices=devices)
+# SolverIPC (an expected failure): it writes one row per contact term of its barrier, five for the ball on the ground,
+# where the test wants the one row of Newton's analytic sphere-plane contact ("Contact output" in docs/solvers/ipc.rst);
+# it follows the buffer of each step, and the sensor reads the rows' total force
+add_function_test(
+    TestContactObservableOwnership,
+    "test_native_solvers_follow_step_contacts_ipc",
+    unittest.expectedFailure(functools.partial(test_ipc_follows_step_contacts)),
+    devices=get_cuda_test_devices(),
+)
 
 
 if __name__ == "__main__":
