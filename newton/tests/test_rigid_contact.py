@@ -1119,8 +1119,9 @@ for device in devices:
             continue
         if device.is_cuda and solver_name == "mujoco_cpu":
             continue
-        # SolverIPC (an expected failure): the tilted box still rocks after 1 s, at 1.04 m/s over the bound of 1: the
-        # barrier is nearly elastic, and SolverIPC reads no restitution and has no contact damping
+        # SolverIPC (an expected failure): after 1 s the box that landed tilted on the other still tips over its edge at
+        # 1.04 m/s, over the bound of 1: the barrier is nearly elastic, and contact damping, off by default, does not
+        # settle the box at Newton's shape kd (contact_damping="material") either
         box_drop = test_box_drop
         if solver_name == "ipc":
             box_drop = unittest.expectedFailure(functools.partial(test_box_drop))
@@ -1130,6 +1131,16 @@ for device in devices:
             box_drop,
             devices=[device],
             solver_fn=solver_fn,
+        )
+    # SolverIPC with Newton's shape kd as its contact damping (contact_damping="material"), an expected failure: the box
+    # that landed tilted on the other still tips over its edge after 1 s, at 1.16 m/s over the bound of 1
+    if device.is_cuda:
+        add_function_test(
+            TestRigidContact,
+            "test_box_drop_contact_damping_ipc",
+            unittest.expectedFailure(functools.partial(test_box_drop)),
+            devices=[device],
+            solver_fn=requires("uipc_warp")(lambda model: newton.solvers.SolverIPC(model, contact_damping="material")),
         )
 
 

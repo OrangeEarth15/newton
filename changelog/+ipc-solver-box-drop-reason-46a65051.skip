@@ -1,0 +1,1 @@
+Test-only: test_box_drop runs with SolverIPC's contact damping too, both cases expected failures with their causes; no user-facing change.
