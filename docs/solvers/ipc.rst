@@ -317,9 +317,13 @@ The status is a mask of :class:`~newton.solvers.SolverIPC.StatusBits`. A bit of
   describes that flag.
 - ``TRAVERSAL_EXHAUSTED``: a search of the collision tree ran out of its node
   budget, so contact candidates are missing.
+- ``INVALID_STITCH``: a stiffness or rest length of an attachment, a spring or
+  a distance joint, written since the last step, is not finite or is negative;
+  the step did not run.
 
-``NEWTON_LIMIT`` (the loop reached ``newton_max_iter``) and
-``LINE_SEARCH_LIMIT`` (a line search ran out of trials) do not fail the step.
+``NEWTON_LIMIT`` (the loop reached ``newton_max_iter``), ``LINE_SEARCH_LIMIT``
+(a line search ran out of trials) and ``PCG_LIMIT`` (a linear solve stopped at
+its iteration limit) do not fail the step.
 Under friction a line search can run out of trials in some runs and not in
 others: lagged friction has no curvature beyond its smoothing band, so a Newton
 update can slide a vertex past the turn of the friction energy, and the

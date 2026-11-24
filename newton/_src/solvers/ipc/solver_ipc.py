@@ -521,7 +521,7 @@ class SolverIPC(SolverBase, CouplingInterface):
     class StatusBits(IntFlag):
         """Bits of the per-world ``Observables.status`` mask: how the solve of the step ended.
 
-        The step failed, and its result must not be used, when a bit of :attr:`SolverIPC.StatusBits.FAILED` is set. The two
+        The step failed, and its result must not be used, when a bit of :attr:`SolverIPC.StatusBits.FAILED` is set. The three
         iteration limits are not failures, and neither is a bit of a later libuipc-warp outside
         :attr:`SolverIPC.StatusBits.KNOWN`.
         """
@@ -562,6 +562,14 @@ class SolverIPC(SolverBase, CouplingInterface):
         NEWTON_LIMIT = 1 << 8
         """The Newton loop ran to ``newton_max_iter`` without converging."""
 
+        PCG_LIMIT = 1 << 9
+        """A linear solve stopped at its iteration limit before it reached its tolerance; the Newton iteration went
+        on from that solve's result, as libuipc's does."""
+
+        INVALID_STITCH = 1 << 10
+        """A stitch's stiffness or rest length written since the last step, through an attachment, a spring or a
+        distance joint, is not finite or is negative; the step did not run."""
+
         FAILED = (
             OVERFLOW
             | NONFINITE_ENERGY
@@ -570,10 +578,11 @@ class SolverIPC(SolverBase, CouplingInterface):
             | INVALID_CCD_STEP
             | THICKNESS_VIOLATED
             | TRAVERSAL_EXHAUSTED
+            | INVALID_STITCH
         )
         """The bits of a failed step."""
 
-        KNOWN = FAILED | LINE_SEARCH_LIMIT | NEWTON_LIMIT
+        KNOWN = FAILED | LINE_SEARCH_LIMIT | NEWTON_LIMIT | PCG_LIMIT
         """Every bit this class names. A later libuipc-warp may set bits above them in the status mask (its
         ``FrameStatusFlags``): such a bit does not fail the step, and :meth:`SolverIPC.check_status` warns, naming it
         as libuipc-warp does."""
@@ -1938,8 +1947,9 @@ class SolverIPC(SolverBase, CouplingInterface):
                 is no entry of a coupled solver.
 
         Warns:
-            NewtonWarning: When :attr:`SolverIPC.StatusBits.NEWTON_LIMIT` or
-                :attr:`SolverIPC.StatusBits.LINE_SEARCH_LIMIT` is set. Neither fails the step.
+            NewtonWarning: When :attr:`SolverIPC.StatusBits.NEWTON_LIMIT`,
+                :attr:`SolverIPC.StatusBits.LINE_SEARCH_LIMIT` or :attr:`SolverIPC.StatusBits.PCG_LIMIT` is set. None
+                of them fails the step.
         """
         if self.model.device.is_capturing:
             raise RuntimeError("SolverIPC.check_status() reads from the device; call it outside graph capture.")
@@ -1988,6 +1998,11 @@ class SolverIPC(SolverBase, CouplingInterface):
                 )
             if failed & self.StatusBits.TRAVERSAL_EXHAUSTED:
                 causes.append("A BVH traversal ran out of its node budget, so contact candidates are missing.")
+            if failed & self.StatusBits.INVALID_STITCH:
+                causes.append(
+                    "A stitch's stiffness or rest length written since the last step is not finite or is negative: "
+                    "attachments, springs and distance joints need finite, non-negative values."
+                )
             if self._independent:  # every world its own bits: the worlds that failed, the others took their step
                 worlds = {int(k): int(words[k]) for k in np.flatnonzero(words & int(self.StatusBits.FAILED))}
                 which = self._name_worlds(worlds)
@@ -2017,6 +2032,8 @@ class SolverIPC(SolverBase, CouplingInterface):
             limits.append(f"the Newton loop stopped at newton_max_iter without converging{residual}")
         if bits & self.StatusBits.LINE_SEARCH_LIMIT:
             limits.append("a line search ran out of its line_search_max_iter trials")
+        if bits & self.StatusBits.PCG_LIMIT:
+            limits.append("a linear solve stopped at its iteration limit")
         if word & ~known:
             limits.append(f"libuipc-warp set {self._bit_names(word & ~known)}, which StatusBits do not name")
         if limits:

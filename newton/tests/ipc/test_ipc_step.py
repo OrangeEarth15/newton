@@ -82,7 +82,7 @@ def test_check_status(test, device):
 
 
 def test_status_bits_of_a_later_libuipc_warp(test, device):
-    """A libuipc-warp with a status bit SolverIPC does not name (a made-up PCG_LIMIT, 1 << 9) is taken: the import
+    """A libuipc-warp with a status bit SolverIPC does not name (a made-up LATER_FLAG, 1 << 20) is taken: the import
     checks only that every StatusBits bit is one of its flags under its name. check_status takes the extra bit as no
     failure and warns, naming it as libuipc-warp does, and still raises on a failure next to it. A libuipc-warp without
     a StatusBits bit, or with one under another name, is refused."""
@@ -91,7 +91,7 @@ def test_status_bits_of_a_later_libuipc_warp(test, device):
     import uipc_warp.arrays  # noqa: PLC0415
 
     members = {flag.name: int(flag) for flag in uipc_warp.arrays.FrameStatusFlags}
-    later = enum.IntFlag("FrameStatusFlags", {**members, "PCG_LIMIT": 1 << 9})
+    later = enum.IntFlag("FrameStatusFlags", {**members, "LATER_FLAG": 1 << 20})
     without = enum.IntFlag("FrameStatusFlags", {k: v for k, v in members.items() if k != "NEWTON_LIMIT"})
     renamed = enum.IntFlag(
         "FrameStatusFlags", {("TOO_CLOSE" if k == "THICKNESS_VIOLATED" else k): v for k, v in members.items()}
@@ -111,16 +111,34 @@ def test_status_bits_of_a_later_libuipc_warp(test, device):
             s0, s1 = model.state(), model.state()
             solver.step(s0, s1, None, None, 0.01, observables=observables)
             words = observables.status.numpy()
-            observables.status.assign(words | (1 << 9))
+            observables.status.assign(words | (1 << 20))
             with test.assertWarnsRegex(
-                newton.NewtonWarning, "libuipc-warp set PCG_LIMIT, which StatusBits do not name"
+                newton.NewtonWarning, "libuipc-warp set LATER_FLAG, which StatusBits do not name"
             ):
                 test.assertFalse(solver.check_status(observables))
-            observables.status.assign(words | (1 << 9) | int(solver.StatusBits.THICKNESS_VIOLATED))
+            observables.status.assign(words | (1 << 20) | int(solver.StatusBits.THICKNESS_VIOLATED))
             with test.assertRaisesRegex(RuntimeError, "a step failed on THICKNESS_VIOLATED"):
                 solver.check_status(observables)
     finally:
         newton.solvers.SolverIPC._uipc_warp = imported
+
+
+def test_pcg_limit_warns_and_invalid_stitch_fails(test, device):
+    """libuipc-warp's PCG_LIMIT (a linear solve stopped at its iteration limit) is a notice: check_status warns and
+    the step stands. Its INVALID_STITCH (a stitch value written between steps that is not finite or is negative)
+    fails the step, and check_status says which input to fix."""
+    model, _ = _boxes_apart(device)
+    solver = newton.solvers.SolverIPC(model)
+    observables = solver.observables({solver.ObservableKind.STATUS})
+    s0, s1 = model.state(), model.state()
+    solver.step(s0, s1, None, None, 0.01, observables=observables)
+    words = observables.status.numpy()
+    observables.status.assign(words | int(solver.StatusBits.PCG_LIMIT))
+    with test.assertWarnsRegex(newton.NewtonWarning, "a linear solve stopped at its iteration limit"):
+        test.assertFalse(solver.check_status(observables))
+    observables.status.assign(words | int(solver.StatusBits.INVALID_STITCH))
+    with test.assertRaisesRegex(RuntimeError, "failed on INVALID_STITCH.*stitch's stiffness or rest length"):
+        solver.check_status(observables)
 
 
 def test_default_d_hat_follows_small_features(test, device):
@@ -922,6 +940,7 @@ for name, func in (
     ("test_contact_at_start_fails", test_contact_at_start_fails),
     ("test_check_status", test_check_status),
     ("test_status_bits_of_a_later_libuipc_warp", test_status_bits_of_a_later_libuipc_warp),
+    ("test_pcg_limit_warns_and_invalid_stitch_fails", test_pcg_limit_warns_and_invalid_stitch_fails),
     ("test_default_d_hat_follows_small_features", test_default_d_hat_follows_small_features),
     ("test_default_d_hat_follows_small_free_particles", test_default_d_hat_follows_small_free_particles),
     ("test_d_hat_per_shape", test_d_hat_per_shape),

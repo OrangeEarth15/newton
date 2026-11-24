@@ -1,0 +1,1 @@
+SolverIPC's `StatusBits` name libuipc-warp's two new status bits: `PCG_LIMIT`, a linear solve that stopped at its iteration limit, which `check_status` reports as a warning, and `INVALID_STITCH`, a stiffness or rest length written between steps that is not finite or is negative, which fails the step.
