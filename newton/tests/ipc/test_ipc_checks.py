@@ -14,10 +14,8 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.tests.ipc._fixtures import _box_body, _worlds_at
+from newton.tests.ipc._fixtures import _TIGHT, _box_body, _worlds_at
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
-
-_TIGHT = {"newton_velocity_tol": 1.0e-6, "linear_tol_rate": 1.0e-12, "semi_implicit": False}
 
 
 def _bodies(device, count, kinematic=(), gravity=-9.81, inertia=(1.0e-3, 1.0e-3, 1.0e-3)):

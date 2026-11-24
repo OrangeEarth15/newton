@@ -10,9 +10,9 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton.tests.ipc._fixtures import _TIGHT
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
-_TIGHT = {"newton_velocity_tol": 1.0e-6, "linear_tol_rate": 1.0e-12, "semi_implicit": False}
 _G = 9.81
 
 

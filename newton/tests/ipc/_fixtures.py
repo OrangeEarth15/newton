@@ -363,8 +363,15 @@ def _rigid_rows(contacts, observables):
     )
 
 
-# tight tolerances of the comparisons with SolverIPC alone
+# Tight Newton tolerances, for comparing SolverIPC's steps with a closed form or with SolverIPC alone: a step ends once a
+# Newton update moves no vertex by more than newton_velocity_tol * dt (1e-6 m/s: 1e-8 m at dt = 0.01 s), each linear
+# solve reaches 1e-12 of its residual, and libuipc's semi-implicit early exit is off. The rotations of affine bodies
+# keep the default newton_transrate_tol (0.1 1/s); _TIGHT_ROTATIONS bounds them too.
 _TIGHT = {"newton_velocity_tol": 1.0e-6, "linear_tol_rate": 1.0e-12, "semi_implicit": False}
+
+# _TIGHT with newton_transrate_tol 1e-6 1/s as well: a step also ends only once a Newton update changes no affine body's
+# matrix by more than 1e-6 * dt, for the tests of turning bodies and of joint coordinates
+_TIGHT_ROTATIONS = {**_TIGHT, "newton_transrate_tol": 1.0e-6}
 
 
 # converged steps for proxies: a proxy's feedback is the force of the step's contact terms at its end, which the stiff

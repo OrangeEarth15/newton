@@ -28,11 +28,10 @@ import warp as wp
 
 import newton
 from newton._src.solvers.ipc.features import joint_terms
-from newton.tests.ipc._fixtures import _TINY_LISTS, _box_body
+from newton.tests.ipc._fixtures import _TIGHT_ROTATIONS, _TINY_LISTS, _box_body
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
-# Newton tolerances far below the friction's smoothing band (eps_velocity dt): the steps converge to their minimum
-_TIGHT = {"newton_velocity_tol": 1e-6, "newton_transrate_tol": 1e-6, "semi_implicit": False, "linear_tol_rate": 1e-10}
+# _TIGHT_ROTATIONS lies far below the friction's smoothing band (eps_velocity dt): the steps converge to their minimum
 _EPS_V = 0.01  # SolverIPC's eps_velocity [m/s, rad/s]
 _KIND = newton.solvers.SolverBase.ObservableKind
 
@@ -129,7 +128,7 @@ def test_mimic_penalty_and_enabled_flags(test, device):
             model = _two_hinges(device, multiplier=-1.5, row=row)
             control = model.control()
             control.joint_f.assign(np.array([3.0, 2.0], np.float32))
-            solver = newton.solvers.SolverIPC(model, **_TIGHT)
+            solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
             q, _ = _steps(model, solver, 30, dt, control)
             K = solver._joint_strength_ratio * float(model.body_mass.numpy().sum())
             test.assertAlmostEqual((q[-1, 1] + 1.5 * q[-1, 0]) / (2.0 * dt * dt / K), 1.0, delta=1e-5)
@@ -150,7 +149,7 @@ def test_mimic_coefficients_change_in_place(test, device):
     model = _two_hinges(device, multiplier=0.5)
     control = model.control()
     control.joint_f.assign(np.array([1.0, 0.0], np.float32))
-    solver = newton.solvers.SolverIPC(model, **_TIGHT)
+    solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
     s0, s1 = model.state(), model.state()
     newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
     solver.step(s0, s1, control, None, 0.01)
@@ -191,7 +190,7 @@ def test_joint_friction(test, device):
                 model, inertia = _hinged_box(device, kind, friction=F)
                 control = model.control()
                 control.joint_f.assign(np.array([load * F], np.float32))
-                q, _ = _steps(model, newton.solvers.SolverIPC(model, **_TIGHT), 30, dt, control)
+                q, _ = _steps(model, newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS), 30, dt, control)
                 v = np.diff(np.concatenate([[0.0], q[:, 0]])) / dt
                 if load < 1.0:
                     np.testing.assert_allclose(v[-10:], _EPS_V * (1.0 - math.sqrt(1.0 - load)), rtol=1e-4)
@@ -282,7 +281,7 @@ def test_joint_equality_rows_repeating_a_mimic(test, device):
     test.assertEqual((model.constraint_mimic_count, model.mujoco.equality_constraint_count), (1, 1))
     control = model.control()
     control.joint_f.assign(np.array([0.5, 0.0], np.float32))
-    q, _ = _steps(model, newton.solvers.SolverIPC(model, **_TIGHT), 20, 0.01, control)
+    q, _ = _steps(model, newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS), 20, 0.01, control)
     test.assertGreater(abs(q[-1, 0]), 0.05)
     test.assertAlmostEqual(q[-1, 1], 0.1 - 1.5 * q[-1, 0], delta=1e-5)
 
@@ -303,7 +302,7 @@ def test_parent_force_holds_the_friction(test, device):
     model, _ = _hinged_box(device, friction=2.0)
     control = model.control()
     control.joint_f.assign(np.array([1.0], np.float32))
-    solver = newton.solvers.SolverIPC(model, **_TIGHT)
+    solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
     observables = solver.observables(kinds={_KIND.BODY_PARENT_F})
     _, parent = _steps(model, solver, 30, 0.01, control, observables)
     test.assertLess(abs(parent[-1, 0, 5]), 1e-3)  # without the friction's records: 1 N m
@@ -331,7 +330,7 @@ def test_grown_lists_keep_the_terms_inputs(test, device):
     results = []
     for tiny in (False, True):
         m = model()
-        solver = newton.solvers.SolverIPC(m, **_TIGHT)
+        solver = newton.solvers.SolverIPC(m, **_TIGHT_ROTATIONS)
         if tiny:
             solver._make_engine(_TINY_LISTS)
         q, _ = _steps(m, solver, 45, 0.01)
@@ -405,7 +404,7 @@ def test_fixed_tendon_scene(test, device):
             q = model.joint_q.numpy()
             q[0::2] = 0.5  # the first slider of every world (the root is welded to the world: no coordinates)
             model.joint_q.assign(q)
-            solver = newton.solvers.SolverIPC(model, **_TIGHT)
+            solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
             got, _ = _steps(model, solver, 200, 0.02)
             mass = model.body_mass.numpy().astype(np.float64)
             ref = _recurrence((0.5, 0.0), mass[1:3], 2.0, 1.0, 0.02, 200)
@@ -422,7 +421,7 @@ def test_tendon_limit(test, device):
     model = _sliders(device, tendon='range="-0.1 0.1" solreflimit="0.02 1" solimplimit="0.9 0.95 0.001"')
     control = model.control()
     control.joint_f.assign(np.array([1.0, 1.0], np.float32))
-    q, _ = _steps(model, newton.solvers.SolverIPC(model, **_TIGHT), 300, 0.01, control)
+    q, _ = _steps(model, newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS), 300, 0.01, control)
     mass = model.body_mass.numpy().astype(np.float64)
     ke = 1.0 / (0.02**2 * (1.0 / mass[1] + 1.0 / mass[2]) * (1.0 - 0.95))
     L = q[-1, 0] + q[-1, 1]

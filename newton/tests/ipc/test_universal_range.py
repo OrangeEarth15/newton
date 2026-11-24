@@ -18,13 +18,13 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton.tests.ipc._fixtures import _TIGHT_ROTATIONS
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 D = newton.ModelBuilder.JointDofConfig
 _KIND = newton.solvers.SolverBase.ObservableKind
 _G = 9.81
 _DELTA_R = 1.0e-3  # SolverIPC's overshoot of a limit at which it pushes back with joint_limit_ke times it
-_TIGHT = {"newton_velocity_tol": 1.0e-6, "newton_transrate_tol": 1.0e-6, "linear_tol_rate": 1.0e-12}
 
 
 def _quat(axis, angle):
@@ -133,7 +133,7 @@ def test_cardan_formula(test, device):
     beta sin^2 phi_1)`` times the input's."""
     beta, omega, dt = np.radians(30.0), 2.0, 0.01
     model, (j_in, j_out) = _cardan(device, beta)
-    solver = newton.solvers.SolverIPC(model, **_TIGHT)
+    solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
     control = model.control()
     target_qd = control.joint_target_qd.numpy()
     target_qd[model.joint_qd_start.numpy()[j_in]] = omega
@@ -185,7 +185,7 @@ def test_limit_friction_and_joint_f(test, device):
         # released at 0.2 rad about x, the lower bound of a limit [0.2, 0.5] of limit_ke 1e3 N m/rad: gravity pulls the
         # box toward 0, and it rests below the bound by the overshoot of its weight's torque on its 0.5 m arm
         model = _pendulum(device, second={}, limit_lower=0.2, limit_upper=0.5, limit_ke=1.0e3, limit_kd=20.0)
-        solver = newton.solvers.SolverIPC(model, **_TIGHT)
+        solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
         state = _run(model, solver, 300, dt, state=_state(model, [0.2, 0.0]))
         q = state.joint_q.numpy().astype(np.float64)
         tau = 8.0 * _G * 0.5 * np.sin(q[0])
@@ -193,13 +193,13 @@ def test_limit_friction_and_joint_f(test, device):
         test.assertAlmostEqual(q[1], 0.0, delta=1e-5)
     with test.subTest("friction"):
         model = _pendulum(device, friction=10.0)  # the load at 0.2 rad: 8 g 0.5 sin(0.2) = 7.8 N m
-        solver = newton.solvers.SolverIPC(model, **_TIGHT)
+        solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
         state = _run(model, solver, 100, dt, state=_state(model, [0.2, 0.0]))
         creep = 0.01 * 7.8 / (2.0 * 10.0) * 1.0  # eps_velocity tau / (2 F) for 1 s
         test.assertAlmostEqual(float(state.joint_q.numpy()[0]), 0.2, delta=2.0 * creep)
     with test.subTest("joint_f"):
         model = _pendulum(device, gravity=0.0)
-        solver = newton.solvers.SolverIPC(model, **_TIGHT)
+        solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
         control = model.control()
         control.joint_f.assign(np.array([0.5, 0.0], np.float32))
         inertia = 8.0 * (0.2**2 + 0.2**2) / 12.0 + 8.0 * 0.5**2  # about x through the joint
@@ -212,7 +212,7 @@ def test_limit_friction_and_joint_f(test, device):
 def test_parent_force(test, device):
     """``BODY_PARENT_F`` of a box on a universal joint with a drive is the box's momentum balance at every step."""
     model = _pendulum(device, target_ke=20.0, target_kd=1.0, friction=0.5)
-    solver = newton.solvers.SolverIPC(model, **_TIGHT)
+    solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
     observables = solver.observables(kinds={_KIND.BODY_PARENT_F})
     weight = 8.0 * _G
     s0, s1 = _state(model, [0.5, -0.2], [0.5, 0.5]), model.state()
@@ -266,7 +266,7 @@ def test_range_free_inside_and_stopped(test, device):
     for lower, upper, rests in ((0.4, 0.6, True), (0.4, -1.0, False), (-1.0, 0.6, True)):
         with test.subTest(lower=lower, upper=upper):
             model = _hanging(device, lower, upper)
-            solver = newton.solvers.SolverIPC(model, **_TIGHT)
+            solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
             observables = solver.observables(kinds={_KIND.BODY_PARENT_F})
             heights = []
 
@@ -288,7 +288,7 @@ def test_range_lower_bound(test, device):
     """A box thrown at 2 m/s toward the point from 0.5 m on a distance joint [0.4, 0.6] without gravity turns back
     at the lower bound and leaves again."""
     model = _hanging(device, 0.4, 0.6, start=0.5, gravity=0.0, limit_kd=0.0)
-    solver = newton.solvers.SolverIPC(model, **_TIGHT)
+    solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
     state = model.state()
     qd = state.body_qd.numpy()
     qd[0, 2] = 2.0

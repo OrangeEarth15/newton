@@ -11,10 +11,13 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton.tests.ipc._fixtures import _TIGHT
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 _D_HAT = 1.0e-3
-_TIGHT = {"newton_velocity_tol": 1.0e-5, "linear_tol_rate": 1.0e-12, "semi_implicit": False}
+# _TIGHT with ten times its velocity tolerance (1e-5 m/s: an update of at most 1e-7 m at the steps of 0.01 s), far below
+# the band of d_hat (1 mm) in which the shapes come to rest
+_SETTLED = {**_TIGHT, "newton_velocity_tol": 1.0e-5}
 
 
 def _rotation(axis, angle):
@@ -138,7 +141,7 @@ def test_primitives_rest_at_their_triangulated_extents(test, device):
     axis instead of r cos(pi/24)."""
     model, rotations = _scene(device, 0.5 * _D_HAT)
     test.assertTrue(np.all(model.body_mass.numpy() > 0.0))  # every body falls onto the ground
-    solver = newton.solvers.SolverIPC(model, d_hat=_D_HAT, **_TIGHT)
+    solver = newton.solvers.SolverIPC(model, d_hat=_D_HAT, **_SETTLED)
     gaps, body_q = _rest_gaps(model, solver, 24)
     for k, ((name, _), _) in enumerate(_SHAPES):
         with test.subTest(shape=name, body=k):
@@ -149,7 +152,7 @@ def test_primitives_rest_at_their_triangulated_extents(test, device):
     radius = _SHAPES[cylinder][0][1][0]
     test.assertAlmostEqual(body_q[cylinder, 2] - gaps[cylinder], radius * np.cos(np.pi / 24.0), delta=1.0e-5)
     model, _ = _scene(device, 0.5 * _D_HAT)
-    coarse = newton.solvers.SolverIPC(model, d_hat=_D_HAT, shape_segments=8, **_TIGHT)
+    coarse = newton.solvers.SolverIPC(model, d_hat=_D_HAT, shape_segments=8, **_SETTLED)
     gaps8, body_q8 = _rest_gaps(model, coarse, 8)
     test.assertGreater(gaps8[cylinder], 0.0)
     test.assertLess(gaps8[cylinder], _D_HAT)

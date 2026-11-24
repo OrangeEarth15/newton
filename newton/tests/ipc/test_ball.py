@@ -27,7 +27,13 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.tests.ipc._fixtures import _TINY_LISTS, _box_body, _drive_recurrence, _drive_recurrence_bdf2
+from newton.tests.ipc._fixtures import (
+    _TIGHT_ROTATIONS,
+    _TINY_LISTS,
+    _box_body,
+    _drive_recurrence,
+    _drive_recurrence_bdf2,
+)
 from newton.tests.ipc.test_observables import _momentum_balance
 from newton.tests.ipc.test_observables import _steps as _observed_steps
 from newton.tests.test_joint_controllers import test_ball_controller, test_ball_controller_rotated_anchor
@@ -35,7 +41,9 @@ from newton.tests.test_joint_damping import _simulate_ball_joint_damping
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 _KIND = newton.solvers.SolverBase.ObservableKind
-_TIGHT = {"newton_velocity_tol": 1.0e-7, "newton_transrate_tol": 1.0e-7, "linear_tol_rate": 1.0e-12, "semi_implicit": False}  # fmt: skip
+# ten times tighter than _TIGHT_ROTATIONS (1e-7 m/s and 1e-7 1/s): the recurrences of the angle are compared at 1e-6 of
+# the motion and the friction's creep at 1e-5
+_TIGHTER = {**_TIGHT_ROTATIONS, "newton_velocity_tol": 1.0e-7, "newton_transrate_tol": 1.0e-7}
 _H = 0.01
 
 
@@ -161,7 +169,7 @@ def test_terms_are_implicit_euler(test, device):
                 control = model.control()
                 control.joint_target_q.assign(np.array(_quat_z(0.6 * scale), np.float32))
                 control.joint_target_qd.assign(np.array([0.0, 0.0, 0.3 * scale], np.float32))
-                solver = newton.solvers.SolverIPC(model, integrator=integrator, **_TIGHT)
+                solver = newton.solvers.SolverIPC(model, integrator=integrator, **_TIGHTER)
                 got = _angles(model, solver, state, 150, control)
                 args = {
                     "ke": 2.0, "kd": 0.05, "ks": 1.0, "c": 0.03, "q_target": 0.6 * scale, "qd_target": 0.3 * scale,
@@ -182,7 +190,7 @@ def test_effort_limit(test, device):
     _set(model, target_ke=100.0, effort_limit=0.05)
     control = model.control()
     control.joint_target_q.assign(np.array(_quat_z(3.0), np.float32))
-    got = _angles(model, newton.solvers.SolverIPC(model, **_TIGHT), state, 60, control)
+    got = _angles(model, newton.solvers.SolverIPC(model, **_TIGHTER), state, 60, control)
     want = _drive_recurrence(inertia, _H, 60, f=0.05)
     np.testing.assert_allclose(got, want, rtol=0.0, atol=1e-6 * np.abs(want).max())
     with test.assertRaisesRegex(NotImplementedError, "joint_effort_limit 0.05.* and a drive"):
@@ -198,7 +206,7 @@ def test_friction(test, device):
             model, state, inertia = _sphere(device, friction=0.1)
             control = model.control()
             control.joint_f.assign(np.array([0.0, 0.0, tau], np.float32))
-            solver = newton.solvers.SolverIPC(model, **_TIGHT)
+            solver = newton.solvers.SolverIPC(model, **_TIGHTER)
             s0, s1 = state, model.state()
             omega = []
             for _ in range(40):
@@ -261,7 +269,7 @@ def test_parent_force_holds_the_drive_torque(test, device):
     within 1e-6 of the weight and the torque within 1e-5 N m. About the box's centre the anchor's force alone turns it
     by 0.5 m times its weight, 39 N m, which the drive's torque, part of the joint's wrench, holds."""
     model = _held_out(device)
-    solver = newton.solvers.SolverIPC(model, **_TIGHT)
+    solver = newton.solvers.SolverIPC(model, **_TIGHTER)
     observables = solver.observables(kinds={_KIND.BODY_PARENT_F})
     steps, _ = _observed_steps(model, solver, 20, 0.005, observables, control=model.control())
     weight = float(model.body_mass.numpy()[0]) * 9.81
@@ -278,7 +286,7 @@ def test_captured_steps_equal_eager_steps(test, device):
     def run(capture):
         model, state, _ = _sphere(device, omega=1.0, armature=0.01, friction=0.02)
         _set(model, target_ke=2.0, target_kd=0.1, stiffness=0.5, damping=0.02, effort_limit=0.4)
-        solver = newton.solvers.SolverIPC(model, **_TIGHT)
+        solver = newton.solvers.SolverIPC(model, **_TIGHTER)
         control = model.control()
         s0, s1 = state, model.state()
         solver.step(s0, s1, control, None, _H)  # loads the kernels
@@ -323,7 +331,7 @@ def test_grown_lists_keep_the_step_terms(test, device):
         model = builder.finalize(device=device)
         state = model.state()
         newton.eval_fk(model, model.joint_q, model.joint_qd, state)
-        solver = newton.solvers.SolverIPC(model, **_TIGHT)
+        solver = newton.solvers.SolverIPC(model, **_TIGHTER)
         regrown = []
         regrow = solver._regrow
         solver._regrow = lambda: (regrown.append(1), regrow())
@@ -353,7 +361,7 @@ def test_gains_given_after_the_solver_was_built(test, device):
     ``JOINT_DOF_PROPERTIES``, which builds the solve again: the joint then reaches its target, a quarter turn about z,
     to 1e-4 rad."""
     model, state, _ = _sphere(device)
-    solver = newton.solvers.SolverIPC(model, **_TIGHT)
+    solver = newton.solvers.SolverIPC(model, **_TIGHTER)
     control = model.control()
     control.joint_target_q.assign(np.array(_quat_z(np.pi / 2.0), np.float32))
     test.assertAlmostEqual(_angles(model, solver, state, 5, control)[-1], 0.0, delta=1e-9)
@@ -372,7 +380,7 @@ def test_a_disabled_joint_has_no_terms(test, device):
     model.joint_enabled.assign(np.array([False]))
     control = model.control()
     control.joint_target_q.assign(np.array(_quat_z(np.pi / 2.0), np.float32))
-    solver = newton.solvers.SolverIPC(model, **_TIGHT)
+    solver = newton.solvers.SolverIPC(model, **_TIGHTER)
     start = state.body_q.numpy().copy()
     s0, s1 = state, model.state()
     for _ in range(10):
@@ -408,7 +416,7 @@ def test_independent_worlds(test, device):
         control = model.control()
         target = np.tile(np.array(_quat_z(1.0), np.float32), worlds)
         control.joint_target_q.assign(target)
-        solver = newton.solvers.SolverIPC(model, **_TIGHT)
+        solver = newton.solvers.SolverIPC(model, **_TIGHTER)
         s0, s1 = state, model.state()
         out = []
         for _ in range(30):

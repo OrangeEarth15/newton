@@ -18,12 +18,11 @@ import warp as wp
 
 import newton
 from newton._src.solvers.ipc.features import observables as observables_module
-from newton.tests.ipc._fixtures import _box_body
+from newton.tests.ipc._fixtures import _TIGHT_ROTATIONS, _box_body
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 _KIND = newton.solvers.SolverBase.ObservableKind
 _G = 9.81
-_TIGHT = {"newton_velocity_tol": 1.0e-6, "newton_transrate_tol": 1.0e-6, "linear_tol_rate": 1.0e-12}
 
 
 def _add_pendulum(builder, axis=(0.0, 1.0, 0.0), child_offset=(0.0, 0.0, 1.0), at=(0.0, 0.0, 0.0)):
@@ -109,7 +108,7 @@ def test_parent_force_is_the_momentum_balance(test, device):
     for kappa, first in ((None, 0.569), (1e8, 0.943)):
         with test.subTest(body_kappa=kappa):
             model = _pendulum(device)
-            solver = newton.solvers.SolverIPC(model, body_kappa=kappa, **_TIGHT)
+            solver = newton.solvers.SolverIPC(model, body_kappa=kappa, **_TIGHT_ROTATIONS)
             observables = solver.observables(kinds={_KIND.BODY_PARENT_F, _KIND.BODY_QDD})
             steps, _ = _steps(model, solver, 12, 0.005, observables)
             weight = float(model.body_mass.numpy()[0]) * _G
@@ -187,7 +186,7 @@ def test_parent_force_of_every_joint_kind(test, device):
     joint_f (libuipc's joint torque or force), and the joint_f that the solver applies as a wrench to the child of a
     free, ball or distance joint or a D6 joint of three angular axes: a free joint passes its joint_f alone."""
     model, joint_f = _every_joint(device)
-    solver = newton.solvers.SolverIPC(model, **_TIGHT)
+    solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
     observables = solver.observables(kinds={_KIND.BODY_PARENT_F})
     control = model.control()
     control.joint_f.assign(joint_f)
@@ -405,7 +404,7 @@ def test_body_qdd_of_a_free_body(test, device):
     expected = np.zeros((2, 6))
     expected[0, :3] = wrench[0, :3] / mass[0]
     expected[1, 3:] = np.linalg.solve(inertia[1].astype(np.float64), wrench[1, 3:].astype(np.float64))
-    for name, options in (("ipc", _TIGHT), ("al-ipc", {"contact_constitution": "al-ipc"})):
+    for name, options in (("ipc", _TIGHT_ROTATIONS), ("al-ipc", {"contact_constitution": "al-ipc"})):
         with test.subTest(name):
             solver = newton.solvers.SolverIPC(model, **options)
             test.assertTrue({_KIND.BODY_QDD, _KIND.BODY_PARENT_F} <= solver.supported_observables)

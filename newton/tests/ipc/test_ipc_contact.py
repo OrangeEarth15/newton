@@ -23,8 +23,10 @@ def _engine_z(solver, body):
 
 def _free_fall(model, body, k, dt=0.01, g=9.81):
     """Implicit Euler's height of a body's origin after k steps of free fall from rest, from the model's (float32)
-    pose. Under ``_TIGHT`` a step ends within 1e-9 m of its converged position, and the differences carry over to the
-    later steps through the velocity: 30 steps stay within 1e-6 m, where a contact would move a body by millimetres."""
+    pose. Under ``_TIGHT`` a step ends once a Newton update moves no vertex by more than 1e-8 m (1e-6 m/s times the
+    step of 0.01 s); a free fall's step is quadratic and ends far closer to its minimum, and the differences carry over
+    to the later steps through the velocity: the tests hold 30 steps to 1e-6 m, where a contact would move a body by
+    millimetres."""
     return float(model.body_q.numpy()[body, 2]) - g * dt * dt * k * (k + 1) / 2.0
 
 
@@ -147,7 +149,8 @@ def test_springs_oscillate_as_implicit_euler(test, device):
         for spring, first in enumerate(expected):
             measured[first].append(x[first + 1] - x[first] - rest[spring])
         test.assertAlmostEqual(x[0] + x[1], x0[0] + x0[1], delta=1e-12)
-    # to the Newton tolerance of _TIGHT, 1e-9 m per step
+    # along its line a spring's energy is quadratic, so each step ends far inside _TIGHT's 1e-8 m (1e-6 m/s times dt):
+    # the stretches follow the recurrence to 1e-9 m
     for first, u in expected.items():
         np.testing.assert_allclose(measured[first], u, rtol=0.0, atol=1e-9)
 
