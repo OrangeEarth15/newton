@@ -1,1 +1,0 @@
-``SolverIPC`` with ``kinematic_motion="aim"`` now moves a kinematic body of mass 0 by jumps, as it moves kinematic particles, because the soft aim has no mass to act on and let the joints such a body anchors sag. Before, it gave the body the mass of its collision shapes at 1000 kg/m^3 and refused one whose shapes enclose no volume.

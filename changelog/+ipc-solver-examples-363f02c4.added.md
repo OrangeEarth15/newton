@@ -1,1 +1,0 @@
-Add `--solver ipc` to the examples basic_dzhanibekov, basic_joints, basic_pendulum, basic_shapes, cloth_hanging, balance_bird, softbody_dropping_to_cloth, softbody_gift and softbody_hanging, which run them with `SolverIPC`.

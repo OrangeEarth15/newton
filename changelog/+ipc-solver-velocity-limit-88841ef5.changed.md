@@ -1,1 +1,0 @@
-Warn once with NewtonWarning, when SolverIPC is built or notified of the joints' degrees of freedom, of a joint_velocity_limit below Newton's default 1e6, which SolverIPC does not enforce. It was ignored without a word; URDF robots, whose `<limit velocity>` Newton's importer writes into it, still run.

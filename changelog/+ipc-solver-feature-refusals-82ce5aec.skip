@@ -1,1 +1,0 @@
-Move SolverIPC's refusals of the features libuipc has no term for into one module per feature, each refusal with its message and at its point among the other checks, as before.

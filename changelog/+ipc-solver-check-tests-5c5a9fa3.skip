@@ -1,1 +1,0 @@
-Test-only: tests of SolverIPC's inertia checks, the volume of water of a body without a closed mesh, and the status bits TRAVERSAL_EXHAUSTED and LINE_SEARCH_LIMIT (R2-12); no user-facing change.

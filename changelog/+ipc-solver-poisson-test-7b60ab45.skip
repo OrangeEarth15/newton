@@ -1,1 +1,0 @@
-Test-only: SolverIPC's test of the tetrahedra's Lame parameters measures Poisson's ratio instead of a recorded call (R9-R14); no user-facing change.

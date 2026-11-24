@@ -1,1 +1,0 @@
-Fix ``SolverIPC`` applying the ``Control.joint_f`` of a free joint whose parent is a body to the child only: the parent now takes the reaction at its centre of mass, as in ``SolverXPBD``, so that a force between two bodies keeps their momentum, and a disabled free joint applies no force.

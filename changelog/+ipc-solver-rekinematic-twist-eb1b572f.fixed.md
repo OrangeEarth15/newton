@@ -1,1 +1,0 @@
-Fix ``SolverIPC`` with ``kinematic_motion="aim"`` moving a body that ``notify_model_changed`` makes kinematic at the twist the solver wrote for it while it was dynamic. The body now stays where it is until the caller writes a twist, as in Newton's other solvers.

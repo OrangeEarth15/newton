@@ -1,1 +1,0 @@
-``SolverIPC`` with ``contact_constitution="al-ipc"`` now takes models whose free particles collide, which it refused: libuipc-warp's AL-IPC holds the pairs of two points and of a point and an edge, so two free particles that meet, or a free particle and a cloth edge, are held ``d_hat`` beyond their contact thickness, as a particle on a triangle is.

@@ -1,1 +1,0 @@
-Refuse a Control with a triangle or tetrahedron activation other than 0 at a SolverIPC step that is not captured, where the activations were ignored: the solver does not read them. A step given no control checks the model's own. A captured step cannot raise and does not check them.

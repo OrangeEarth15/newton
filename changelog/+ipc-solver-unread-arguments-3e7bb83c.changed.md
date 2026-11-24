@@ -1,1 +1,0 @@
-Refuse a value other than the default of an argument the other options of SolverIPC do not read, as adaptive_kappa under AL-IPC was refused: kappa with contact_constitution="al-ipc", and kinematic_strength_ratio with kinematic_motion="jump", raise ValueError where they were taken and ignored.

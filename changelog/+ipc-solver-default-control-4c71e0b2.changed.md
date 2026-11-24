@@ -1,1 +1,0 @@
-Make ``SolverIPC.step`` build the ``Control`` of a step given none once, as ``model.control(clone_variables=False)``, instead of at every step, and again only when the model holds other arrays for the joint targets or ``joint_f``.

@@ -1,1 +1,0 @@
-Test-only: the attached particle of SolverIPC's world attachment tests moves off the diagonal of its box's face, where rounding decided the test's outcome; no user-facing change.

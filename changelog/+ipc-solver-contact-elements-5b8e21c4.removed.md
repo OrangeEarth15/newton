@@ -1,1 +1,0 @@
-Remove the ``friction_mu`` argument of ``SolverIPC``: the friction of every pair now comes from the model's materials. Replace ``SolverIPC(model, friction_mu=mu)`` with ``ShapeConfig(mu=mu)`` on the shapes (or ``builder.default_shape_cfg.mu = mu``), ``model.soft_contact_mu = mu`` and ``model.particle_mu = mu``.

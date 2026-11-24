@@ -1,1 +1,0 @@
-``SolverIPC`` with ``contact_constitution="al-ipc"`` now accepts ``kinematic_motion="aim"`` for a model in which no body moves toward an aim, that is, without a kinematic body that has mass and colliding shapes. A model with such a body is still refused, naming the body; pass ``kinematic_motion="jump"`` for it.

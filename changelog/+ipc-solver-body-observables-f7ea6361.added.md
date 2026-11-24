@@ -1,1 +1,0 @@
-Add ``BODY_PARENT_F`` and ``BODY_QDD`` to the solver observables of ``SolverIPC``: the wrench each body's parent joint passes to it, which is the force of the joint's penalty terms at the end of the step and follows the step's momentum balance, and the bodies' accelerations, the finite difference of their twists over the step, which ``SensorIMU`` reads.

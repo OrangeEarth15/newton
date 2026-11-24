@@ -1,1 +1,0 @@
-Word the refusals of SolverIPC's model checks as what is refused, what to do, and one short reason: the joint, degree of freedom, spring, attachment or shape first, then the remedy (for example the value to set, or the option that takes it), without libuipc's constitution numbers.

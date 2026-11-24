@@ -1,1 +1,0 @@
-Add ``fem_preconditioner`` to ``SolverIPC``: ``"mas"`` takes libuipc's multilevel additive Schwarz preconditioner for particles, cloth and tetrahedra in place of the block diagonal (``"diag"``, the default), on clusters that libuipc-warp makes without METIS; the results are those of the block-diagonal preconditioner to the tolerance of the linear solve.

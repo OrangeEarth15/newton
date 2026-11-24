@@ -1,1 +1,0 @@
-Test-only: SolverIPC runs in Newton's mimic test, its vectorized case an expected failure; no user-facing change.

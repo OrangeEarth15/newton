@@ -1,1 +1,0 @@
-In ``SolverIPC`` a particle attached to a body (``add_attachment_particle_body``) no longer collides with that body, and neither do the edges and triangles that hold the particle, whether or not the attachment is enabled. Before, a particle attached on the body's surface started in contact with it, and the solver refused the model.
