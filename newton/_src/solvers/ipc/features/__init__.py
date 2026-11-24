@@ -42,6 +42,8 @@ nothing:
   independent worlds alone among them), after ``state_out`` and the observables.
 - ``notify(solver, flags)``: in ``notify_model_changed``, after the solver's own checks and before it decides whether
   to build the solve again: returns whether the solve must be built again.
+- ``reset(solver, world_mask)``, of the modules that keep a state across steps: in ``SolverIPC.reset`` once the solve
+  is built, with its ``world_mask``; on the device only, since a reset may be captured.
 
 The universal module is also offered the joints that ``joints._map_joints`` cannot map onto a libuipc joint
 (``universal.take_d6``, ``universal.take_distance``), the rods module the rod joints (``rods.take_rods``), and the
@@ -58,6 +60,8 @@ from typing import TYPE_CHECKING
 from . import ball, contact_damping, damping, joint_terms, observables, rods, surface_velocity, tendons, universal
 
 if TYPE_CHECKING:
+    import warp as wp
+
     from newton import Control, Model, ModelFlags, State
     from newton.solvers import SolverBase
 
@@ -119,3 +123,10 @@ def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
         rebuild |= bool(feature.notify(solver, flags))
     return rebuild
 
+
+def reset(solver: SolverIPC, world_mask: wp.array | None) -> None:
+    """The work of the modules that keep a state across steps in ``SolverIPC.reset(state, world_mask)``."""
+    for feature in FEATURES:
+        hook = getattr(feature, "reset", None)
+        if hook is not None:
+            hook(solver, world_mask)

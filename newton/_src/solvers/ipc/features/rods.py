@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Rod joints: the stretch, shear, bend and twist of Newton's rods and cables and their damping.
+"""Rod joints: the stretch, shear, bend and twist of Newton's rods and cables, their damping and their Dahl hysteresis.
 
 :meth:`newton.ModelBuilder.add_rod` makes a rod of capsule bodies joined by joints of type ROD
 (:meth:`~newton.ModelBuilder.add_joint_rod`). libuipc's rods are finite elements of points without a twist;
@@ -11,13 +11,17 @@ libuipc-warp's rod joints (``uipc_warp.ext.rods.RodJoints``) act between two aff
   ``stretch`` its springs and ``joint_target_kd`` their damping, the translation of ``joint_rest_q`` its rest;
 - the bend and twist of the child's anchor frame relative to the parent's, Newton's discrete elastic rod strain without
   its cap, the DOFs ``bend_x``, ``bend_y`` and ``twist`` their stiffness and damping, the rotation of ``joint_rest_q``
-  its rest.
+  its rest;
+- with ``model.vbd.dahl_eps_max`` and ``model.vbd.dahl_tau`` both above 0 (``SolverVBD.register_custom_attributes``),
+  SolverVBD's Dahl hysteresis of the bend and twist; as SolverVBD, SolverIPC reads them on rod joints only, where both
+  above 0 turn it on (Newton's examples fill them for every joint).
 
 ``joints._map_joints`` offers the rod joints here (``take_rods``) and maps them onto no libuipc joint: its kind is ROD,
 stored as a FREE joint, so that ``joint_q`` and ``joint_qd`` are written as a free joint's (the child's anchor frame
 in the parent's) and ``joint_f`` is a free joint's world wrench at the child's centre of mass, as SolverVBD applies it.
 Every step writes the joints' inputs from the model on the device (``prepare``), so a captured step takes new gains,
-rests and enabled flags at its next replay. The joints give ``BODY_PARENT_F`` their terms (``parent_terms``).
+rests and enabled flags at its next replay; a reset starts the Dahl hysteresis of the selected worlds' rod joints anew,
+as SolverVBD's does. The joints give ``BODY_PARENT_F`` their terms (``parent_terms``).
 
 SolverIPC refuses, on a rod's degree of freedom, joint friction, armature, a ``joint_stiffness`` or ``joint_damping``
 other than 0, a target mode other than NONE, a negative gain and a finite limit, as SolverKamino does. The other hooks
@@ -64,6 +68,15 @@ def take_rods(model: Model, joints: np.ndarray) -> None:
                 f"SolverIPC: the ROD joint {int(j)} does not have three linear and three angular axes X, Y and Z in "
                 "order; build it with ModelBuilder.add_joint_rod(), whose canonical layout a rod joint requires."
             )
+
+
+def _dahl(model: Model) -> tuple:
+    """``model.vbd.dahl_eps_max`` and ``model.vbd.dahl_tau`` (SolverVBD's custom attributes, one per joint), or None
+    where the model has none."""
+    vbd = getattr(model, "vbd", None)
+    eps_max = getattr(vbd, "dahl_eps_max", None) if vbd is not None else None
+    tau = getattr(vbd, "dahl_tau", None) if vbd is not None else None
+    return eps_max, tau
 
 
 def check(model: Model, options: FeatureOptions, at: str) -> None:
@@ -158,6 +171,8 @@ def build(solver: SolverIPC, scene) -> None:
     solver._rod_frames = tuple(np.array([_quat_to_matrix_np(q) for q in X[joints, 3:7]]) for X in (X_p, X_c))
     solver._rod_anchors = (X_p[joints, :3], X_c[joints, :3])
     solver._rod_rows = wp.array(joints.astype(np.int32), dtype=wp.int32, device=model.device)
+    # the world_mask of a reset of every world (reset), allocated here: a reset may be captured
+    solver._rod_every_world = wp.ones(model.world_count + 1, dtype=wp.bool, device=model.device)
 
 
 @wp.func
@@ -194,6 +209,8 @@ def _rod_inputs(
     target_ke: wp.array[wp.float32],
     target_kd: wp.array[wp.float32],
     rest_q: wp.array[wp.float32],
+    dahl_eps_max: wp.array[wp.float32],
+    dahl_tau: wp.array[wp.float32],
     on: wp.array[wp.int32],
     stretch: wp.array[wp.float64],
     shear: wp.array[wp.vec2d],
@@ -205,10 +222,12 @@ def _rod_inputs(
     twist_damping: wp.array[wp.float64],
     rest_translation: wp.array[wp.vec3d],
     rest_rotation: wp.array[wp.mat33d],
+    eps_max: wp.array[wp.float64],
+    tau: wp.array[wp.float64],
 ):
     """The inputs of rod joint ``joints[k]`` for the next step, from Newton's model: per degree of freedom ``[shear_x,
     shear_y, stretch, bend_x, bend_y, twist]`` its ``joint_target_ke`` and ``joint_target_kd``, the translation and the
-    rotation of ``joint_rest_q``, and whether it is enabled."""
+    rotation of ``joint_rest_q``, its Dahl attributes (0 without them), and whether it is enabled."""
     k = wp.tid()
     j = joints[k]
     d = joint_qd_start[j]
@@ -224,11 +243,19 @@ def _rod_inputs(
     twist_damping[k] = wp.float64(target_kd[d + 5])
     rest_translation[k] = wp.vec3d(wp.float64(rest_q[i]), wp.float64(rest_q[i + 1]), wp.float64(rest_q[i + 2]))
     rest_rotation[k] = _rotation(rest_q, i + 3)
+    e = wp.float64(0.0)
+    t = wp.float64(0.0)
+    if dahl_eps_max and dahl_tau:
+        e = wp.float64(dahl_eps_max[j])
+        t = wp.float64(dahl_tau[j])
+    eps_max[k] = e
+    tau[k] = t
 
 
 def _write_inputs(solver: SolverIPC) -> None:
     """The rod joints' inputs of the next step, on the device (``_rod_inputs``)."""
     rods, model = solver._rods, solver.model
+    eps_max, tau = _dahl(model)
     wp.launch(
         _rod_inputs,
         rods.n,
@@ -240,10 +267,13 @@ def _write_inputs(solver: SolverIPC) -> None:
             model.joint_target_ke,
             model.joint_target_kd,
             model.joint_rest_q,
+            eps_max,
+            tau,
         ],
         outputs=[
             rods.on, rods.stretch, rods.shear, rods.bend, rods.twist, rods.stretch_damping, rods.shear_damping,
-            rods.bend_damping, rods.twist_damping, rods.rest_translation, rods.rest_rotation,
+            rods.bend_damping, rods.twist_damping, rods.rest_translation, rods.rest_rotation, rods.dahl_eps_max,
+            rods.dahl_tau,
         ],
         device=model.device,
     )  # fmt: skip
@@ -251,7 +281,8 @@ def _write_inputs(solver: SolverIPC) -> None:
 
 def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
     """The rod joints of an engine made from the scene (``uipc_warp.ext.rods.RodJoints``), their two element groups
-    appended to ``inputs["elements"]``, with the model's inputs."""
+    appended to ``inputs["elements"]``, with the model's inputs; an engine made again within a step takes the Dahl state
+    of its frame start with the other groups' state (``redo_state``)."""
     if not len(solver._rod_joints):
         return
     from uipc_warp.ext.rods import RodJoints  # noqa: PLC0415 (libuipc-warp is imported lazily)
@@ -274,9 +305,51 @@ def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observab
 
 
 def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
-    """Nothing to build again: the gains, rests and enabled flags are read at every step, and a change
+    """Nothing to build again: the gains, rests, enabled flags and Dahl attributes are read at every step, and a change
     of the joints' types, bodies or frames builds the solve again by the solver's own check."""
     return False
+
+
+@wp.kernel
+def _restart_hysteresis(
+    joints: wp.array[wp.int32],
+    joint_world: wp.array[wp.int32],
+    world_count: int,
+    world_mask: wp.array[wp.bool],
+    sigma: wp.array[wp.vec3d],
+    kappa: wp.array[wp.vec3d],
+    last: wp.array[wp.vec3d],
+):
+    """Start the Dahl hysteresis of rod joint ``joints[k]`` anew where ``world_mask`` selects its world (the last entry
+    for a global joint), as ``RodJoints.reset_hysteresis`` does."""
+    k = wp.tid()
+    w = joint_world[joints[k]]
+    if w < 0:
+        w = world_count
+    if world_mask[w]:
+        nan = wp.float64(wp.nan)
+        sigma[k] = wp.vec3d()
+        kappa[k] = wp.vec3d(nan, nan, nan)
+        last[k] = wp.vec3d()
+
+
+def reset(solver: SolverIPC, world_mask: wp.array | None) -> None:
+    """Start the Dahl hysteresis of the rod joints of the worlds ``world_mask`` selects (None: every rod joint) anew at
+    the next step, on the device, as SolverVBD's reset does."""
+    rods = solver._rods
+    if rods is None:
+        return
+    model = solver.model
+    if world_mask is None:
+        world_mask = solver._rod_every_world
+    group = rods.bend_twist
+    wp.launch(
+        _restart_hysteresis,
+        rods.n,
+        inputs=[solver._rod_rows, model.joint_world, model.world_count, world_mask],
+        outputs=[group.sigma, group.kappa, group.last],
+        device=model.device,
+    )
 
 
 def parent_terms(solver: SolverIPC, engine) -> list:

@@ -2041,27 +2041,29 @@ class SolverIPC(SolverBase, CouplingInterface):
         """Make the next step start as the first step of a new solver.
 
         Besides its float64 state, which the next step compares with ``state_in`` (see :ref:`ipc-state`), the solver
-        carries the friction of the last step's contacts from one step to the next, and with ``integrator="bdf2"`` the
-        integrator's history; this discards them, so that the next step is an implicit Euler step without friction. The
-        contacts themselves are reused only where nothing moved, where they are the ones a new solver finds. Launched on
-        the device without synchronization, so it can be captured.
+        carries the friction of the last step's contacts from one step to the next, with ``integrator="bdf2"`` the
+        integrator's history, and the Dahl hysteresis of its rod joints; this discards them, so that the next step is an
+        implicit Euler step without friction and starts the hysteresis anew, as SolverVBD's reset does. The contacts
+        themselves are reused only where nothing moved, where they are the ones a new solver finds. Launched on the
+        device without synchronization, so it can be captured.
 
         Args:
             state: Unused; the next step reads its own ``state_in``.
-            world_mask: Optional boolean mask of shape ``(world_count + 1,)``, the last entry the global entities.
-                With several worlds the reset applies to the worlds it selects: their friction is discarded and their
-                BDF2 history starts anew, and every other world keeps its own, bit for bit. With independent worlds
-                (the default) the last entry selects nothing, since the global entities are no unknowns, as Newton
-                lets a solver without global dynamic objects take it; with ``coupled_worlds`` it discards the friction
-                of every pair with a global entity, a global ground plane among them (see :ref:`ipc-worlds`). With
-                one world the reset applies when the mask selects a world that owns particles or bodies. ``None``
-                resets.
+            world_mask: Optional boolean mask of shape ``(world_count + 1,)``, the last entry the global entities. With
+                several worlds the reset applies to the worlds it selects: their friction is discarded and their BDF2
+                history and rod hysteresis start anew, and every other world keeps its own, bit for bit. With
+                independent worlds (the default) the last entry selects nothing, since the global entities are no
+                unknowns, as Newton lets a solver without global dynamic objects take it; with ``coupled_worlds`` it
+                discards the friction of every pair with a global entity, a global ground plane among them (see
+                :ref:`ipc-worlds`). With one world the reset applies when the mask selects a world that owns particles
+                or bodies. ``None`` resets.
             flags: Unused.
         """
         super().reset(state, world_mask, flags)  # checks world_mask
         self._restore_pending = False  # the next step starts from the reset, not from a coupled step's start
         if self._engine is None:
             return
+        features.reset(self, world_mask)  # the modules that keep a state across steps (the rods' hysteresis)
         if world_mask is None:
             self._engine.discard_friction()
             self._engine.restart_history()

@@ -13,11 +13,12 @@
   ``joint_qd`` after steps are ``eval_ik``'s.
 * Against SolverVBD on the same models: the static shapes of three cables of bend stiffness 50, 500 and 5000 N m/rad
   under gravity (Newton's bend-stiffness sweep) agree to 1e-3 of the length with the bodies at libuipc's stiffness, both
-  minimizing the same elastic energy.
+  minimizing the same elastic energy;
+  a twist with Dahl hysteresis under a cycle of torque follows SolverVBD's and keeps the same residual twist.
 * ``BODY_PARENT_F`` of a hanging cable is each segment's momentum balance (``features.rods.parent_terms``).
-* The solve: captured steps equal eager ones; a step solved again on lists grown after an overflow takes the rods;
-  gains and rests written after the solver was built take effect at the next step; a disabled rod joint acts on
-  nothing; two independent worlds step as each alone.
+* The solve: captured steps equal eager ones; a step solved again on lists grown after an overflow takes the rods and
+  their hysteresis; gains and rests written after the solver was built take effect at the next step; a disabled rod
+  joint acts on nothing; two independent worlds step as each alone; a reset starts the hysteresis anew.
 * The refusals: joint friction, armature, ``joint_stiffness``, ``joint_damping``, a target mode, negative gains and
   finite limits on a rod's degrees of freedom; a rod joint of another layout than ``add_joint_rod``'s.
 """
@@ -229,6 +230,84 @@ def test_static_shapes_against_vbd(test, device):
     test.assertGreater(sag, 0.5)
 
 
+def _twister(device, vbd: bool, dahl=(0.5, 0.05)):
+    """A body of 0.01 kg m^2 about z on a rod joint to the world at its centre: twist stiffness 1 N m/rad, damping 0.05
+    N m s/rad, Dahl hysteresis ``(eps_max, tau)``; the anchor and the bend held stiffly."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    newton.solvers.SolverVBD.register_custom_attributes(builder)
+    body = builder.add_link(
+        mass=1.0, inertia=wp.mat33f(0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01), lock_inertia=True
+    )
+    builder.add_shape_sphere(body, radius=0.05)
+    joint = builder.add_joint_rod(
+        -1, body, stretch_stiffness=1e4, bend_stiffness=50.0, twist_stiffness=1.0, twist_damping=0.05
+    )
+    builder.add_articulation([joint])
+    if vbd:
+        builder.color()
+    model = builder.finalize(device=device)
+    model.vbd.dahl_eps_max.assign(np.array([dahl[0]], np.float32))
+    model.vbd.dahl_tau.assign(np.array([dahl[1]], np.float32))
+    return model, joint
+
+
+def _torque_cycle(model, joint, solver, dt=0.002):
+    """The twist about z under ``joint_f``'s torque about z: up to 1 N m over 1 s, held 0.5 s, down to 0 over 1 s, held
+    1.5 s; per step."""
+    control = model.control()
+    joint_f = np.zeros(model.joint_dof_count, np.float32)
+    z = int(model.joint_qd_start.numpy()[joint]) + 5
+    s0, s1 = model.state(), model.state()
+    out = []
+    for k in range(int(4.0 / dt)):
+        t = k * dt
+        joint_f[z] = min(t, 1.0) if t < 1.5 else max(0.0, 1.0 - (t - 1.5))
+        control.joint_f.assign(joint_f)
+        s0.clear_forces()
+        solver.step(s0, s1, control, None, dt)
+        s0, s1 = s1, s0
+        q = s0.body_q.numpy()[0, 3:]
+        out.append(2.0 * np.arctan2(q[2], q[3]))
+    return np.array(out)
+
+
+def test_dahl_hysteresis_against_vbd(test, device):
+    """A twist with Dahl hysteresis (``eps_max`` 0.5, ``tau`` 0.05) under a torque that rises to 1 N m and falls back
+    to 0: the twist follows SolverVBD's to 2% of its largest, and after the torque is gone keeps the residual twist
+    SolverVBD keeps (2%); without hysteresis less than 5% of it remains."""
+    model, joint = _twister(device, vbd=True)
+    vbd = _torque_cycle(model, joint, newton.solvers.SolverVBD(model, iterations=20))
+    model, joint = _twister(device, vbd=False)
+    ipc = _torque_cycle(model, joint, newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS))
+    np.testing.assert_allclose(ipc, vbd, rtol=0.0, atol=0.02 * np.abs(vbd).max())
+    test.assertGreater(abs(vbd[-1]), 0.05)
+    test.assertAlmostEqual(ipc[-1], vbd[-1], delta=0.02 * abs(vbd[-1]))
+    model, joint = _twister(device, vbd=False, dahl=(0.0, 0.0))
+    plain = _torque_cycle(model, joint, newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS))
+    test.assertLess(abs(plain[-1]), 0.05 * abs(vbd[-1]))  # what is left of its ringing
+
+
+def test_reset_restarts_the_hysteresis(test, device):
+    """After the torque cycle the joint keeps a Dahl stress; ``reset`` starts it anew: one step from the same state
+    with the stress (the residual twist held) and after a reset (the joint released to its elastic rest)."""
+    model, joint = _twister(device, vbd=False)
+    solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
+    twist = _torque_cycle(model, joint, solver)
+    state = model.state()
+    q = state.body_q.numpy()
+    q[0, 3:] = [0.0, 0.0, np.sin(0.5 * twist[-1]), np.cos(0.5 * twist[-1])]
+    state.body_q.assign(q)
+    out = model.state()
+    solver.step(state, out, model.control(), None, 0.002)
+    held = out.body_qd.numpy()[0, 5]
+    solver.reset(state)
+    solver.step(state, out, model.control(), None, 0.002)
+    released = out.body_qd.numpy()[0, 5]
+    test.assertLess(abs(held), 1e-2)
+    test.assertLess(released * twist[-1], 0.0)  # the elastic twist turns it back
+    test.assertGreater(abs(released), 10.0 * abs(held))
+
+
 def _hanging(device, n=4, **rod):
     """A cable of ``n`` segments of 0.2 m hanging along -z from a kinematic first segment, gravity -9.81."""
     builder = newton.ModelBuilder()
@@ -330,17 +409,21 @@ def test_captured_steps_equal_eager_steps(test, device):
 
 
 def test_grown_lists_keep_the_rods(test, device):
-    """A cable falls onto a box; when it lands the contact lists, made short, overflow, and the eager step grows them and
-    solves the step again with the rods: every body as in a solver with room, to 1e-6."""
+    """A cable with Dahl hysteresis falls onto a box; when it lands the contact lists, made short, overflow, and the
+    eager step grows them and solves the step again with the rods and their hysteresis of that step's start: every body
+    as in a solver with room, to 1e-6."""
 
     def run(tiny):
         builder = newton.ModelBuilder()
+        newton.solvers.SolverVBD.register_custom_attributes(builder)
         builder.add_shape_box(-1, xform=wp.transform((0.5, 0.0, 0.5), wp.quat_identity()), hx=1.0, hy=0.5, hz=0.1)
         straight = newton.Rod.create_straight(
             start=wp.vec3(0.0, 0.0, 0.7), direction=wp.vec3(1.0, 0.0, 0.0), length=1.0, segment_count=5, radius=0.02
         )
         builder.add_rod(rod=straight, bend_stiffness=2.0, bend_damping=0.1)
         model = builder.finalize(device=device)
+        model.vbd.dahl_eps_max.fill_(0.3)
+        model.vbd.dahl_tau.fill_(0.05)
         solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
         regrown = []
         regrow = solver._regrow
@@ -353,12 +436,14 @@ def test_grown_lists_keep_the_rods(test, device):
             solver.step(s0, s1, None, None, _H)
             s0, s1 = s1, s0
             out.append(s0.body_q.numpy().copy())
-        return np.array(out), len(regrown)
+        return np.array(out), len(regrown), solver._rods.bend_twist.sigma.numpy()
 
-    (roomy, roomy_regrown), (grown, grown_regrown) = run(False), run(True)
+    (roomy, roomy_regrown, roomy_sigma), (grown, grown_regrown, grown_sigma) = run(False), run(True)
     test.assertEqual(roomy_regrown, 0)
     test.assertGreater(grown_regrown, 0)
+    test.assertGreater(np.abs(roomy_sigma).max(), 0.0)
     np.testing.assert_allclose(grown, roomy, rtol=0.0, atol=1e-6)
+    np.testing.assert_allclose(grown_sigma, roomy_sigma, rtol=0.0, atol=1e-6)
 
 
 def test_gains_and_rests_at_every_step(test, device):
@@ -472,6 +557,8 @@ for name, func in (
     ("test_kamino_expectations", test_kamino_expectations),
     ("test_joint_f_is_a_world_wrench", test_joint_f_is_a_world_wrench),
     ("test_static_shapes_against_vbd", test_static_shapes_against_vbd),
+    ("test_dahl_hysteresis_against_vbd", test_dahl_hysteresis_against_vbd),
+    ("test_reset_restarts_the_hysteresis", test_reset_restarts_the_hysteresis),
     ("test_parent_force_is_the_momentum_balance", test_parent_force_is_the_momentum_balance),
     ("test_joint_coordinates_are_eval_iks", test_joint_coordinates_are_eval_iks),
     ("test_captured_steps_equal_eager_steps", test_captured_steps_equal_eager_steps),
