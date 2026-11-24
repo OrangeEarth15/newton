@@ -1154,7 +1154,9 @@ revolute and prismatic joints (and of D6 joints of one axis), which are Newton's
   inverse inertia at ``model.joint_q`` times one less the impedance's width;
   with ``enable_joint_limit_damping`` it is damped with :math:`2 / (T w)` past a
   bound. ``solreffriction`` and ``solimpfriction`` are not read: the friction is
-  smoothed below ``eps_velocity`` instead.
+  smoothed below ``eps_velocity`` instead. Where a tendon with a friction loss
+  sets either to other than Newton's default, the solver warns once with
+  :class:`~newton.NewtonWarning` when it is built.
 - **The friction of a joint**, the ``joint_friction`` of a degree of freedom
   (MuJoCo's ``frictionloss``), is a force against the joint's motion of that
   magnitude: libuipc's smoothed friction on the step's increment of the
@@ -1845,7 +1847,9 @@ features use. It takes these without reading them:
 - ``joint_velocity_limit``, of which the solver warns once (:ref:`ipc-refused-joints`);
 - ``joint_limit_kd`` with ``enable_joint_limit_damping=False``;
 - ``Control.joint_act``;
-- the fixed tendons' ``solreffriction`` and ``solimpfriction``.
+- the fixed tendons' ``solreffriction`` and ``solimpfriction``, of which the
+  solver warns once, as of the contact coefficients above, where a tendon with a
+  friction loss sets one to other than Newton's default.
 
 Examples
 --------

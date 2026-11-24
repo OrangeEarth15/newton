@@ -613,6 +613,15 @@ class SolverIPC(SolverBase, CouplingInterface):
                 NewtonWarning,
                 stacklevel=2,
             )
+        unread = features.joint_terms.unread_tendon_friction(model)
+        if unread:
+            warnings.warn(
+                f"SolverIPC does not read {' and '.join(unread)}: a tendon's friction loss is libuipc's smoothed "
+                "friction, viscous below eps_velocity, which has no solref or solimp (see Mimic joints, fixed tendons "
+                "and joint friction in Newton's IPC solver guide).",
+                NewtonWarning,
+                stacklevel=2,
+            )
         _check_choice("integrator", integrator, ("bdf1", "bdf2"))
         # the rigid flight under implicit Euler, libuipc's step under BDF2 (docs/solvers/ipc.rst > "Rigid bodies")
         if body_rotation is None:

@@ -127,6 +127,36 @@ def _tendons(model: Model) -> list[tuple[int, np.ndarray, np.ndarray]]:
     return out
 
 
+def unread_tendon_friction(model: Model) -> list[str]:
+    """The ``solreffriction`` and ``solimpfriction`` of MuJoCo's fixed tendons with a friction loss where they differ
+    from Newton's defaults (``SolverMuJoCo.register_custom_attributes`` declares them), each named with the first
+    tendon that sets it. SolverIPC does not read them: a tendon's friction loss is libuipc's smoothed friction, which
+    has no solref or solimp. A tendon without a friction loss has no friction for them to shape, in MuJoCo either."""
+    fixed = [t for t, joints, _ in _tendons(model) if len(joints)]
+    mujoco = getattr(model, "mujoco", None)
+    if not fixed or mujoco is None:
+        return []
+    loss = mujoco.tendon_frictionloss.numpy()
+    rubbing = [t for t in fixed if loss[t] != 0.0]
+    if not rubbing:
+        return []
+    builder = newton.ModelBuilder()
+    newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+    out = []
+    for name, attribute in (("solreffriction", "tendon_solref_friction"), ("solimpfriction", "tendon_solimp_friction")):
+        values = getattr(mujoco, attribute, None)
+        if values is None:
+            continue
+        values = values.numpy()
+        default = np.asarray(builder.custom_attributes[f"mujoco:{attribute}"].default, values.dtype)
+        other = [t for t in rubbing if np.any(values[t] != default)]
+        if other:
+            t = other[0]
+            shown = ", ".join(f"{float(v):g}" for v in values[t])
+            out.append(f"the {name} ({shown}) of MuJoCo's fixed tendon {t}")
+    return out
+
+
 def _tendon_actuators(model: Model) -> int:
     """The MuJoCo actuators of ``model.mujoco`` that drive a tendon."""
     mujoco = getattr(model, "mujoco", None)

@@ -396,6 +396,30 @@ def _sliders(device, worlds=1, tendon='stiffness="2" damping="1" springlength="0
     return builder.finalize(device=device)
 
 
+def test_unread_tendon_friction_warns(test, device):
+    """A fixed tendon with a friction loss whose solreffriction or solimpfriction differs from Newton's default gets a
+    NewtonWarning naming the value and the tendon, once, when the solver is built, as the contact coefficients it does
+    not read do; Newton's defaults, and a tendon without a friction loss, get none."""
+    for tendon, named in (
+        ('frictionloss="0.5" solreffriction="0.05 1"', "the solreffriction (0.05, 1) of MuJoCo's fixed tendon 0"),
+        ('frictionloss="0.5" solimpfriction="0.8 0.9 0.001 0.5 2"', "the solimpfriction (0.8, 0.9, 0.001, 0.5, 2)"),
+    ):
+        with test.subTest(tendon=tendon):
+            model = _sliders(device, tendon=tendon)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                newton.solvers.SolverIPC(model)
+            messages = [str(w.message) for w in caught if issubclass(w.category, newton.NewtonWarning)]
+            test.assertEqual(len(messages), 1, messages)
+            test.assertIn(f"SolverIPC does not read {named}", messages[0])
+    for tendon in ('frictionloss="0.5"', 'solreffriction="0.05 1" solimpfriction="0.8 0.9 0.001 0.5 2"'):
+        with test.subTest(tendon=tendon):
+            model = _sliders(device, tendon=tendon)
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", newton.NewtonWarning)
+                newton.solvers.SolverIPC(model)
+
+
 def _recurrence(q0, m, k, c, h, steps):
     """Implicit Euler's recurrence of two coordinates of masses ``m`` at rest at ``q0`` under ``-k L - c L'``, ``L =
     q_1 + q_2``."""
@@ -494,6 +518,7 @@ for name, func in (
     ("test_joint_friction", test_joint_friction),
     ("test_friction_takes_tight_default_tolerances", test_friction_takes_tight_default_tolerances),
     ("test_tolerances_given_at_their_default_values_are_kept", test_tolerances_given_at_their_default_values_are_kept),
+    ("test_unread_tendon_friction_warns", test_unread_tendon_friction_warns),
     ("test_joint_equality_rows_repeating_a_mimic", test_joint_equality_rows_repeating_a_mimic),
     ("test_parent_force_holds_the_friction", test_parent_force_holds_the_friction),
     ("test_grown_lists_keep_the_terms_inputs", test_grown_lists_keep_the_terms_inputs),

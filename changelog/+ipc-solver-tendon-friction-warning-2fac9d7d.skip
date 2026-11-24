@@ -1,0 +1,1 @@
+SolverIPC warns once, when it is built, of a fixed tendon's solreffriction or solimpfriction that differs from Newton's default where the tendon has a friction loss: it does not read them. Unreleased behaviour, so no release note.
