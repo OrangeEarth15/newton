@@ -1,0 +1,1 @@
+Test-only: SolverIPC registered in Newton's example tests for the examples that take --solver ipc, four as expected failures with their causes; no user-facing change.

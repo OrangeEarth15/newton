@@ -347,6 +347,14 @@ def add_example_batch(cls: type, name: str, variants: list[dict[str, Any]]):
         add_example_test(cls, name, devices=[device], use_viewer=True, test_suffix=suffix, variants=selected)
 
 
+def expect_example_failure(cls: type, name: str, test_suffix: str):
+    """Mark the tests of the example ``name`` and ``test_suffix`` that ``add_example_test`` registered on ``cls`` for
+    each device as expected failures."""
+    prefix = f"test_{name}_{test_suffix}_"
+    for attribute in [attribute for attribute in vars(cls) if attribute.startswith(prefix)]:
+        getattr(cls, attribute).__unittest_expecting_failure__ = True
+
+
 class TestExampleOutputRegexes(unittest.TestCase):
     def _run_example_with_stderr(self, stderr: str, allowed_prefix: str) -> unittest.TestResult:
         process_result = subprocess.CompletedProcess(
@@ -531,6 +539,14 @@ add_basic_example_test(
     test_suffix="kamino",
     allow_output_regexes=[(_KAMINO_NON_FLOATING_ROOT_WARNING_RE, "stderr")],
 )
+# SolverIPC runs on CUDA devices only and needs libuipc-warp
+add_basic_example_test(
+    name="basic.example_basic_pendulum",
+    devices=cuda_test_devices,
+    test_options={"solver": "ipc", "requires": ("uipc_warp",)},
+    use_viewer=True,
+    test_suffix="ipc",
+)
 
 add_basic_example_test(
     name="basic.example_recording",
@@ -583,6 +599,13 @@ add_example_batch(
         },
     ],
 )
+add_basic_example_test(
+    name="basic.example_basic_joints",
+    devices=cuda_test_devices,
+    test_options={"solver": "ipc", "requires": ("uipc_warp",)},
+    use_viewer=True,
+    test_suffix="ipc",
+)
 
 add_example_batch(
     TestBasicExamples,
@@ -600,6 +623,16 @@ add_example_batch(
         for solver in ("featherstone", "semi_implicit", "xpbd", "mujoco", "vbd")
     ],
 )
+add_basic_example_test(
+    name="basic.example_basic_mimic_joint",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120, "solver": "ipc", "requires": ("uipc_warp",)},
+    use_viewer=True,
+    test_suffix="ipc",
+)
+# SolverIPC (an expected failure): in this model without contact libuipc-warp warns on stderr that the kinematic sweep
+# SolverIPC asks it for has no effect, output the test does not allow
+expect_example_failure(TestBasicExamples, "basic.example_basic_mimic_joint", "ipc")
 
 add_example_batch(
     TestBasicExamples,
@@ -625,6 +658,17 @@ add_example_batch(
         },
     ],
 )
+add_basic_example_test(
+    name="basic.example_basic_shapes",
+    devices=cuda_test_devices,
+    test_options={"requires": ("pxr.Usd", "uipc_warp"), "num-frames": 150, "solver": "ipc"},
+    use_viewer=True,
+    test_suffix="ipc",
+    allow_output_regexes=[(_WARP_SDF_CONSTANT_CONVERSION_WARNING_RE, "stderr")],
+)
+# SolverIPC (an expected failure): its bodies rest on the barrier's gap, the sphere 5.8 mm above its rest height within
+# d_hat (10 mm), where test_final allows 0.2 mm
+expect_example_failure(TestBasicExamples, "basic.example_basic_shapes", "ipc")
 
 add_basic_example_test(
     name="basic.example_basic_heightfield",
@@ -698,6 +742,16 @@ add_example_batch(
         },
     ],
 )
+add_basic_example_test(
+    name="basic.example_basic_dzhanibekov",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 230, "solver": "ipc", "requires": ("uipc_warp",)},
+    use_viewer=True,
+    test_suffix="ipc",
+)
+# SolverIPC (an expected failure): in this model without contact libuipc-warp warns on stderr that the kinematic sweep
+# SolverIPC asks it for has no effect, output the test does not allow
+expect_example_failure(TestBasicExamples, "basic.example_basic_dzhanibekov", "ipc")
 
 add_basic_example_test(
     name="basic.example_basic_multi_solver_overlay",
@@ -882,6 +936,14 @@ add_example_batch(
             "test_suffix": "style3d",
         },
     ],
+)
+add_example_test(
+    TestClothExamples,
+    name="cloth.example_cloth_hanging",
+    devices=cuda_test_devices,
+    test_options={"solver": "ipc", "requires": ("uipc_warp",)},
+    use_viewer=True,
+    test_suffix="ipc",
 )
 add_example_test(
     TestClothExamples,
@@ -1519,6 +1581,17 @@ add_example_test(
     use_viewer=True,
     test_suffix="kamino",
 )
+add_example_test(
+    TestSensorExamples,
+    name="sensors.example_sensor_imu",
+    devices=cuda_test_devices,
+    test_options={"requires": ("pxr.Usd", "uipc_warp"), "num-frames": 200, "solver": "ipc"},
+    use_viewer=True,
+    test_suffix="ipc",
+)
+# SolverIPC (an expected failure): its barrier is nearly elastic at the example's steps of 0.5 ms, so after 1 s the cubes
+# still bounce at about 1 m/s and are in flight when test_final reads gravity from the IMU
+expect_example_failure(TestSensorExamples, "sensors.example_sensor_imu", "ipc")
 
 
 class TestMPMExamples(unittest.TestCase):
@@ -1711,6 +1784,13 @@ for example_name in (
             use_viewer=True,
             test_suffix=solver,
         )
+add_contact_example_test(
+    name="contacts.example_balance_bird",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 60, "solver": "ipc", "requires": ("uipc_warp",)},
+    use_viewer=True,
+    test_suffix="ipc",
+)
 
 
 add_contact_example_test(
@@ -1811,6 +1891,14 @@ add_example_test(
 )
 add_example_test(
     TestMultiphysicsExamples,
+    name="multiphysics.example_softbody_gift",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 200, "solver": "ipc", "requires": ("uipc_warp",)},
+    use_viewer=True,
+    test_suffix="ipc",
+)
+add_example_test(
+    TestMultiphysicsExamples,
     name="cloth.example_cloth_poker_cards",
     devices=test_devices,
     test_options={"num-frames": 30},
@@ -1832,6 +1920,14 @@ add_example_test(
     test_options={"num-frames": 2, "solver": "coupled", "vbd-iterations": 2},
     use_viewer=True,
     test_suffix="coupled",
+)
+add_example_test(
+    TestMultiphysicsExamples,
+    name="multiphysics.example_softbody_dropping_to_cloth",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 200, "solver": "ipc", "requires": ("uipc_warp",)},
+    use_viewer=True,
+    test_suffix="ipc",
 )
 add_example_batch(
     TestMultiphysicsExamples,
@@ -1992,6 +2088,14 @@ add_example_test(
     test_options={"num-frames": 120},
     test_options_cpu={"num-frames": 2},
     use_viewer=True,
+)
+add_example_test(
+    TestSoftbodyExamples,
+    name="softbody.example_softbody_hanging",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120, "solver": "ipc", "requires": ("uipc_warp",)},
+    use_viewer=True,
+    test_suffix="ipc",
 )
 
 
