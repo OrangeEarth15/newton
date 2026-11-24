@@ -113,12 +113,16 @@ excess contacts are omitted with a warning.
 native backend: with ``CONTACT_F`` requested, a step writes one row per contact
 term of its incremental potential with a force (a barrier term or a friction
 term), rigid rows between shapes and soft rows between a particle, edge or face
-and a shape, and their forces at the end of the step. Size the buffer with
+and a shape, and their forces at the end of the step. A shape pair in contact is
+therefore several rows, which carry the distribution of the contact; a consumer
+that sums the rows of a body or a shape pair, as
+:class:`~newton.sensors.SensorContact` does, gets the totals. Contact between
+particle features (cloth self-contact) has no row. Size the buffer with
 ``rigid_contact_max=solver.get_max_contact_count()`` and
 ``soft_contact_max=solver.get_max_soft_contact_count()``, a worst case. A smaller
 buffer is accepted: the rows past its capacity are dropped and the counts report
 every row, as the collision pipeline's do. Points are in the body frames of the
-step's output state.
+step's output state. See :ref:`ipc-contact-output`.
 
 A solver advertises available entries through
 :attr:`~newton.solvers.SolverBase.supported_observables` and rejects an
@@ -137,14 +141,16 @@ Standard observables
      - Solvers
    * - ``BODY_QDD`` / ``observables.body_qdd``
      - Rigid-body center-of-mass spatial accelerations in the world frame
-     - :class:`~newton.solvers.SolverMuJoCo` and
-       :class:`~newton.solvers.SolverKamino`
+     - :class:`~newton.solvers.SolverMuJoCo`,
+       :class:`~newton.solvers.SolverKamino`, and
+       :class:`~newton.solvers.SolverIPC`
    * - ``BODY_PARENT_F`` / ``observables.body_parent_f``
      - Incoming parent-joint wrenches on rigid bodies
      - :class:`~newton.solvers.SolverMuJoCo`,
        :class:`~newton.solvers.SolverFeatherstone`,
-       :class:`~newton.solvers.SolverSteel`, and
-       :class:`~newton.solvers.SolverXPBD`
+       :class:`~newton.solvers.SolverSteel`,
+       :class:`~newton.solvers.SolverXPBD`, and
+       :class:`~newton.solvers.SolverIPC`
    * - ``CONTACT_F`` / ``observables.contact_f``
      - Contact spatial forces in the row layout of the step's contacts
      - :class:`~newton.solvers.SolverMuJoCo`,
@@ -156,8 +162,9 @@ Standard observables
      - :class:`~newton.solvers.SolverIPC`, :class:`~newton.solvers.SolverKamino`, and
        :class:`~newton.solvers.SolverVBD`
 
-:class:`~newton.solvers.SolverKamino` computes acceleration as the discrete
-step-average ``(body_qd_out - body_qd_in) / dt``. Across an impact, this includes
+:class:`~newton.solvers.SolverKamino` and :class:`~newton.solvers.SolverIPC`
+compute acceleration as the discrete step-average
+``(body_qd_out - body_qd_in) / dt``. Across an impact, this includes
 the velocity impulse divided by ``dt``. MuJoCo computes ``BODY_QDD`` and
 ``BODY_PARENT_F`` even with ``disable_sensors=True`` by enabling the
 post-constraint RNE stage independently of sensors.
@@ -175,6 +182,13 @@ inertia, without joint armature, so a dynamic joint's projected wrench is its ge
 (``joint_f``, explicit passive spring and damping forces, and joint-space rows) less
 ``armature * qdd``. :class:`~newton.solvers.SolverFeatherstone` reports the start-of-step inverse
 dynamics at zero joint acceleration instead.
+
+:class:`~newton.solvers.SolverIPC` reports the force of the parent joint's terms at the end of the
+step, with the ``joint_f`` it applies to the child. Its joints are penalty energies, not hard
+constraints, so this force is the body's momentum balance over the step, not a rigid joint's
+reaction: in the first steps after a body is released it also carries the body's elastic stretch,
+and a box hanging from a hinge loads it with 57% of its weight in the first step at the default
+body stiffness. See :ref:`ipc-body-observables`.
 
 :class:`~newton.solvers.SolverSteel` reports only the linear part of each rigid
 contact force; the torque part is zero. Contacts without solved rows, such as rows
@@ -300,11 +314,13 @@ the largest displacement of the last Newton direction over
 when the loop ended on that test; with ``semi_implicit=True`` the semi-implicit test
 may end the loop first, above one. A step that failed reports infinity. With
 ``contact_constitution="al-ipc"`` the step ends on AL-IPC's own criterion, which has
-no such residual, and the solver does not offer the observable. The solver
-solves everything it simulates as one system, also several worlds with
-``coupled_worlds=True``, so every world that owns particles or bodies reports the
-same value; ``SolverIPC.ObservableKind.STATUS`` reports how the step ended as
-:class:`~newton.solvers.SolverIPC.StatusBits`.
+no such residual, and the solver does not offer the observable. Several worlds are
+independent by default: each world that holds unknowns reports the residual of its
+own Newton loop, and the global entry stays zero. With one world, or with
+``coupled_worlds=True``, everything is one system, and every world that owns
+particles or bodies reports the same value. ``SolverIPC.ObservableKind.STATUS``
+reports how the step ended as :class:`~newton.solvers.SolverIPC.StatusBits`, per
+world in the same way.
 
 Solver-specific observables
 ---------------------------
