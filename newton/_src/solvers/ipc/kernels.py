@@ -74,25 +74,38 @@ def _load_particles(
     qd: wp.array[wp.vec3],
     quiet: wp.array[wp.int32],
     subscene: wp.array[wp.int32],
+    placing: wp.array[wp.int32],
     x: wp.array[wp.vec3d],
     v: wp.array[wp.vec3d],
     changed: wp.array[wp.int32],
+    written: wp.array[wp.int32],
+    request: wp.array[wp.int32],
 ):
     """Keep the float64 state where ``state_in`` holds its float32 rounding, take ``state_in`` elsewhere.
 
     ``changed[s]`` is set where the state of a particle of subscene ``s`` was taken that ``quiet`` does not mark (one
-    entry, 0, with one world): a free particle that is no coupled solver's proxy.
+    entry, 0, with one world): a free particle that is no coupled solver's proxy. ``written[i]`` says whether the step
+    takes particle ``i``'s position from ``state_in`` without sweeping its move, so that the frame start checks it
+    (libuipc-warp's ``StartCheck``, which ``request[0]`` asks for): a particle that ``quiet`` does not mark, whose moves
+    nothing sweeps, or a fixed particle or proxy that the step places (``placing`` of its subscene).
     """
     i = wp.tid()
     taken = int(0)
+    moved = int(0)
     if _differs(_to32(x[i]), q[i]):
         x[i] = _to64(q[i])
         taken = 1
+        moved = 1
     if _differs(_to32(v[i]), qd[i]):
         v[i] = _to64(qd[i])
         taken = 1
     if taken != 0 and quiet[i] == 0:
         changed[subscene[i]] = 1
+    if moved != 0 and (quiet[i] == 0 or placing[subscene[i]] != 0):
+        written[i] = 1
+        request[0] = 1
+    else:
+        written[i] = 0
 
 
 @wp.kernel
@@ -104,20 +117,29 @@ def _load_bodies(
     body_com: wp.array[wp.vec3],
     base: wp.array[wp.int32],
     quiet: wp.array[wp.int32],
+    swept: wp.array[wp.int32],
     hold: wp.array[wp.int32],
     subscene: wp.array[wp.int32],
+    placing: wp.array[wp.int32],
     x: wp.array[wp.vec3d],
     v: wp.array[wp.vec3d],
     changed: wp.array[wp.int32],
+    written: wp.array[wp.int32],
+    request: wp.array[wp.int32],
 ):
     """Keep the affine state of a body whose ``state_in`` pose and twist are what the solver wrote last, or that
     ``hold`` holds (a kinematic body moving toward its aim, ``kinematic_motion="aim"``); give another the rigid state
     of ``state_in``: q = (p, rows of R) and its rate from Newton's COM twist.
 
     ``changed[s]`` is set where a body of subscene ``s`` that ``quiet`` does not mark took ``state_in``: a dynamic
-    body that is no coupled solver's proxy.
+    body that is no coupled solver's proxy. ``written`` at the body's first pseudo-vertex says whether the step takes
+    its pose from ``state_in`` without sweeping its move, so that the frame start checks it (libuipc-warp's
+    ``StartCheck``, which ``request[0]`` asks for): a body that ``swept`` does not mark (a dynamic one, or a kinematic
+    one moving toward its aims), or a kinematic body or proxy that the step places (``placing`` of its subscene).
     """
     b = wp.tid()
+    o = base[b]
+    written[o] = 0
     if hold[b] != 0:
         return
     tf = body_q[b]
@@ -128,13 +150,16 @@ def _load_bodies(
     for k in range(7):
         if tf[k] != seen[k]:
             same = 0
+    pose = same
     for k in range(6):
         if tw[k] != seen_tw[k]:
             same = 0
     if same != 0:
         return
+    if pose == 0 and (swept[b] == 0 or placing[subscene[b]] != 0):
+        written[o] = 1
+        request[0] = 1
     R = _rotation64(wp.transform_get_rotation(tf))
-    o = base[b]
     x[o] = _to64(wp.transform_get_translation(tf))
     for i in range(3):
         x[o + 1 + i] = wp.vec3d(R[i, 0], R[i, 1], R[i, 2])
@@ -1132,6 +1157,14 @@ def _keep_status(step: wp.array[wp.int32], kept: wp.array[wp.int32]):
     solver, which steps the solver without observables): one word, or one per world entry with independent worlds."""
     k = wp.tid()
     kept[k] = kept[k] | step[k]
+
+
+@wp.kernel
+def _place_where(selected: wp.array[wp.int32], placing: wp.array[wp.int32]):
+    """The subscenes a reset selects place their kinematic bodies and particles at the next step."""
+    k = wp.tid()
+    if selected[k] != 0:
+        placing[k] = 1
 
 
 @wp.kernel

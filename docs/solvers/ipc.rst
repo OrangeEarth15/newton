@@ -288,7 +288,8 @@ The status is a mask of :class:`~newton.solvers.SolverIPC.StatusBits`. A bit of
 - ``NONFINITE_ENERGY``, ``NONFINITE_PCG_INIT``, ``NONFINITE_PCG_ITER``: the
   solve met a value that is not finite.
 - ``THICKNESS_VIOLATED``: a contact pair started at or inside its contact
-  thickness.
+  thickness, or a state written since the last step put surfaces through each
+  other or within their contact thickness (:ref:`ipc-start`).
 - ``INVALID_CCD_STEP``: CCD admitted no update, or a move written since the
   last step met a surface (:ref:`ipc-kinematic-bodies`).
 - ``TRAVERSAL_EXHAUSTED``: a search of the collision tree ran out of its node
@@ -370,9 +371,9 @@ solver checks it when it is built. The pose of a kinematic body, and that of a
 link the model leaves at the identity, are the caller's, written before the
 first step: the pairs with such a body are checked by the first step, on its
 ``state_in``, before anything runs. A first step captured in a graph cannot read
-its ``state_in``: it raises when such a pair fails in the model's state, and
-otherwise takes its start unchecked. Take the first step outside graph capture
-to have that start checked.
+its ``state_in`` on the host: it raises when such a pair fails in the model's
+state, and otherwise its start is checked on the device, as every state written
+between steps is (below).
 
 The thickness of a pair is the sum of its two sides' (see :ref:`ipc-contact`).
 Surfaces that never move may touch or cross, and pairs that do not collide may
@@ -380,14 +381,26 @@ overlap. The check tests every primitive of one body against every primitive of
 another where their bounding boxes come that close, and skips, with a warning,
 a pair of bodies with more than ``2**31 - 1`` primitive pairs.
 
-After the first step there is no such check of a state written between steps.
-Each step sweeps the moves of kinematic bodies and particles and of a coupled
-solver's proxies with CCD (see :ref:`ipc-kinematic-bodies`), and a step that
-starts with a pair at or inside its thickness fails with ``THICKNESS_VIOLATED``
-or ``INVALID_CCD_STEP``. Any other new state, such as a dynamic body put
-elsewhere, is taken as it is. A state that puts two surfaces through each other
-by more than their contact thickness sets neither bit: the barrier acts on the
-unsigned distance, so it pushes such surfaces further in.
+**States written between steps.** A step takes from ``state_in`` what differs
+from what the solver wrote last (:ref:`ipc-state`), and the kernels that load it
+note every position they take. Where a step takes a new position for a dynamic
+body or particle, as after a reset, it first checks its start, on the device and
+inside a captured graph too: the check above, of the pairs with a vertex whose
+position was written. A pair that crosses, or is at or inside its contact
+thickness (up to the rounding of float32 positions), fails the step with
+``THICKNESS_VIOLATED`` before it runs, and the bodies stay where they were
+written. A captured step sets the bit; one that is not captured raises
+:class:`RuntimeError` naming the pair, and with independent worlds only the
+world of the pair fails. The check takes the written state as it is, with no
+sweep from where the last step left it: a reset is a jump, not a motion, and a
+body put back through the space another one fills is a valid reset. The moves
+of kinematic bodies and particles and of a coupled solver's proxies are swept
+instead (see :ref:`ipc-kinematic-bodies`), and checked as written only where a
+step places them without a sweep: at the first step and at the steps after a
+reset or a failed step. A step in which nothing new is written costs the
+comparison its loads make anyway; a written state costs a search of the pairs
+near the written vertices, through bounding-volume trees refit to the step's
+start.
 
 .. _ipc-tolerances:
 

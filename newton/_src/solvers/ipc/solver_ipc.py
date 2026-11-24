@@ -59,6 +59,7 @@ from .kernels import (
     _load_particles,
     _nonzero_activations,
     _particle_accelerations,
+    _place_where,
     _proxy_particle_forces,
     _proxy_wrenches,
     _release_held,
@@ -103,7 +104,7 @@ from .scene import (
     _write_body_stiffness,
     _write_stitch_stiffness,
 )
-from .start_check import _check_start
+from .start_check import _check_start, _written_failure
 
 # typing.override from Python 3.12, typing_extensions' on Python 3.11, else no check, as Newton takes it
 if TYPE_CHECKING:
@@ -158,16 +159,23 @@ def _release(version: str) -> tuple[int, ...]:
 def _capabilities(uipc_warp) -> dict[str, bool]:
     """Whether libuipc-warp has the capabilities SolverIPC calls that a build of ``_UIPC_WARP_MINIMUM`` may lack, a
     development build among them, by name: the rotation of rigid bodies as a rigid body's (``body_rotation="rigid"``,
-    the default), the sweeps of kinematic moves (the barrier's, ``sweep_kinematic``, and AL-IPC's) and the frame
-    restart (an entry of a coupler that restarts its steps)."""
+    the default), the sweeps of kinematic moves (the barrier's, ``sweep_kinematic``, and AL-IPC's), the frame
+    restart (an entry of a coupler that restarts its steps) and the check of the positions written between steps."""
     options = uipc_warp.EngineOptions.names()
     engine = uipc_warp.SimEngine
+    try:
+        import uipc_warp.ext.start_check  # noqa: PLC0415
+
+        start_check = True
+    except ImportError:
+        start_check = False
     return {
         "EngineOptions(affine_rotation=)": "affine_rotation" in options,
         "EngineOptions(sweep_kinematic=)": "sweep_kinematic" in options,
         "EngineOptions(al_sweep_kinematic=) with SimEngine.place_kinematic": "al_sweep_kinematic" in options
         and hasattr(engine, "place_kinematic"),
         "the frame restart (SimEngine.enable_frame_restart)": hasattr(engine, "enable_frame_restart"),
+        "the start check of written positions (uipc_warp.ext.start_check)": start_check,
     }
 
 
@@ -342,7 +350,9 @@ class SolverIPC(SolverBase, CouplingInterface):
     :ref:`ipc-not-read` lists the inputs the solver does not read. The
     ``contacts`` argument of :meth:`step` is not read: the solver detects its
     own contacts. Surfaces that cross each other, or that start at or inside
-    their contact thickness, raise :class:`ValueError` (:ref:`ipc-start`).
+    their contact thickness, raise :class:`ValueError` when the solver is
+    built, and fail the step when a state written between steps puts them so
+    (:ref:`ipc-start`).
 
     A step that is not captured checks how its solve ended: when a contact list
     overflowed it enlarges the lists and solves the step again, and when the
@@ -528,7 +538,9 @@ class SolverIPC(SolverBase, CouplingInterface):
 
         THICKNESS_VIOLATED = 1 << 5
         """A contact pair started at or inside its contact thickness (surfaces in touching contact or
-        intersecting)."""
+        intersecting). Also set when the positions a step takes from ``state_in`` without a sweep, as after a reset,
+        put surfaces through each other or at or inside their contact thickness; the step then does not run
+        (:ref:`ipc-start`)."""
 
         TRAVERSAL_EXHAUSTED = 1 << 6
         """A BVH traversal ran out of its node budget: contact candidates are missing."""
@@ -748,6 +760,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         # (allocated with the request and with every engine built after it, outside any capture)
         self._contact_output = False
         self._contact_export = None
+        # libuipc-warp's StartCheck of the engine, which checks the positions a step takes from state_in without a sweep
+        # (_make_engine; None for an engine without contact)
+        self._start_check = None
         # the steps taken, counted on the device (a captured step counts at every replay), which the contact export's
         # records follow (contacts._contact_records)
         self._step_count = wp.zeros(1, dtype=wp.int64, device=model.device)
@@ -965,6 +980,13 @@ class SolverIPC(SolverBase, CouplingInterface):
         n_sub = 1 if self._worlds is None else self._worlds.count
         self._changed = wp.zeros(n_sub, dtype=wp.int32, device=device)
         self._selected = wp.zeros(n_sub, dtype=wp.int32, device=device)
+        # the check of the positions a step takes from state_in without a sweep (libuipc-warp's StartCheck, which
+        # _make_engine gives every engine with contact): the vertices written, marked by the loads, and the request;
+        # the subscenes whose kinematic bodies and particles the next step places rather than sweeps, as the engine
+        # places them: its first step, and the steps after place_kinematic (_forget_written, reset)
+        self._written = wp.zeros(layout.n, dtype=wp.int32, device=device)
+        self._start_request = wp.zeros(1, dtype=wp.int32, device=device)
+        self._placing = wp.ones(n_sub, dtype=wp.int32, device=device)
         for name, entity_world in (("_particle_subscene", model.particle_world), ("_body_subscene", model.body_world)):
             w = np.zeros(0, np.int64) if entity_world is None else entity_world.numpy()
             subscene = np.zeros(len(w)) if self._worlds is None else self._worlds.subscene(w)
@@ -1020,6 +1042,10 @@ class SolverIPC(SolverBase, CouplingInterface):
             if self._proxy_body.any():
                 quiet = (self._kinematic_body | self._proxy_body).astype(np.int32)
                 self._body_quiet = wp.array(quiet, dtype=wp.int32, device=device)
+            # the bodies whose moves the engine sweeps: the kinematic ones that do not aim, and the proxies
+            swept = self._kinematic_body | self._proxy_body
+            swept[self._aim_bodies] = False
+            self._body_swept = wp.array(swept.astype(np.int32), dtype=wp.int32, device=device)
             # kinematic_motion="aim": the bodies whose state the solver keeps (held); and what state_out takes from
             # state_in (_store_bodies): the pose and the twist of a kinematic body that jumps (1), the twist of one
             # moving toward its aims (2), whose pose is the one it reached
@@ -1081,6 +1107,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._body_hold.zero_()  # the kinematic bodies moving toward their aims take state_in too
         if self._engine is not None:  # and the kinematic bodies, particles and proxies are placed there, not swept
             self._engine.place_kinematic()
+            self._placing.fill_(1)
         if self.model.joint_count:
             self._joint_q_written.fill_(np.nan)
 
@@ -1095,10 +1122,20 @@ class SolverIPC(SolverBase, CouplingInterface):
             inputs["elements"].append(self._forces)
         features.engine_inputs(self, inputs)  # the feature modules' element groups
         options = dict(self._engine_options)
+        self._start_check = None
         if not _has_contact(self._scene.layout()):
             # the barrier's sweep of kinematic moves has no surface to sweep against, and libuipc-warp warns of an
             # option that has no effect
             options.pop("sweep_kinematic", None)
+        else:
+            # the check of the positions a step takes from state_in without a sweep, with the slack of float32
+            # positions the start check takes (docs/solvers/ipc.rst > "The start")
+            from uipc_warp.ext.start_check import StartCheck  # noqa: PLC0415 (libuipc-warp is imported lazily)
+
+            self._start_check = StartCheck(
+                self._written, self._start_request, inputs["contact_tabular"], float32_slack=True
+            )
+            inputs["extensions"].append(self._start_check)
         engine_options = self._uipc_warp.EngineOptions(**options) if options else None
         self._engine = self._uipc_warp.make_engine(
             self._config, engine_options, **inputs, device=device, capacity=capacity
@@ -1330,13 +1367,14 @@ class SolverIPC(SolverBase, CouplingInterface):
         model, eng = self.model, self._engine
         device, vm = model.device, eng.vm
         self._changed.zero_()
+        self._start_request.zero_()
         if model.particle_count:
             quiet = vm.fixed if self._particle_quiet is None else self._particle_quiet
             wp.launch(
                 _load_particles,
                 model.particle_count,
-                inputs=[state_in.particle_q, state_in.particle_qd, quiet, self._particle_subscene],
-                outputs=[vm.x, vm.v, self._changed],
+                inputs=[state_in.particle_q, state_in.particle_qd, quiet, self._particle_subscene, self._placing],
+                outputs=[vm.x, vm.v, self._changed, self._written, self._start_request],
                 device=device,
             )
         if model.body_count:
@@ -1351,15 +1389,18 @@ class SolverIPC(SolverBase, CouplingInterface):
                     model.body_com,
                     self._body_base,
                     self._body_quiet,
+                    self._body_swept,
                     self._body_hold,
                     self._body_subscene,
+                    self._placing,
                 ],
-                outputs=[vm.x, vm.v, self._changed],
+                outputs=[vm.x, vm.v, self._changed, self._written, self._start_request],
                 device=device,
             )
             self._uipc_warp.arrays.update_body_vertices(eng)  # surface vertices x = A x_bar + p
             self._aim_bodies_of(state_in)
             _load_joints(self, state_in)
+        self._placing.zero_()  # the placements are taken
         # the subscenes of the particles and bodies that took state_in discard their friction, and under BDF2 their
         # step is an implicit Euler step (BDF1: nothing); with several worlds the other worlds go on as they were
         eng.discard_friction(where=self._changed)
@@ -1695,13 +1736,21 @@ class SolverIPC(SolverBase, CouplingInterface):
         )
 
     def _world_failure(self, failed: dict[int, int]) -> str:
-        """Why a step failed in some of the independent worlds (``_failed_worlds``), and what ``state_out`` holds."""
+        """Why a step failed in some of the independent worlds (``_failed_worlds``), and what ``state_out`` holds; with
+        the pair of the first world whose start ``state_in`` put in contact (``_written_failure``)."""
+        written = self._written_report()
         return (
             f"SolverIPC: the step failed in {len(failed)} of its {len(self._status_entries)} worlds, "
             f"{self._name_worlds(failed)}. Those worlds are back at their state at the step's start, with their "
             "friction discarded and their BDF2 history started anew, and every other world took the step: state_out "
             "holds both. Surfaces must start apart (outside their contact thickness), and the state must stay finite."
+            + ("" if written is None else f" Before the step ran, {_written_failure(self, written)}.")
         )
+
+    def _written_report(self) -> dict | None:
+        """The report of the start check of the last step (libuipc-warp's ``StartCheck``): the pair of the positions it
+        took from ``state_in`` that failed it, or None (synchronizes)."""
+        return None if self._start_check is None else self._start_check.report()
 
     def _name_worlds(self, failed: dict[int, int]) -> str:
         """``failed`` (bits by world entry) as ``world 1 on THICKNESS_VIOLATED and world 3 on ...``, the first eight."""
@@ -1716,11 +1765,19 @@ class SolverIPC(SolverBase, CouplingInterface):
         return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
     def _failure(self, status) -> str:
-        """Why a step failed, with what libuipc would print."""
+        """Why a step failed, with what libuipc would print, or the pair of its start that ``state_in`` put in
+        contact (``_written_failure``)."""
         if status.overflowed:
             return f"SolverIPC: the contact lists still overflow after {_MAX_REGROWS} enlargements."
         if status.traversal_exhausted:
             return "SolverIPC: a BVH traversal ran out of its node budget, so contact candidates are missing."
+        written = self._written_report()
+        if written is not None:
+            return (
+                f"SolverIPC: the step failed on THICKNESS_VIOLATED before it ran: {_written_failure(self, written)}. "
+                "The barrier needs surfaces apart, by more than their contact thickness, at the start of every step, "
+                "and a state written between steps, such as a reset, is checked as the first step's is."
+            )
         report = self._engine.nonfinite_report()
         name = self._bit_names(1 << status.nonfinite)
         detail = report.get("message", "")
@@ -1929,9 +1986,15 @@ class SolverIPC(SolverBase, CouplingInterface):
                     subject += " took their step"
                 else:
                     subject = f"in every world ({which}){residual}; its result must not be used"
+                written = self._written_report()
+                if written is not None:
+                    causes.append(f"The last step failed before it ran: {_written_failure(self, written)}.")
                 raise RuntimeError(f"SolverIPC: a step failed {subject}. " + " ".join(causes))
             last = self._uipc_warp.arrays.frame_status(self._engine)
-            if last.nonfinite and failed & self.StatusBits(1 << last.nonfinite):
+            written = self._written_report()
+            if written is not None:
+                causes.append(f"The last step failed before it ran: {_written_failure(self, written)}.")
+            elif last.nonfinite and failed & self.StatusBits(1 << last.nonfinite):
                 report = self._engine.nonfinite_report()
                 detail = report.get("message") or ", ".join(f"{k}={v}" for k, v in report.items() if k != "kind")
                 causes.append(f"The last step failed in Newton iteration {report['newton']}: {detail}.")
@@ -1996,6 +2059,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             # the next step places the kinematic bodies and particles and the proxies at their state_in poses, without
             # a sweep
             self._engine.place_kinematic()
+            self._placing.fill_(1)
             if self.model.body_count:
                 self._body_hold.zero_()
             return
@@ -2026,6 +2090,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._engine.discard_friction(where=self._selected)
         self._engine.restart_history(where=self._selected)
         self._engine.place_kinematic(where=self._selected)
+        wp.launch(_place_where, self._placing.shape[0], inputs=[self._selected], outputs=[self._placing],
+                  device=self.model.device)  # fmt: skip
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:

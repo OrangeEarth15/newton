@@ -4,7 +4,9 @@
 """SolverIPC's check of the start: surfaces that cross or start at or inside their contact thickness.
 
 As libuipc's sanity check does at init, ``_check_start`` tests the state the first step takes, part pair by part pair
-with libuipc-warp's ``SurfaceChecker``, and names the closest pair.
+with libuipc-warp's ``SurfaceChecker``, and names the closest pair. The positions a later step takes from its
+``state_in`` without a sweep are checked on the device by libuipc-warp's ``StartCheck``, which the solver gives its
+engine (``SolverIPC._make_engine``); ``_written_failure`` says why such a step failed.
 """
 
 from __future__ import annotations
@@ -378,3 +380,35 @@ def _describe_group(solver: SolverIPC, group: np.ndarray, points: np.ndarray, g:
     if last - first + 1 == len(members):
         return f"particles {first} to {last}"
     return f"{len(members)} particles from particle {first}"
+
+
+def _written_failure(solver: SolverIPC, report: dict) -> str:
+    """What failed a step whose ``state_in`` put surfaces through each other, or at or inside their contact thickness,
+    as a sentence without its subject's capital: the pair of ``report``, the report of libuipc-warp's ``StartCheck``
+    (the first crossing, or else a pair of the smallest gap), named as Newton's particles, bodies and shapes, with
+    independent worlds in its world."""
+    vertices = report["vertices"]
+    world = ""
+    if "world" in report:
+        world = f" in world {int(solver._status_entries[report['world']])}"
+    if report["kind"] == "crossing":
+        edge, triangle = _describe_vertex(solver, vertices[0]), _describe_vertex(solver, vertices[2])
+        n = report["crossings"]
+        return (
+            f"the state the step took from state_in{world} puts the surfaces of {edge} and {triangle} through each "
+            f"other: {n} edge{'s' if n > 1 else ''} of one cross triangles of the other"
+        )
+    distance, thickness = report["distance"], report["thickness"]
+    one = _describe_vertex(solver, vertices[0])
+    if report["kind"] == "half plane":  # measured from the plane's own surface, its margin in the thickness
+        shape = int(solver._planes[2][report["plane"]])
+        margin = float(solver.model.shape_margin.numpy()[shape])
+        distance, thickness = distance + margin, thickness + margin
+        other = f"plane shape {shape}"
+    else:
+        other = _describe_vertex(solver, vertices[-1])
+    rounding = ", up to the rounding of float32 positions" if distance > thickness else ""
+    return (
+        f"the state the step took from state_in{world} puts {one} and {other} {distance:.6g} m apart, at or inside "
+        f"their contact thickness ({thickness:.6g} m{rounding})"
+    )

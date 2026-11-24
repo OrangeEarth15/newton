@@ -16,7 +16,7 @@ import warp as wp
 
 import newton
 from newton.tests.ipc._fixtures import _box_body, _cloth
-from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, patch_sys_module, requires
 
 
 def _rejects(test, builder, pattern, device):
@@ -760,6 +760,179 @@ def test_start_of_posed_bodies_is_checked_on_the_first_step(test, device):
     test.assertEqual(solver._engine.frames, 2)
 
 
+def _pendulum(worlds=1, gravity=-9.81):
+    """A box of 0.2 m hanging 1 m below a revolute joint 2 m above the ground plane, in ``worlds`` worlds (a builder)."""
+    world = newton.ModelBuilder(gravity=(0.0, 0.0, gravity), up_axis=newton.Axis.Z)
+    link = world.add_link()
+    world.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1)
+    joint = world.add_joint_revolute(
+        -1,
+        link,
+        parent_xform=wp.transform(wp.vec3(0.0, 0.0, 2.0), wp.quat_identity()),
+        child_xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()),
+        axis=wp.vec3(0.0, 1.0, 0.0),
+    )
+    world.add_articulation([joint])
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, gravity), up_axis=newton.Axis.Z)
+    builder.add_ground_plane()
+    builder.replicate(world, worlds)
+    return builder
+
+
+def _write_z(state, body, z):
+    q = state.body_q.numpy()
+    q[body, 2] = z
+    state.body_q.assign(q)
+
+
+def test_state_written_between_steps_is_checked(test, device):
+    """A state written between steps that puts surfaces at or inside their contact thickness fails the step before it
+    runs: the pendulum whose box is written 1 cm through the ground, which the joint used to pull out of it in the step
+    with no status bit. An eager step raises, naming the box, the ground plane and their distance, and a step from a
+    valid state then runs; a captured step sets THICKNESS_VIOLATED, leaves the box where it was written, and
+    check_status raises with the pair; and so under AL-IPC. A free particle written below the ground fails the same
+    way."""
+    named = r"( \('[^']*'\))?"  # a body's label, where it has one of its own
+    expected = rf"puts body 0{named} and plane shape 0 -0\.01 m apart, at or inside their contact thickness \(0 m\)"
+    for constitution in ("ipc", "al-ipc"):
+        with test.subTest(contact_constitution=constitution):
+            model = _pendulum().finalize(device=device)
+            solver = newton.solvers.SolverIPC(model, contact_constitution=constitution)
+            s0, s1 = model.state(), model.state()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
+            for _ in range(4):
+                solver.step(s0, s1, None, None, 5e-3)
+                s0, s1 = s1, s0
+            z = float(s0.body_q.numpy()[0, 2])
+            _write_z(s0, 0, 0.09)
+            with test.assertRaisesRegex(RuntimeError, r"failed on THICKNESS_VIOLATED before it ran: .*" + expected):
+                solver.step(s0, s1, None, None, 5e-3)
+            _write_z(s0, 0, z)
+            solver.step(s0, s1, None, None, 5e-3)
+    model = _pendulum().finalize(device=device)
+    solver = newton.solvers.SolverIPC(model)
+    observables = solver.observables({solver.ObservableKind.STATUS})
+    s0, s1 = model.state(), model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
+    solver.step(s0, s1, None, None, 5e-3, observables=observables)
+    with wp.ScopedCapture(device=device) as capture:
+        solver.step(s1, s0, None, None, 5e-3, observables=observables)
+    for z, fails in ((0.5, False), (0.09, True)):
+        _write_z(s1, 0, z)
+        wp.capture_launch(capture.graph)
+        word = int(observables.status.numpy()[0])
+        test.assertEqual(bool(word & solver.StatusBits.THICKNESS_VIOLATED), fails, z)
+        if fails:
+            test.assertEqual(float(s0.body_q.numpy()[0, 2]), np.float32(0.09))
+            with test.assertRaisesRegex(RuntimeError, r"The last step failed before it ran: .*" + expected):
+                solver.check_status(observables)
+        else:
+            test.assertFalse(solver.check_status(observables))
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    builder.add_particle(wp.vec3(0.0, 0.0, 0.5), wp.vec3(0.0, 0.0, 0.0), mass=0.01, radius=0.01)
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model)
+    s0, s1 = model.state(), model.state()
+    solver.step(s0, s1, None, None, 5e-3)
+    s1.particle_q.assign(np.array([[0.0, 0.0, 0.005]], np.float32))
+    with test.assertRaisesRegex(RuntimeError, r"puts particle 0 and plane shape 0 0\.005 m apart"):
+        solver.step(s1, s0, None, None, 5e-3)
+
+
+def test_written_state_is_checked_without_a_sweep(test, device):
+    """The check takes a written state as it is, with no sweep from where the last step left it: of two free boxes
+    without gravity, one written to the other side of the other, through the space it fills, is a valid reset and the
+    step runs; written into it, the step fails, naming the two boxes' surfaces through each other. A step that writes
+    only a velocity, or nothing, asks for no check; one that writes a position asks for it."""
+    named = r"( \('[^']*'\))?"  # a body's label, where it has one of its own
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    a = _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
+    b = _box_body(builder, (1.0, 0.0, 1.0), (0.1, 0.1, 0.1))
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model)
+    s0, s1 = model.state(), model.state()
+    solver.step(s0, s1, None, None, 0.01)
+    s0.assign(s1)
+    solver.step(s0, s1, None, None, 0.01)
+    test.assertEqual(int(solver._start_request.numpy()[0]), 0)  # nothing written
+    s0.assign(s1)
+    qd = s0.body_qd.numpy()
+    qd[b, 0] = -0.5
+    s0.body_qd.assign(qd)
+    solver.step(s0, s1, None, None, 0.01)
+    test.assertEqual(int(solver._start_request.numpy()[0]), 0)  # a velocity alone
+    s0.assign(s1)
+    q = s0.body_q.numpy()
+    q[b, 0] = -1.0  # past box a
+    s0.body_q.assign(q)
+    solver.step(s0, s1, None, None, 0.01)
+    test.assertEqual(int(solver._start_request.numpy()[0]), 1)
+    s0.assign(s1)
+    q = s0.body_q.numpy()
+    q[b, :3] = (0.05, 0.01, 1.013)  # through box a
+    s0.body_q.assign(q)
+    with test.assertRaisesRegex(
+        RuntimeError, rf"puts the surfaces of body [{a}{b}]{named} and body [{a}{b}]{named} through each other"
+    ):
+        solver.step(s0, s1, None, None, 0.01)
+
+
+def test_written_state_fails_its_world_alone(test, device):
+    """With independent worlds a state written through the ground in world 1 fails world 1 alone: an eager step raises,
+    naming world 1 and its pair, and world 0 takes its step, as the same world takes it alone."""
+    named = r"( \('[^']*'\))?"  # a body's label, where it has one of its own
+    model = _pendulum(worlds=2).finalize(device=device)
+    alone = _pendulum().finalize(device=device)
+    solver, solo = newton.solvers.SolverIPC(model), newton.solvers.SolverIPC(alone)
+    test.assertTrue(solver._independent)
+    s0, s1 = model.state(), model.state()
+    a0, a1 = alone.state(), alone.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
+    newton.eval_fk(alone, alone.joint_q, alone.joint_qd, a0)
+    solver.step(s0, s1, None, None, 5e-3)
+    solo.step(a0, a1, None, None, 5e-3)
+    _write_z(s1, 1, 0.09)
+    with test.assertRaisesRegex(
+        RuntimeError,
+        r"failed in 1 of its 2 worlds, world 1 on THICKNESS_VIOLATED.*Before the step ran, the state the "
+        rf"step took from state_in in world 1 puts body 1{named} and plane shape 0 -0\.01 m apart",
+    ):
+        solver.step(s1, s0, None, None, 5e-3)
+    solo.step(a1, a0, None, None, 5e-3)
+    np.testing.assert_allclose(s0.body_q.numpy()[0], a0.body_q.numpy()[0], rtol=0.0, atol=1e-6)
+    test.assertEqual(float(s0.body_q.numpy()[1, 2]), np.float32(0.09))
+
+
+def test_kinematic_placements_are_checked(test, device):
+    """A kinematic body's move between steps is swept, not checked as written: a step after the kinematic box moves
+    asks for no check. A step that places it without a sweep, the step after a reset, checks it: the kinematic box
+    placed through a free box fails that step."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
+    pusher = builder.add_body(
+        xform=wp.transform(wp.vec3(1.0, 0.0, 1.0), wp.quat_identity()), is_kinematic=True, label="pusher"
+    )
+    builder.add_shape_box(pusher, hx=0.1, hy=0.1, hz=0.1)
+    model = builder.finalize(device=device)
+    solver = newton.solvers.SolverIPC(model, kinematic_motion="jump")
+    s0, s1 = model.state(), model.state()
+    solver.step(s0, s1, None, None, 0.01)
+    s0.assign(s1)
+    q = s0.body_q.numpy()
+    q[pusher, 0] = 0.8
+    s0.body_q.assign(q)
+    solver.step(s0, s1, None, None, 0.01)
+    test.assertEqual(int(solver._start_request.numpy()[0]), 0)  # swept
+    s0.assign(s1)
+    solver.reset(s0)
+    q = s0.body_q.numpy()
+    q[pusher, :3] = (0.05, 0.01, 1.013)
+    s0.body_q.assign(q)
+    with test.assertRaisesRegex(RuntimeError, r"failed on THICKNESS_VIOLATED before it ran: .*through each other"):
+        solver.step(s0, s1, None, None, 0.01)
+
+
 def test_external_forces_match_closed_form(test, device):
     """Accelerate a particle with particle_f and two free boxes with body_f and with a free joint's joint_f.
 
@@ -974,8 +1147,9 @@ class TestSolverIPCInputs(unittest.TestCase):
 
     def test_import_checks_the_version_and_the_capabilities(self):
         """Refuse a libuipc-warp older than the release SolverIPC is written for, naming it, and one without a
-        capability SolverIPC calls (the rigid flight, AL-IPC's sweep of kinematic moves, the frame restart), naming
-        what it lacks; take a development build of the release. Every refusal says where to install it from."""
+        capability SolverIPC calls (the rigid flight, AL-IPC's sweep of kinematic moves, the frame restart, the start
+        check of written positions), naming what it lacks; take a development build of the release. Every refusal
+        says where to install it from."""
         import uipc_warp  # noqa: PLC0415
 
         imported = newton.solvers.SolverIPC._uipc_warp
@@ -1004,6 +1178,8 @@ class TestSolverIPCInputs(unittest.TestCase):
 
             with mock.patch.object(uipc_warp, "SimEngine", WithoutRestart):
                 refused(r"lacks the frame restart \(SimEngine\.enable_frame_restart\)")
+            with patch_sys_module("uipc_warp.ext.start_check", None):  # a build without the start check
+                refused(r"lacks the start check of written positions \(uipc_warp\.ext\.start_check\)")
         finally:
             newton.solvers.SolverIPC._uipc_warp = imported
 
@@ -1271,6 +1447,10 @@ for name, func in (
         "test_start_of_posed_bodies_is_checked_on_the_first_step",
         test_start_of_posed_bodies_is_checked_on_the_first_step,
     ),
+    ("test_state_written_between_steps_is_checked", test_state_written_between_steps_is_checked),
+    ("test_written_state_is_checked_without_a_sweep", test_written_state_is_checked_without_a_sweep),
+    ("test_written_state_fails_its_world_alone", test_written_state_fails_its_world_alone),
+    ("test_kinematic_placements_are_checked", test_kinematic_placements_are_checked),
     ("test_external_forces_match_closed_form", test_external_forces_match_closed_form),
     ("test_free_joint_force_pushes_the_parent", test_free_joint_force_pushes_the_parent),
 ):
