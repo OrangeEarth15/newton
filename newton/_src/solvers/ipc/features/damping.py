@@ -65,7 +65,7 @@ def _stitch_damping(
     out: wp.array[wp.float64],
 ):
     """The damping [N s/m] of every stitch: ``source`` holds its attachment, or -1 less its spring of rest length 0
-    (``SolverIPC._stitch_source``). A disabled attachment takes none."""
+    (``SolverIPC._parts.stitch_source``). A disabled attachment takes none."""
     r = wp.tid()
     s = source[r]
     c = wp.float64(0.0)
@@ -236,7 +236,7 @@ def build(solver: SolverIPC, scene) -> None:
         rows = _damped(np.arange(model.spring_count), own_springs & (rest > 0.0), model.spring_damping.numpy())
         if len(rows):
             plan.springs = _terms(rows, device, model.spring_indices.numpy().reshape(-1, 2).astype(np.int64)[rows])
-    source = solver._stitch_source
+    source = solver._parts.stitch_source
     if len(source):
         attached = source >= 0
         c = np.zeros(len(source))
@@ -280,14 +280,16 @@ def build(solver: SolverIPC, scene) -> None:
 
 def _stitch_pairs(solver: SolverIPC, scene) -> np.ndarray:
     """The engine vertices of the stitches of the solver's attachments and springs of rest length 0, in the order
-    ``scene._add_stitches`` adds them (that of ``solver._stitch_source``): the particle and its body's anchor of an
-    attachment, the two particles of a spring."""
+    ``scene._add_stitches`` adds them (that of ``solver._parts.stitch_source``): the particle and its body's anchor of
+    an attachment, the two particles of a spring."""
     model, pairs = solver.model, []
     if model.attachment_particle_body_count:
-        body, particle, _ = solver._attachment_inputs
-        pairs.append(np.stack([particle, scene.layout().body_anchor_offsets[body] + solver._attachment_anchor], axis=1))
-    if len(solver._zero_springs):
-        pairs.append(model.spring_indices.numpy().reshape(-1, 2).astype(np.int64)[solver._zero_springs])
+        body, particle, _ = solver._parts.attachment_inputs
+        pairs.append(
+            np.stack([particle, scene.layout().body_anchor_offsets[body] + solver._parts.attachment_anchor], axis=1)
+        )
+    if len(solver._parts.zero_springs):
+        pairs.append(model.spring_indices.numpy().reshape(-1, 2).astype(np.int64)[solver._parts.zero_springs])
     return np.concatenate(pairs).astype(np.int64)
 
 
@@ -299,7 +301,7 @@ def _plan_drag(solver: SolverIPC, own_tris: np.ndarray) -> dict | None:
         return None
     materials = model.tri_materials.numpy()
     rows = np.flatnonzero(own_tris & ((materials[:, 3] != 0.0) | (materials[:, 4] != 0.0)))
-    free = np.flatnonzero(~solver._fixed_particle)  # the rows of SolverIPC's external accelerations
+    free = np.flatnonzero(~solver._parts.fixed_particle)  # the rows of SolverIPC's external accelerations
     if not (len(rows) and len(free)):
         return None
     tris = model.tri_indices.numpy().reshape(-1, 3).astype(np.int64)[rows]

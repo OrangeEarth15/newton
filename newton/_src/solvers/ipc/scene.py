@@ -50,6 +50,53 @@ _INERTIA_CORRECTION = 1.0e-6
 _BODY_TURN = 0.1
 
 
+@dataclass
+class _Parts:
+    """What this module's functions lay out of a model and keep for the steps, the notifications and the other modules
+    (``SolverIPC._parts``): a new record for every solve that ``SolverIPC._build_engine`` builds, every field set by the
+    function named in its comment (None before)."""
+
+    # (particle_count,): the particles the solve never moves, of mass 0 or not ACTIVE (_add_particles_and_tets)
+    fixed_particle: np.ndarray | None = None
+    # (body_count,): the bodies forces do not move (_body_mass_moments, also when a notification reads the masses)
+    kinematic_body: np.ndarray | None = None
+    # the kinematic bodies that move toward their aims under kinematic_motion="aim" (_add_shapes_and_bodies)
+    aim_bodies: np.ndarray | None = None
+    # (body_count,): the bodies whose start the caller writes, which _check_start leaves to the first step
+    # (_add_shapes_and_bodies)
+    posed_body: np.ndarray | None = None
+    # (body_count,): every body's volume, that of its closed colliding shapes or of water of its mass
+    # (_add_shapes_and_bodies)
+    body_volume: np.ndarray | None = None
+    # (body_count,): the bodies with colliding shapes (_add_shapes_and_bodies)
+    body_meshed: np.ndarray | None = None
+    # (body_count,): the subscene of every body's rows, that of its surface vertices (_add_shapes_and_bodies)
+    body_row_subscene: np.ndarray | None = None
+    # per body, the shape of every surface vertex, in the order of its parts: CONTACT_F's rows (_add_shapes_and_bodies)
+    body_vertex_shape: list | None = None
+    # per body, its anchors: the attachments' (_plan_attachments), then the distance joints' (joints)
+    body_anchors: dict | None = None
+    # the shape of every obstacle, in the order they are added (_add_shapes_and_bodies)
+    obstacle_shapes: list | None = None
+    # the default d_hat of every shape and of every particle, None with a given d_hat (_set_d_hats)
+    shape_d_hat: np.ndarray | None = None
+    particle_d_hat: np.ndarray | None = None
+    # the attachment of every stitch, or -1 less its spring (_add_stitches)
+    stitch_source: np.ndarray | None = None
+    # the springs of rest length 0, which are stitches (_add_springs)
+    zero_springs: np.ndarray | None = None
+    # with the default body_kappa, per row of the engine's orthogonality potential: its body, and that body's largest
+    # principal moment of inertia over its volume (_find_body_stiffness, for every engine made)
+    ortho_body: np.ndarray | None = None
+    ortho_inertia: wp.array | None = None
+    # per attachment, its anchor among its body's; and the attachments' bodies, particles and points the stitches were
+    # laid out from (_plan_attachments)
+    attachment_anchor: np.ndarray | None = None
+    attachment_inputs: tuple | None = None
+    # the first stitch row of the distance joints (_add_stitches)
+    distance_first: int | None = None
+
+
 def _colliding_shapes(model: Model) -> np.ndarray:
     """Which shapes the solver collides: a shape that collides with shapes, and, in a model with particles, a shape
     that collides with particles. In a model without particles a shape that collides with particles only collides
@@ -145,8 +192,8 @@ def _mesh_minimum(n: int, cells: list[np.ndarray], values: np.ndarray) -> np.nda
 
 def _set_d_hats(solver: SolverIPC, elements: _ContactElements) -> None:
     """The default ``d_hat`` of every shape and particle, and of the solve (:ref:`ipc-d-hat`), unless the solver was
-    given one: ``_shape_d_hat`` (one per shape) and ``_particle_d_hat`` (one per particle), None with a given
-    ``d_hat``, and ``_config.d_hat``, the smallest of them.
+    given one: ``_Parts.shape_d_hat`` (one per shape) and ``_Parts.particle_d_hat`` (one per particle), None with a
+    given ``d_hat``, and ``_config.d_hat``, the smallest of them.
 
     A feature's cap is a quarter of the half-size of a colliding shape (``_shape_half_sizes``), a quarter of the radius
     of a free particle that collides (ACTIVE, on no cloth triangle or tetrahedron the solver simulates, its contact
@@ -157,7 +204,7 @@ def _set_d_hats(solver: SolverIPC, elements: _ContactElements) -> None:
     which then stays below the caps of both features. The particles of a connected cloth or soft body take the smallest
     value of its particles, since libuipc needs one value on the particles of a contact triangle."""
     model = solver.model
-    solver._shape_d_hat = solver._particle_d_hat = None
+    solver._parts.shape_d_hat = solver._parts.particle_d_hat = None
     if solver._d_hat_given:
         return
     worlds, n = solver._worlds, model.particle_count
@@ -201,7 +248,7 @@ def _set_d_hats(solver: SolverIPC, elements: _ContactElements) -> None:
         if own.any()
     ]
     particle_d_hat = _mesh_minimum(n, cells, particle_d_hat)
-    solver._shape_d_hat, solver._particle_d_hat = shape_d_hat, particle_d_hat
+    solver._parts.shape_d_hat, solver._parts.particle_d_hat = shape_d_hat, particle_d_hat
     # the solve's: the smallest of the shapes it triangulates and of the particles (libuipc's contact/d_hat)
     meshed = shapes[~_infinite_planes(model)[shapes]] if len(shapes) else shapes
     solver._config.d_hat = float(np.concatenate([[_D_HAT], shape_d_hat[meshed], particle_d_hat]).min())
@@ -571,11 +618,11 @@ def _check_independent_content(solver: SolverIPC) -> None:
     unknowns, in subscene order, and subscene k + 1 is the k-th local world with content, ``_Worlds``)."""
     model = solver.model
     world = model.particle_world.numpy() if model.particle_count else np.zeros(0, np.int64)
-    free = ~solver._fixed_particle
+    free = ~solver._parts.fixed_particle
     particle_sub = solver._worlds.subscene(world)
-    moving = ~solver._kinematic_body
-    moving[solver._aim_bodies] = True
-    body_sub = solver._body_row_subscene
+    moving = ~solver._parts.kinematic_body
+    moving[solver._parts.aim_bodies] = True
+    body_sub = solver._parts.body_row_subscene
     instead = "or pass coupled_worlds=True to solve the worlds as one, in which global entities may move"
     lost = np.flatnonzero(free & (particle_sub == 0))
     if len(lost):
@@ -591,7 +638,7 @@ def _check_independent_content(solver: SolverIPC) -> None:
         label = model.body_label[b] if b < len(model.body_label) else ""
         name = f"body {b}" + (f" ({label!r})" if label and label != f"body_{b}" else "")
         more = f" ({len(lost) - 1} more global bodies are too)" if len(lost) > 1 else ""
-        if solver._kinematic_body[b]:
+        if solver._parts.kinematic_body[b]:
             what, fix = (
                 "a kinematic body with colliding shapes, which kinematic_motion='aim' moves toward its aim as an "
                 "unknown of the step",
@@ -642,7 +689,7 @@ def _vertex_gravity(solver: SolverIPC) -> np.ndarray:
         out[: layout.n_fem] = g[solver.model.particle_world.numpy()]
     if solver.model.body_count:
         out[layout.body_base[: solver.model.body_count]] = g[solver.model.body_world.numpy()]
-        out[layout.body_base[solver._aim_bodies]] = 0.0  # gravity does not move a kinematic body toward its aim
+        out[layout.body_base[solver._parts.aim_bodies]] = 0.0  # gravity does not move a kinematic body toward its aim
     return out
 
 
@@ -651,12 +698,12 @@ def _find_body_stiffness(solver: SolverIPC) -> None:
     whose stiffness array a kernel writes before every step, the body of each of its rows, and the largest
     principal moment of inertia over the volume of that body (0 for a kinematic body and the world's). None
     without bodies or with a given ``body_kappa``, which the engine is built with."""
-    solver._ortho = solver._ortho_inertia = None
+    solver._ortho = solver._parts.ortho_inertia = None
     if solver._body_kappa is not None or solver.model.body_count == 0:
         return
     solver._ortho = solver._uipc_warp.arrays.orthogonality(solver._engine)
-    solver._ortho_body = solver._ortho.bodies
-    solver._ortho_inertia = wp.array(_ortho_ratios(solver), dtype=wp.float64, device=solver.model.device)
+    solver._parts.ortho_body = solver._ortho.bodies
+    solver._parts.ortho_inertia = wp.array(_ortho_ratios(solver), dtype=wp.float64, device=solver.model.device)
 
 
 def _ortho_ratios(solver: SolverIPC) -> np.ndarray:
@@ -665,13 +712,13 @@ def _ortho_ratios(solver: SolverIPC) -> np.ndarray:
     world's."""
     mass, first, second = solver._dyadic
     nb = solver.model.body_count
-    ratio = np.zeros(len(solver._ortho_body))
-    for i, b in enumerate(solver._ortho_body):
-        if b >= nb or solver._kinematic_body[b] or mass[b] <= 0.0:
+    ratio = np.zeros(len(solver._parts.ortho_body))
+    for i, b in enumerate(solver._parts.ortho_body):
+        if b >= nb or solver._parts.kinematic_body[b] or mass[b] <= 0.0:
             continue
         c = first[b] / mass[b]
         spread = np.linalg.eigvalsh(second[b] - mass[b] * np.outer(c, c))
-        ratio[i] = (spread.sum() - spread.min()) / solver._body_volume[b]
+        ratio[i] = (spread.sum() - spread.min()) / solver._parts.body_volume[b]
     return ratio
 
 
@@ -683,8 +730,12 @@ def _write_body_stiffness(solver: SolverIPC, dt: float) -> None:
         return
     wp.launch(
         _body_stiffness,
-        len(solver._ortho_body),
-        inputs=[solver._ortho_inertia, wp.float64(_BODY_KAPPA), wp.float64(1.0 / (4.0 * _BODY_TURN**2 * dt * dt))],
+        len(solver._parts.ortho_body),
+        inputs=[
+            solver._parts.ortho_inertia,
+            wp.float64(_BODY_KAPPA),
+            wp.float64(1.0 / (4.0 * _BODY_TURN**2 * dt * dt)),
+        ],
         outputs=[solver._ortho.kappa],
         device=solver.model.device,
     )
@@ -694,21 +745,21 @@ def _add_particles_and_tets(solver: SolverIPC, scene, elements: _ContactElements
     """Every particle as a finite-element vertex (engine index = particle index), and the tetrahedra."""
     model = solver.model
     n = model.particle_count
-    solver._fixed_particle = np.zeros(n, bool)
+    solver._parts.fixed_particle = np.zeros(n, bool)
     if n == 0:
         return np.zeros((0, 4), np.int64)
     mass = model.particle_mass.numpy().astype(np.float64)
     flags = model.particle_flags.numpy()
-    solver._fixed_particle = (mass <= 0.0) | ((flags & int(ParticleFlags.ACTIVE)) == 0)
+    solver._parts.fixed_particle = (mass <= 0.0) | ((flags & int(ParticleFlags.ACTIVE)) == 0)
     # a free particle is a sphere of its radius; the vertices of cloth and tetrahedra take the solver's thickness
     radius = model.particle_radius.numpy().astype(np.float64)
     scene.add_vertices(
         model.particle_q.numpy().astype(np.float64),
         model.particle_qd.numpy().astype(np.float64),
         mass=mass,
-        fixed=solver._fixed_particle,
+        fixed=solver._parts.fixed_particle,
         thickness=np.where(elements.on_mesh, solver._thickness, radius),
-        d_hat=solver._particle_d_hat,
+        d_hat=solver._parts.particle_d_hat,
         contact_element=elements.particle,
         subscene_element=0 if solver._worlds is None else solver._worlds.subscene(model.particle_world.numpy()),
         gravity=solver._gravity[model.particle_world.numpy()],
@@ -797,14 +848,14 @@ def _add_springs(solver: SolverIPC, scene) -> None:
     (``spring_kappa`` with a radius of 1 m, which only scales the energy, since a spring is no contact
     primitive). Those of rest length 0 become stitches (``_add_stitches``)."""
     model = solver.model
-    solver._zero_springs = np.zeros(0, np.int64)
+    solver._parts.zero_springs = np.zeros(0, np.int64)
     if model.spring_count == 0:
         return
     edges = model.spring_indices.numpy().reshape(-1, 2).astype(np.int64)
     rest = model.spring_rest_length.numpy().astype(np.float64)
     ke = model.spring_stiffness.numpy().astype(np.float64)
     own = _own_elements(model)[2]  # in a coupled solver's view, not another entry's
-    solver._zero_springs = np.flatnonzero((rest == 0.0) & own)
+    solver._parts.zero_springs = np.flatnonzero((rest == 0.0) & own)
     hookean = (rest > 0.0) & own
     if not hookean.any():
         return
@@ -818,23 +869,23 @@ def _plan_attachments(solver: SolverIPC) -> None:
     its anchor among its body's."""
     model = solver.model
     count = model.attachment_particle_body_count
-    solver._body_anchors = {}
-    solver._attachment_anchor = np.zeros(count, np.int64)
-    solver._attachment_inputs = ()
+    solver._parts.body_anchors = {}
+    solver._parts.attachment_anchor = np.zeros(count, np.int64)
+    solver._parts.attachment_inputs = ()
     if count == 0:
         return
     body = model.attachment_particle_body_body.numpy().astype(np.int64)
     particle = model.attachment_particle_body_particle.numpy().astype(np.int64)
     point = model.attachment_particle_body_body_point.numpy()
-    solver._attachment_inputs = (body, particle, point.copy())
+    solver._parts.attachment_inputs = (body, particle, point.copy())
     for b in np.unique(body):
         rows = np.flatnonzero(body == b)
         points, first, inverse = np.unique(point[rows], axis=0, return_index=True, return_inverse=True)
         order = np.argsort(first)
         rank = np.empty_like(order)
         rank[order] = np.arange(len(order))
-        solver._body_anchors[int(b)] = points[order].astype(np.float64)
-        solver._attachment_anchor[rows] = rank[inverse.reshape(-1)]
+        solver._parts.body_anchors[int(b)] = points[order].astype(np.float64)
+        solver._parts.attachment_anchor[rows] = rank[inverse.reshape(-1)]
 
 
 def _attachment_penalties(solver: SolverIPC, mass: np.ndarray) -> np.ndarray:
@@ -847,8 +898,8 @@ def _attachment_penalties(solver: SolverIPC, mass: np.ndarray) -> np.ndarray:
         return np.zeros(1)
     body = model.attachment_particle_body_body.numpy().astype(np.int64)
     particle = model.attachment_particle_body_particle.numpy().astype(np.int64)
-    particle_mass = np.where(solver._fixed_particle, 0.0, model.particle_mass.numpy().astype(np.float64))
-    body_mass = np.where(solver._kinematic_body, 0.0, mass)
+    particle_mass = np.where(solver._parts.fixed_particle, 0.0, model.particle_mass.numpy().astype(np.float64))
+    body_mass = np.where(solver._parts.kinematic_body, 0.0, mass)
     return solver._joint_strength_ratio * (particle_mass[particle] + body_mass[body])
 
 
@@ -859,35 +910,35 @@ def _add_stitches(solver: SolverIPC, scene) -> None:
     model = solver.model
     pairs, source = [], []
     if model.attachment_particle_body_count:
-        body, particle, _ = solver._attachment_inputs
-        anchor = scene.layout().body_anchor_offsets[body] + solver._attachment_anchor
+        body, particle, _ = solver._parts.attachment_inputs
+        anchor = scene.layout().body_anchor_offsets[body] + solver._parts.attachment_anchor
         pairs.append(np.stack([particle, anchor], axis=1))
         source.append(np.arange(len(body)))
-    if len(solver._zero_springs):
-        pairs.append(model.spring_indices.numpy().reshape(-1, 2).astype(np.int64)[solver._zero_springs])
-        source.append(-1 - solver._zero_springs)
-    solver._stitch_source = np.concatenate(source).astype(np.int32) if source else np.zeros(0, np.int32)
+    if len(solver._parts.zero_springs):
+        pairs.append(model.spring_indices.numpy().reshape(-1, 2).astype(np.int64)[solver._parts.zero_springs])
+        source.append(-1 - solver._parts.zero_springs)
+    solver._parts.stitch_source = np.concatenate(source).astype(np.int32) if source else np.zeros(0, np.int32)
     if pairs:
         scene.add_stitches(np.concatenate(pairs), _stitch_kappa(solver, solver._config.dt), 0.0)
     # the distance joints of one length: a stitch of that rest length between the anchors of their two sides,
     # after the other stitches (docs/solvers/ipc.rst > "Distance joints")
-    solver._distance_first = len(solver._stitch_source)
-    if len(solver._distance_joints):
+    solver._parts.distance_first = len(solver._parts.stitch_source)
+    if len(solver._joints.distance):
         offsets = scene.layout().body_anchor_offsets
-        a = solver._distance_anchor
+        a = solver._joints.distance_anchor
         ends = np.stack([offsets[a[:, 0, 0]] + a[:, 0, 1], offsets[a[:, 1, 0]] + a[:, 1, 1]], axis=1)
         dt = solver._config.dt
         model = solver.model
-        first = model.joint_qd_start.numpy()[solver._distance_joints]
+        first = model.joint_qd_start.numpy()[solver._joints.distance]
         length = model.joint_limit_lower.numpy()[first].astype(np.float64)
         kappa = solver._distance_hard.numpy() / (dt * dt)
-        kappa[~model.joint_enabled.numpy()[solver._distance_joints]] = 0.0
-        solver._distance_first = scene.add_stitches(ends, kappa, length)
+        kappa[~model.joint_enabled.numpy()[solver._joints.distance]] = 0.0
+        solver._parts.distance_first = scene.add_stitches(ends, kappa, length)
 
 
 def _stitch_kappa(solver: SolverIPC, dt: float) -> np.ndarray:
     """The stiffness of every stitch for a step of ``dt``, as ``_stitch_stiffness`` writes it, on the host."""
-    model, source = solver.model, solver._stitch_source
+    model, source = solver.model, solver._parts.stitch_source
     kappa = np.zeros(len(source))
     attached = source >= 0
     if attached.any():
@@ -946,21 +997,21 @@ def _write_stitch_stiffness(solver: SolverIPC, dt: float) -> None:
 
 def _body_mass_moments(solver: SolverIPC, stacklevel: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """The dyadic mass ``(m, sum m x_bar, sum m x_bar x_bar^T)`` of every body from Newton's mass properties,
-    and which bodies are kinematic (``solver._kinematic_body``)."""
+    and which bodies are kinematic (``solver._parts.kinematic_body``)."""
     model = solver.model
     nb = model.body_count
-    solver._kinematic_body = np.zeros(nb, bool)
+    solver._parts.kinematic_body = np.zeros(nb, bool)
     if nb == 0:
         return np.zeros(0), np.zeros((0, 3)), np.zeros((0, 3, 3))
     body_mass = model.body_mass.numpy().astype(np.float64)
     body_com = model.body_com.numpy().astype(np.float64)
     body_inertia = model.body_inertia.numpy().astype(np.float64)
-    solver._kinematic_body = _kinematic_bodies(model)
+    solver._parts.kinematic_body = _kinematic_bodies(model)
     mass, first, second = np.zeros(nb), np.zeros((nb, 3)), np.zeros((nb, 3, 3))
     for b in range(nb):
         inertia = 0.5 * (body_inertia[b] + body_inertia[b].T)
         moments = np.linalg.eigvalsh(inertia)
-        if not solver._kinematic_body[b] and moments[0] <= 0.0:
+        if not solver._parts.kinematic_body[b] and moments[0] <= 0.0:
             raise ValueError(f"SolverIPC needs a positive-definite inertia for the dynamic body {b}.")
         deficit = moments[2] - moments[0] - moments[1]
         if moments[0] > 0.0 and deficit >= 0.0:
@@ -994,7 +1045,7 @@ def _spreads(dyadic: tuple) -> np.ndarray:
 def _mass_inverse(solver: SolverIPC, mass: np.ndarray, first: np.ndarray, second: np.ndarray) -> np.ndarray:
     """The inverse of the 4 x 4 block ``[[m, (sum m x_bar)^T], [sum m x_bar, sum m x_bar x_bar^T]]`` of every
     dynamic body's dyadic mass, which maps a force on ``(p_k, row k of A)`` to its acceleration."""
-    dynamic = np.flatnonzero(~solver._kinematic_body)
+    dynamic = np.flatnonzero(~solver._parts.kinematic_body)
     M = np.zeros((len(dynamic), 4, 4))
     M[:, 0, 0] = mass[dynamic]
     M[:, 0, 1:] = first[dynamic]
@@ -1041,9 +1092,9 @@ def _add_shapes_and_bodies(
     bodies' dyadic masses."""
     model = solver.model
     meshes: dict[int, list] = {b: [] for b in range(model.body_count)}
-    solver._obstacle_shapes = []  # the shape of every obstacle, in the order they are added
+    solver._parts.obstacle_shapes = []  # the shape of every obstacle, in the order they are added
     # the subscene of every body's rows: that of its surface vertices, as the engine takes it (one subscene)
-    solver._body_row_subscene = np.zeros(model.body_count, np.int64)
+    solver._parts.body_row_subscene = np.zeros(model.body_count, np.int64)
     if model.shape_count:
         shape_type = model.shape_type.numpy()
         shape_body = model.shape_body.numpy()
@@ -1079,15 +1130,15 @@ def _add_shapes_and_bodies(
                     v,
                     f,
                     thickness=margin[s],
-                    d_hat=None if solver._shape_d_hat is None else solver._shape_d_hat[s],
+                    d_hat=None if solver._parts.shape_d_hat is None else solver._parts.shape_d_hat[s],
                     contact_element=elements.shape[s],
                     subscene_element=_subscene_of_shape(solver, s),
                 )
-                solver._obstacle_shapes.append(s)
+                solver._parts.obstacle_shapes.append(s)
             else:
                 meshes[b].append((v, f, s))
     # the shape of every surface vertex of a body, in the order of its parts (the contact rows of CONTACT_F)
-    solver._body_vertex_shape = [
+    solver._parts.body_vertex_shape = [
         np.concatenate([np.full(len(v), s, np.int32) for v, _, s in meshes[b]]) if meshes[b] else np.zeros(0, np.int32)
         for b in range(model.body_count)
     ]
@@ -1095,15 +1146,15 @@ def _add_shapes_and_bodies(
     mass, first, second = _body_mass_moments(solver, stacklevel=5)
     # the bodies with colliding shapes, and with kinematic_motion="aim" those of them that are kinematic and have mass,
     # which move toward their aims
-    solver._body_meshed = np.array([bool(meshes[b]) for b in range(model.body_count)], bool)
-    solver._aim_bodies = _aiming_bodies(solver, mass)
+    solver._parts.body_meshed = np.array([bool(meshes[b]) for b in range(model.body_count)], bool)
+    solver._parts.aim_bodies = _aiming_bodies(solver, mass)
     # the bodies whose start the caller writes into the state, which the construction's check leaves to the first
     # step's device check (_check_start)
-    solver._posed_body = np.zeros(model.body_count, bool)
+    solver._parts.posed_body = np.zeros(model.body_count, bool)
     if model.body_count == 0:
         return mass, first, second
     inertia = model.body_inertia.numpy().astype(np.float64)
-    for b in solver._aim_bodies:
+    for b in solver._parts.aim_bodies:
         if np.linalg.eigvalsh(0.5 * (inertia[b] + inertia[b].T)).min() <= 0.0:
             raise ValueError(
                 f"SolverIPC needs a positive-definite inertia for the kinematic body {b}, which "
@@ -1113,11 +1164,11 @@ def _add_shapes_and_bodies(
     body_q, body_qd, placed = _start_bodies(solver)
     # a kinematic body, whose pose the caller writes at every step, and a link the model leaves at the identity,
     # which the caller places by writing forward kinematics into the state (docs/solvers/ipc.rst > "State")
-    solver._posed_body = solver._kinematic_body | placed
+    solver._parts.posed_body = solver._parts.kinematic_body | placed
     body_com = model.body_com.numpy().astype(np.float64)
     body_mass = model.body_mass.numpy().astype(np.float64)
     body_gravity = solver._gravity[model.body_world.numpy()]
-    solver._body_volume = np.zeros(model.body_count)
+    solver._parts.body_volume = np.zeros(model.body_count)
     for b in range(model.body_count):
         parts = meshes[b]
         offsets = np.cumsum([0] + [len(v) for v, _, _ in parts])
@@ -1134,16 +1185,16 @@ def _add_shapes_and_bodies(
             if parts
             else _subscene_of_body(solver, b)
         )
-        solver._body_row_subscene[b] = np.atleast_1d(subscene)[0]
+        solver._parts.body_row_subscene[b] = np.atleast_1d(subscene)[0]
         thickness = np.concatenate([np.full(len(v), margin[s]) for v, _, s in parts]) if parts else 0.0
         d_hat = None  # every vertex at the d_hat of its shape
-        if solver._shape_d_hat is not None and parts:
-            d_hat = np.concatenate([np.full(len(v), solver._shape_d_hat[s]) for v, _, s in parts])
+        if solver._parts.shape_d_hat is not None and parts:
+            d_hat = np.concatenate([np.full(len(v), solver._parts.shape_d_hat[s]) for v, _, s in parts])
         volume = sum(_closed_volume(v, f) for v, f, _ in parts)
         if volume <= 0.0:
             # no closed collision mesh: the volume of water of that mass
             volume = max(body_mass[b], 1.0e-12) / 1000.0
-        solver._body_volume[b] = volume
+        solver._parts.body_volume[b] = volume
         R = _quat_to_matrix_np(body_q[b, 3:7])
         w = body_qd[b, 3:6]
         W = np.array([[0.0, -w[2], w[1]], [w[2], 0.0, -w[0]], [-w[1], w[0], 0.0]])
@@ -1159,14 +1210,14 @@ def _add_shapes_and_bodies(
             A=R,
             p_dot=body_qd[b, :3] - np.cross(w, R @ body_com[b]),
             A_dot=W @ R,
-            fixed=bool(solver._kinematic_body[b]) and b not in solver._aim_bodies,
+            fixed=bool(solver._parts.kinematic_body[b]) and b not in solver._parts.aim_bodies,
             thickness=thickness,
             d_hat=d_hat,
             contact_element=element,
             subscene_element=subscene,
             # a kinematic body moving toward its aim falls with nothing: gravity does not move it
-            gravity=np.zeros(3) if b in solver._aim_bodies else body_gravity[b],
-            anchors=solver._body_anchors.get(b),
+            gravity=np.zeros(3) if b in solver._parts.aim_bodies else body_gravity[b],
+            anchors=solver._parts.body_anchors.get(b),
         )
     return mass, first, second
 
@@ -1205,12 +1256,12 @@ def _default_kinematic_motion(solver: SolverIPC) -> tuple[str, str | None]:
 
 def _aiming_bodies(solver: SolverIPC, mass: np.ndarray) -> np.ndarray:
     """With ``kinematic_motion="aim"``, the bodies that move toward their aims (:ref:`ipc-kinematic-bodies`): the
-    kinematic bodies with colliding shapes (``solver._body_meshed``) and a mass ``mass`` above 0. A kinematic body of
-    mass 0 keeps the jump: there is no mass for the soft transform constraint to move, and a soft anchor would let
+    kinematic bodies with colliding shapes (``solver._parts.body_meshed``) and a mass ``mass`` above 0. A kinematic body
+    of mass 0 keeps the jump: there is no mass for the soft transform constraint to move, and a soft anchor would let
     the joints it holds sag. No body with ``"jump"``."""
     if not solver._aims or solver.model.body_count == 0:
         return np.zeros(0, np.int64)
-    return np.flatnonzero(solver._kinematic_body & solver._body_meshed & (mass > 0.0))
+    return np.flatnonzero(solver._parts.kinematic_body & solver._parts.body_meshed & (mass > 0.0))
 
 
 def _start_bodies(solver: SolverIPC) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1237,7 +1288,7 @@ def _start_bodies(solver: SolverIPC) -> tuple[np.ndarray, np.ndarray, np.ndarray
 
 def _engine_dyadic(solver: SolverIPC, dyadic: tuple) -> tuple:
     """The bodies' dyadic masses as the engine holds them: the world's (zero) after Newton's bodies."""
-    if solver._world_body < 0:
+    if solver._joints.world_body < 0:
         return dyadic
     mass, first, second = dyadic
     return np.append(mass, 0.0), np.vstack([first, np.zeros((1, 3))]), np.concatenate([second, np.zeros((1, 3, 3))])

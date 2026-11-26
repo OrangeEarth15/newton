@@ -220,7 +220,7 @@ def build(solver: SolverIPC, scene) -> None:
     solver._features.rods = _State(
         joints=joints,
         rows=wp.array(joints.astype(np.int32), dtype=wp.int32, device=model.device),
-        bodies=np.stack([np.where(parent >= 0, parent, solver._world_body), child], axis=1),
+        bodies=np.stack([np.where(parent >= 0, parent, solver._joints.world_body), child], axis=1),
         frames=tuple(np.array([_quat_to_matrix_np(q) for q in X[joints, 3:7]]) for X in (X_p, X_c)),
         anchors=(X_p[joints, :3], X_c[joints, :3]),
         every_world=wp.ones(model.world_count + 1, dtype=wp.bool, device=model.device),

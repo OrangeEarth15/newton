@@ -28,6 +28,7 @@ from .contacts import (
     _check_al_ipc,
     _contact_elements,
     _contact_records,
+    _Export,
     _make_contact_export,
     _unread_materials,
     _write_contacts,
@@ -39,6 +40,7 @@ from .joints import (
     _joint_inputs_now,
     _joint_strengths,
     _JointOptions,
+    _Joints,
     _load_joints,
     _map_joints,
     _plan_distance_joints,
@@ -95,6 +97,7 @@ from .scene import (
     _mass_inverse,
     _ortho_ratios,
     _own_elements,
+    _Parts,
     _plan_attachments,
     _proxy_bodies,
     _proxy_particles,
@@ -791,6 +794,10 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._kinematic_strength_ratio = float(kinematic_strength_ratio)
         self._dt = self._config.dt  # of the last step, which grow() solves again
         self._observables = None  # the observables container of the last step (None: none), which prepare reads
+        # what the core modules lay out of the model for the steps, the notifications and the feature modules: the
+        # scene's parts and the joints, new records for every solve _build_engine builds
+        self._parts: _Parts | None = None
+        self._joints: _Joints | None = None
         # what the feature modules keep from one hook to the next, one field per module (features.FeatureState)
         self._features = features.FeatureState()
         # what BODY_PARENT_F and BODY_QDD keep, made by the first container that requests one (observables)
@@ -804,10 +811,11 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._ortho = None  # the engine's orthogonality potentials, whose stiffness follows dt (default body_kappa)
         self._body_spread = None  # body_rotation="rigid": the bodies' second moments about their centres of mass
         self._default_control = None  # the Control of a step given none, built once (_control_of_model)
-        # CONTACT_F: whether a container requested it, and libuipc-warp's ContactForces of the engine then
-        # (allocated with the request and with every engine built after it, outside any capture)
+        # CONTACT_F: whether a container requested it, and libuipc-warp's ContactForces of the engine then with what the
+        # contact rows read (allocated with the request and with every engine built after it, outside any capture); and
+        # for a coupled solver's proxies, whose feedback reads the same records
         self._contact_output = False
-        self._contact_export = None
+        self._contact_export: _Export | None = None
         # libuipc-warp's StartCheck of the engine, which checks the positions a step takes from state_in without a sweep
         # (_make_engine; None for an engine without contact)
         self._start_check = None
@@ -943,6 +951,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         model = self.model
         device = model.device
         self._engine = self._frame_graph = self._forces = self._contact_export = None
+        self._parts, self._joints = _Parts(), _Joints()  # filled by the scene's and the joints' functions below
         # a coupled solver's proxies (docs/solvers/ipc.rst > "Coupling")
         self._proxy_body, self._proxy_particle = _proxy_bodies(model), _proxy_particles(model)
         self._proxies = bool(self._proxy_body.any() or self._proxy_particle.any())
@@ -996,9 +1005,9 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._attachment_hard = wp.array(_attachment_penalties(self, self._dyadic[0]), dtype=wp.float64, device=device)
         self._distance_hard = wp.array(_distance_penalties(self, self._dyadic[0]), dtype=wp.float64, device=device)
         _add_stitches(self, scene)
-        if len(self._aim_bodies):  # libuipc's soft transform constraint on the kinematic bodies, in their order
+        if len(self._parts.aim_bodies):  # libuipc's soft transform constraint on the kinematic bodies, in their order
             ratio = self._kinematic_strength_ratio
-            scene.add_soft_transform_constraints(self._aim_bodies, (ratio, ratio))
+            scene.add_soft_transform_constraints(self._parts.aim_bodies, (ratio, ratio))
         self._set_newton_tolerances()  # before the engine inputs, which read them
         features.build(self, scene)  # the feature modules, on the scene the solver laid out
         self._scene = scene
@@ -1011,15 +1020,15 @@ class SolverIPC(SolverBase, CouplingInterface):
         # CONTACT_F's contact rows: the shape of every engine vertex on a shape (-1 elsewhere: particles, the bodies'
         # pseudo-vertices and anchors), and the shapes that hold contact primitives, the planes' among them
         vertex_shape = np.full(layout.n, -1, np.int32)
-        for k, shape in enumerate(self._obstacle_shapes):
+        for k, shape in enumerate(self._parts.obstacle_shapes):
             vertex_shape[layout.obstacle_offsets[k] : layout.obstacle_offsets[k + 1]] = shape
-        for b, shapes in enumerate(self._body_vertex_shape):
+        for b, shapes in enumerate(self._parts.body_vertex_shape):
             vertex_shape[layout.body_vertex_offsets[b] : layout.body_vertex_offsets[b + 1]] = shapes
         self._vertex_shape = vertex_shape
         self._contact_shapes = np.union1d(vertex_shape[vertex_shape >= 0], np.asarray(self._planes[2], np.int32))
         # the external accelerations: one row per free particle, then four per dynamic body (p and the rows of A)
-        free = np.flatnonzero(~self._fixed_particle).astype(np.int32)
-        dynamic = np.flatnonzero(~self._kinematic_body).astype(np.int32)
+        free = np.flatnonzero(~self._parts.fixed_particle).astype(np.int32)
+        dynamic = np.flatnonzero(~self._parts.kinematic_body).astype(np.int32)
         self._n_free, self._n_dynamic = len(free), len(dynamic)
         self._force_blocks = np.concatenate([free, (layout.body_base[dynamic][:, None] + np.arange(4)).reshape(-1)])
         self._free_particles = wp.array(free, dtype=wp.int32, device=device)
@@ -1073,7 +1082,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         # a coupled solver's proxy particles, whose state the coupler writes at every step
         self._particle_quiet = None
         if self._proxy_particle.any():
-            quiet = (self._fixed_particle | self._proxy_particle).astype(np.int32)
+            quiet = (self._parts.fixed_particle | self._proxy_particle).astype(np.int32)
             self._particle_quiet = wp.array(quiet, dtype=wp.int32, device=device)
         self._status_scratch = wp.zeros(1, dtype=wp.int32, device=device)
         self._residual_scratch = wp.zeros(1, dtype=wp.float32, device=device)
@@ -1085,31 +1094,31 @@ class SolverIPC(SolverBase, CouplingInterface):
         nb = model.body_count
         if nb:
             self._body_base = wp.array(layout.body_base.astype(np.int32), dtype=wp.int32, device=device)
-            self._body_kinematic = wp.array(self._kinematic_body.astype(np.int32), dtype=wp.int32, device=device)
+            self._body_kinematic = wp.array(self._parts.kinematic_body.astype(np.int32), dtype=wp.int32, device=device)
             # the bodies whose new state from state_in discards no friction: the kinematic ones, and a coupled
             # solver's proxy bodies
             self._body_quiet = self._body_kinematic
             if self._proxy_body.any():
-                quiet = (self._kinematic_body | self._proxy_body).astype(np.int32)
+                quiet = (self._parts.kinematic_body | self._proxy_body).astype(np.int32)
                 self._body_quiet = wp.array(quiet, dtype=wp.int32, device=device)
             # the bodies whose moves the engine sweeps: the kinematic ones that do not aim, and the proxies
-            swept = self._kinematic_body | self._proxy_body
-            swept[self._aim_bodies] = False
+            swept = self._parts.kinematic_body | self._proxy_body
+            swept[self._parts.aim_bodies] = False
             self._body_swept = wp.array(swept.astype(np.int32), dtype=wp.int32, device=device)
             # kinematic_motion="aim": the bodies whose state the solver keeps (held); and what state_out takes from
             # state_in (_store_bodies): the pose and the twist of a kinematic body that jumps (1), the twist of one
             # moving toward its aims (2), whose pose is the one it reached
             self._body_hold = wp.zeros(nb, dtype=wp.int32, device=device)
             self._body_passthrough = self._body_kinematic
-            if len(self._aim_bodies):
-                through = self._kinematic_body.astype(np.int32)
-                through[self._aim_bodies] = 2
+            if len(self._parts.aim_bodies):
+                through = self._parts.kinematic_body.astype(np.int32)
+                through[self._parts.aim_bodies] = 2
                 self._body_passthrough = wp.array(through, dtype=wp.int32, device=device)
-            self._aim_rows = wp.array(self._aim_bodies.astype(np.int32), dtype=wp.int32, device=device)
+            self._aim_rows = wp.array(self._parts.aim_bodies.astype(np.int32), dtype=wp.int32, device=device)
             # the twist of every such body that it had as a dynamic body before a notification made it kinematic,
             # which its aims do not take (NaN: none; _drop_residual_twists)
             self._aim_residual = wp.array(
-                np.full((len(self._aim_bodies), 6), np.nan, np.float32), dtype=wp.spatial_vector, device=device
+                np.full((len(self._parts.aim_bodies), 6), np.nan, np.float32), dtype=wp.spatial_vector, device=device
             )
             entry = np.where(model.body_world.numpy() < 0, model.world_count, model.body_world.numpy())
             self._body_entry = wp.array(entry.astype(np.int32), dtype=wp.int32, device=device)
@@ -1159,7 +1168,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._engine.place_kinematic()
             self._placing.fill_(1)
         if self.model.joint_count:
-            self._joint_q_written.fill_(np.nan)
+            self._joints.q_written.fill_(np.nan)
 
     def _set_newton_tolerances(self) -> None:
         """The Newton tolerances of the solve about to be built, in the config (``_newton_tolerances``), with a
@@ -1255,18 +1264,18 @@ class SolverIPC(SolverBase, CouplingInterface):
         # attachment or a spring, apart (_distance_stiffness)
         self._stitch_rows, self._distance_rows = [], []
         for g in self._uipc_warp.arrays.stitch_groups(self._engine):
-            distance = g.rows >= self._distance_first
+            distance = g.rows >= self._parts.distance_first
             if not distance.any():
                 self._stitch_rows.append(
-                    (g.kappa, wp.array(self._stitch_source[g.rows], dtype=wp.int32, device=device))
+                    (g.kappa, wp.array(self._parts.stitch_source[g.rows], dtype=wp.int32, device=device))
                 )
             elif distance.all():
-                rows = wp.array((g.rows - self._distance_first).astype(np.int32), dtype=wp.int32, device=device)
+                rows = wp.array((g.rows - self._parts.distance_first).astype(np.int32), dtype=wp.int32, device=device)
                 self._distance_rows.append((g.kappa, g.rest_length, rows))
             else:
                 raise RuntimeError("SolverIPC: a stitch group holds distance joints and attachments or springs.")
         if self._distance_rows:
-            self._distance_joints_device = wp.array(self._distance_joints, dtype=wp.int32, device=device)
+            self._distance_joints_device = wp.array(self._joints.distance, dtype=wp.int32, device=device)
         _find_body_stiffness(self)
         _make_contact_export(self)
 
@@ -1479,7 +1488,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         bdf2 = self._config.integrator == "bdf2"
         wp.launch(
             _aim_kinematic_bodies,
-            len(self._aim_bodies),
+            len(self._parts.aim_bodies),
             inputs=[
                 self._aim_rows,
                 state_in.body_q,
@@ -1534,13 +1543,13 @@ class SolverIPC(SolverBase, CouplingInterface):
         ``state_in`` holds that twist until the caller writes another; until then the aims take a zero twist
         (``_aim_kinematic_bodies``), and the body stays where it is, as in Newton's other solvers. Only with
         ``kinematic_motion="aim"``, after the solve was built again."""
-        if written is None or not len(self._aim_bodies):
+        if written is None or not len(self._parts.aim_bodies):
             return
-        rows = np.flatnonzero(became[self._aim_bodies])
+        rows = np.flatnonzero(became[self._parts.aim_bodies])
         if not len(rows):
             return
         residual = self._aim_residual.numpy()
-        residual[rows] = written[self._aim_bodies[rows]]
+        residual[rows] = written[self._parts.aim_bodies[rows]]
         self._aim_residual.assign(residual)
 
     def _write_forces(self, state_in: State, control: Control) -> None:
@@ -1559,13 +1568,13 @@ class SolverIPC(SolverBase, CouplingInterface):
             )
         if self._n_dynamic:
             self._joint_wrench.zero_()
-            if model.joint_count and control.joint_f is not None and self._wrenched_joints.shape[0]:
+            if model.joint_count and control.joint_f is not None and self._joints.wrenched.shape[0]:
                 wp.launch(
                     _joint_wrenches,
-                    self._wrenched_joints.shape[0],
+                    self._joints.wrenched.shape[0],
                     inputs=[
-                        self._wrenched_joints,
-                        self._joint_store_type,
+                        self._joints.wrenched,
+                        self._joints.store_type,
                         model.joint_parent,
                         model.joint_child,
                         model.joint_X_p,
@@ -1578,12 +1587,12 @@ class SolverIPC(SolverBase, CouplingInterface):
                     outputs=[self._joint_wrench],
                     device=model.device,
                 )
-            if model.joint_count and control.joint_f is not None and self._d6_joints.shape[0]:
+            if model.joint_count and control.joint_f is not None and self._joints.d6.shape[0]:
                 wp.launch(
                     _d6_joint_wrenches,
-                    self._d6_joints.shape[0],
+                    self._joints.d6.shape[0],
                     inputs=[
-                        self._d6_joints,
+                        self._joints.d6,
                         model.joint_parent,
                         model.joint_child,
                         model.joint_X_p,
@@ -1662,7 +1671,7 @@ class SolverIPC(SolverBase, CouplingInterface):
                 _store_joints,
                 model.joint_count,
                 inputs=[
-                    self._joint_store_type,
+                    self._joints.store_type,
                     model.joint_parent,
                     model.joint_child,
                     model.joint_X_p,
@@ -1670,22 +1679,22 @@ class SolverIPC(SolverBase, CouplingInterface):
                     model.joint_axis,
                     model.joint_q_start,
                     model.joint_qd_start,
-                    self._joint_element,
+                    self._joints.element,
                     angle,
                     distance,
                     state_out.body_q,
                     state_out.body_qd,
                     model.body_com,
                 ],
-                outputs=[state_out.joint_q, state_out.joint_qd, self._joint_q_written],
+                outputs=[state_out.joint_q, state_out.joint_qd, self._joints.q_written],
                 device=model.device,
             )
-            if self._d6_joints.shape[0]:
+            if self._joints.d6.shape[0]:
                 wp.launch(
                     _store_d6_joints,
-                    self._d6_joints.shape[0],
+                    self._joints.d6.shape[0],
                     inputs=[
-                        self._d6_joints,
+                        self._joints.d6,
                         model.joint_parent,
                         model.joint_child,
                         model.joint_X_p,
@@ -1698,7 +1707,7 @@ class SolverIPC(SolverBase, CouplingInterface):
                         state_out.body_qd,
                         model.body_com,
                     ],
-                    outputs=[state_out.joint_q, state_out.joint_qd, self._joint_q_written],
+                    outputs=[state_out.joint_q, state_out.joint_qd, self._joints.q_written],
                     device=model.device,
                 )
 
@@ -1865,7 +1874,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         if not self._uipc_warp.arrays.frame_status(self._engine).overflowed:
             return
         if self._config.integrator == "bdf2":  # the joints' history of the last step, which is solved again
-            for _, q_prev, q_kept in (*self._joint_history.values(), *self._joint_rate.values()):
+            for _, q_prev, q_kept in (*self._joints.history.values(), *self._joints.rate.values()):
                 wp.copy(q_prev, q_kept)
         for _ in range(_MAX_REGROWS):
             self._regrow()
@@ -2082,10 +2091,10 @@ class SolverIPC(SolverBase, CouplingInterface):
             if self.model.body_count:
                 self._body_hold.zero_()
             return
-        if len(self._aim_bodies):
+        if len(self._parts.aim_bodies):
             wp.launch(
                 _release_held,
-                len(self._aim_bodies),
+                len(self._parts.aim_bodies),
                 inputs=[world_mask, self._body_entry, self._aim_rows],
                 outputs=[self._body_hold],
                 device=self.model.device,
@@ -2192,7 +2201,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             _check_joints(model, self._joint_options)  # the other joint data are read at every step
             _warn_of_velocity_limits(self, stacklevel=3)
             if model.joint_count:  # a distance joint gains or loses its length
-                rebuild |= not np.array_equal(_map_joints(model).distance, self._distance_joints)
+                rebuild |= not np.array_equal(_map_joints(model).distance, self._joints.distance)
         if flags & ModelFlags.CONSTRAINT_PROPERTIES:
             # an equality row enabled since, a mimic relation set since
             _check_constraints(model, self._feature_options)
@@ -2200,20 +2209,20 @@ class SolverIPC(SolverBase, CouplingInterface):
             # their stiffness and enabled flags are read at every step
             features.check(model, self._feature_options, "attachments")
             _check_attachments(model)
-            body, particle, point = self._attachment_inputs or (None, None, None)
+            body, particle, point = self._parts.attachment_inputs or (None, None, None)
             rebuild |= (
                 body is None
                 or not np.array_equal(model.attachment_particle_body_body.numpy(), body)
                 or not np.array_equal(model.attachment_particle_body_particle.numpy(), particle)
                 or not np.array_equal(model.attachment_particle_body_body_point.numpy(), point)
             )
-        kinematic = self._kinematic_body
+        kinematic = self._parts.kinematic_body
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES) and model.body_count:
             dyadic = _body_mass_moments(self, stacklevel=3)
-            rebuild |= not np.array_equal(self._kinematic_body, kinematic)
+            rebuild |= not np.array_equal(self._parts.kinematic_body, kinematic)
             # kinematic_motion="aim": a kinematic body that gains or loses its mass starts or stops moving toward its
             # aims
-            rebuild |= not np.array_equal(_aiming_bodies(self, dyadic[0]), self._aim_bodies)
+            rebuild |= not np.array_equal(_aiming_bodies(self, dyadic[0]), self._parts.aim_bodies)
             # kinematic_motion=None: the mode it picks follows the kinematic bodies, their masses and inertias
             if self._kinematic_motion_given is None:
                 rebuild |= _default_kinematic_motion(self)[0] != self._kinematic_motion
@@ -2221,10 +2230,10 @@ class SolverIPC(SolverBase, CouplingInterface):
             if self._config.contact_constitution == "al-ipc":
                 # the AL-IPC contact penalty follows the masses the engine was built with
                 rebuild |= changed
-            if changed and len(self._aim_bodies):
+            if changed and len(self._parts.aim_bodies):
                 # kinematic_motion="aim": the soft transform constraint of a kinematic body follows the masses the
                 # engine was built with
-                aims = self._aim_bodies
+                aims = self._parts.aim_bodies
                 rebuild |= any(not np.array_equal(a[aims], b[aims]) for a, b in zip(dyadic, self._dyadic, strict=True))
         rebuild |= features.notify(self, flags)  # every feature module, which may need the solve built again
         if rebuild:
@@ -2233,7 +2242,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             _check_supported(model, self._joint_options, self._feature_options)
             self._build_engine()
             if written is not None:
-                self._drop_residual_twists(self._kinematic_body & ~kinematic, written)
+                self._drop_residual_twists(self._parts.kinematic_body & ~kinematic, written)
             return
         if flags & ModelFlags.MODEL_PROPERTIES:
             self._gravity = _world_gravity(self)
@@ -2247,12 +2256,12 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._body_mass_inv.assign(_mass_inverse(self, *dyadic))
             if self._body_spread is not None:  # and the angular velocity that body_rotation="rigid" stores
                 self._body_spread.assign(_spreads(dyadic))
-            for kind in self._joint_bodies:  # the joints' penalties follow the masses
-                self._joint_strength[kind].assign(_joint_strengths(self, kind, dyadic[0])[1])
+            for kind in self._joints.bodies:  # the joints' penalties follow the masses
+                self._joints.strength[kind].assign(_joint_strengths(self, kind, dyadic[0])[1])
             self._attachment_hard.assign(_attachment_penalties(self, dyadic[0]))  # and so do the hard attachments'
             self._distance_hard.assign(_distance_penalties(self, dyadic[0]))  # and the distance joints'
             if self._ortho is not None:  # and the default body stiffness the inertia
-                self._ortho_inertia.assign(_ortho_ratios(self))
+                self._parts.ortho_inertia.assign(_ortho_ratios(self))
 
     # ------------------------------------------------------------------ CouplingInterface
     @override
@@ -2359,16 +2368,16 @@ class SolverIPC(SolverBase, CouplingInterface):
         out_body_f.zero_()
         if self._engine is None or not self._proxy_body.any() or body_local_to_proxy_global.shape[0] == 0:
             return
-        export = _contact_records(self)
+        records, threads = _contact_records(self), self._contact_export.threads
         wp.launch(
             _proxy_wrenches,
-            self._contact_threads,
+            threads,
             inputs=[
-                export.vertices,
-                export.forces,
-                export.counts,
-                export.segment_offsets,
-                self._contact_threads,
+                records.vertices,
+                records.forces,
+                records.counts,
+                records.segment_offsets,
+                threads,
                 self._engine.vm.x,
                 self._vertex_body,
                 body_local_to_proxy_global,
@@ -2400,16 +2409,16 @@ class SolverIPC(SolverBase, CouplingInterface):
         out_particle_f.zero_()
         if self._engine is None or not self._proxy_particle.any() or particle_local_to_proxy_global.shape[0] == 0:
             return
-        export = _contact_records(self)
+        records, threads = _contact_records(self), self._contact_export.threads
         wp.launch(
             _proxy_particle_forces,
-            self._contact_threads,
+            threads,
             inputs=[
-                export.vertices,
-                export.forces,
-                export.counts,
-                export.segment_offsets,
-                self._contact_threads,
+                records.vertices,
+                records.forces,
+                records.counts,
+                records.segment_offsets,
+                threads,
                 self.model.particle_count,
                 particle_local_to_proxy_global,
             ],
@@ -2462,8 +2471,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         if self.model.body_count:
             carried += [self._body_q_written, self._body_qd_written, self._body_hold]
         if self.model.joint_count:
-            carried.append(self._joint_q_written)
-        for _, q_prev, q_kept in (*self._joint_history.values(), *self._joint_rate.values()):
+            carried.append(self._joints.q_written)
+        for _, q_prev, q_kept in (*self._joints.history.values(), *self._joints.rate.values()):
             carried += [q_prev, q_kept]
         if self._gravity_last is not None:  # BDF2: the gravity of the step before, which a change of gravity restarts
             carried.append(self._gravity_last)

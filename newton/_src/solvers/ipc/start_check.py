@@ -55,24 +55,24 @@ def _check_start(solver: SolverIPC) -> None:
     ``_START_CHECK_PAIRS`` primitive pairs is skipped with a warning.
 
     The engine holds the model's state. The pairs with a body whose start the caller writes into the state
-    (``_posed_body``: a kinematic body, and a link that the model leaves at the identity where forward kinematics puts
-    it elsewhere) are not tested here: the first step takes every body's pose from its ``state_in`` and checks them on
-    the device, captured or not, as it checks every state written between steps (:ref:`ipc-start`).
+    (``_Parts.posed_body``: a kinematic body, and a link that the model leaves at the identity where forward kinematics
+    puts it elsewhere) are not tested here: the first step takes every body's pose from its ``state_in`` and checks
+    them on the device, captured or not, as it checks every state written between steps (:ref:`ipc-start`).
     """
     eng = solver._engine
     if eng is None:
         return
     layout = solver._scene.layout()
     still = np.zeros(layout.n, bool)  # vertices that the solve never moves
-    still[: layout.n_fem] = solver._fixed_particle
+    still[: layout.n_fem] = solver._parts.fixed_particle
     still[layout.obstacle_offsets[0] : layout.obstacle_offsets[-1]] = True
     offsets = layout.body_vertex_offsets
-    held = solver._kinematic_body.copy()
-    held[solver._aim_bodies] = False  # kinematic_motion="aim": these move in the step
+    held = solver._parts.kinematic_body.copy()
+    held[solver._parts.aim_bodies] = False  # kinematic_motion="aim": these move in the step
     for b in np.flatnonzero(held):
         still[offsets[b] : offsets[b + 1]] = True
     posed_vertex = np.zeros(layout.n, bool)  # the surface vertices of the bodies whose start the caller writes
-    for b in np.flatnonzero(solver._posed_body):
+    for b in np.flatnonzero(solver._parts.posed_body):
         posed_vertex[offsets[b] : offsets[b + 1]] = True
     x = eng.vm.x.numpy()
     thickness = solver._vertex_thickness
@@ -338,7 +338,7 @@ def _describe_vertex(solver: SolverIPC, v: int) -> str:
         return f"particle {v}"
     if v < layout.obstacle_offsets[-1]:
         k = int(np.searchsorted(layout.obstacle_offsets, v, side="right")) - 1
-        return f"static shape {solver._obstacle_shapes[k]}"
+        return f"static shape {solver._parts.obstacle_shapes[k]}"
     b = int(np.searchsorted(layout.body_vertex_offsets, v, side="right")) - 1
     label = solver.model.body_label[b] if b < len(solver.model.body_label) else ""
     return f"body {b}" + (f" ({label!r})" if label and label != f"body_{b}" else "")

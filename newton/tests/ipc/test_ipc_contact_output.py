@@ -425,7 +425,7 @@ def test_contact_output_after_grow(test, device):
         wp.copy(s0.particle_qd, s1.particle_qd)
     test.assertGreater(grown, 0)
     test.assertGreater(solver.get_max_soft_contact_count(), before)
-    test.assertEqual(solver._contact_export.capacity, solver.get_max_soft_contact_count())
+    test.assertEqual(solver._contact_export.records.capacity, solver.get_max_soft_contact_count())
     # the cubes' rows on the ground; the cubes on each other give none (between particle features)
     rows = int(contacts.soft_contact_count.numpy()[0])
     test.assertGreater(rows, 0)

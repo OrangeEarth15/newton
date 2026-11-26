@@ -234,11 +234,11 @@ class _Parents:
             }
             for kind, group in groups.items():
                 if group is not None:
-                    terms.append((group, solver._joint_rows[kind].numpy()))
+                    terms.append((group, solver._joints.rows[kind].numpy()))
             for stitches in arrays.stitch_groups(engine):
-                rows = stitches.rows - solver._distance_first
+                rows = stitches.rows - solver._parts.distance_first
                 if len(rows) and (rows >= 0).all():  # the stitches of distance joints, a group of their own
-                    terms.append((stitches.group, solver._distance_joints[rows]))
+                    terms.append((stitches.group, solver._joints.distance[rows]))
             for feature in FEATURES:
                 more = getattr(feature, "parent_terms", None)
                 if more is not None:
@@ -258,7 +258,7 @@ class _Parents:
         if model.joint_count:
             own = np.zeros(model.joint_count, bool)
             own[parent[parent >= 0]] = True
-            wrenched, d6 = solver._wrenched_joints.numpy(), solver._d6_joints.numpy()
+            wrenched, d6 = solver._joints.wrenched.numpy(), solver._joints.d6.numpy()
             wrenched, d6 = wrenched[own[wrenched]], d6[own[d6]]
         device = model.device
 
@@ -430,7 +430,7 @@ def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> 
             parents.wrenched.shape[0],
             inputs=[
                 parents.wrenched,
-                solver._joint_store_type,
+                solver._joints.store_type,
                 state.no_parent,
                 model.joint_child,
                 state.world_X_p,

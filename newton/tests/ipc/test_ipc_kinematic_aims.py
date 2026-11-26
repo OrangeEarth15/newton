@@ -374,7 +374,7 @@ def test_massless_kinematic_bodies_keep_the_jump(test, device):
     paths = {}
     for mode in ("jump", "aim"):
         solver = newton.solvers.SolverIPC(model, kinematic_motion=mode, **_TIGHT)
-        test.assertEqual(len(solver._aim_bodies), 0)
+        test.assertEqual(len(solver._parts.aim_bodies), 0)
         layout = solver._scene.layout()
         test.assertTrue(np.all(solver._engine.vm.fixed.numpy()[layout.body_base[0] : layout.body_base[0] + 4] != 0))
         s0, s1 = model.state(), model.state()
@@ -393,7 +393,7 @@ def test_massless_kinematic_bodies_keep_the_jump(test, device):
         warnings.simplefilter("always")
         solver = newton.solvers.SolverIPC(sheet_model, kinematic_motion="aim")
     test.assertEqual([str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)], [])
-    test.assertEqual(len(solver._aim_bodies), 0)
+    test.assertEqual(len(solver._parts.aim_bodies), 0)
 
 
 def test_rekinematic_body_drops_its_twist(test, device):
@@ -599,7 +599,7 @@ def test_refused_first_step_takes_state_in_again(test, device):
     builder.add_shape_box(pusher, hx=0.1, hy=0.1, hz=0.1)
     model = builder.finalize(device=device)
     solver = newton.solvers.SolverIPC(model, kinematic_motion="aim")
-    np.testing.assert_array_equal(solver._aim_bodies, [pusher])
+    np.testing.assert_array_equal(solver._parts.aim_bodies, [pusher])
     through = model.state()
     q = through.body_q.numpy()
     q[pusher, 0] = 0.05
@@ -632,7 +632,7 @@ def test_aims_pass_the_twist_through(test, device):
     dt = 0.01
     for written in ("poses", "twist"):
         solver = newton.solvers.SolverIPC(model, kinematic_motion="aim")
-        np.testing.assert_array_equal(solver._aim_bodies, [box])
+        np.testing.assert_array_equal(solver._parts.aim_bodies, [box])
         s0, s1 = model.state(), model.state()
         twist = np.zeros(6, np.float32)
         if written == "twist":
@@ -708,12 +708,12 @@ def test_default_picks_the_mode_per_solver(test, device):
     model = builder.finalize(device=device)
     solver = newton.solvers.SolverIPC(model)
     test.assertEqual(solver.kinematic_motion, "aim")
-    np.testing.assert_array_equal(solver._aim_bodies, [kinematic])
+    np.testing.assert_array_equal(solver._parts.aim_bodies, [kinematic])
     with test.assertRaises(AttributeError):
         solver.kinematic_motion = "jump"
     jump = newton.solvers.SolverIPC(model, kinematic_motion="jump")
     test.assertEqual(jump.kinematic_motion, "jump")
-    test.assertEqual(len(jump._aim_bodies), 0)
+    test.assertEqual(len(jump._parts.aim_bodies), 0)
     for name, (model, options, error, pattern) in _fallback_models(device).items():
         with test.subTest(name):
             with warnings.catch_warnings():
@@ -721,7 +721,7 @@ def test_default_picks_the_mode_per_solver(test, device):
                 with test.assertLogs("newton._src.solvers.ipc.solver_ipc", "DEBUG") as logs:
                     solver = newton.solvers.SolverIPC(model, **options)
             test.assertEqual(solver.kinematic_motion, "jump")
-            test.assertEqual(len(solver._aim_bodies), 0)
+            test.assertEqual(len(solver._parts.aim_bodies), 0)
             test.assertEqual(len(logs.records), 1)
             test.assertIn("kinematic_motion=None takes 'jump'", logs.output[0])
             s0, s1 = model.state(), model.state()

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -40,6 +40,37 @@ if TYPE_CHECKING:
 # Newton's default joint_velocity_limit (ModelBuilder.JointDofConfig's), which bounds nothing; SolverIPC warns of one
 # below it (_warn_of_velocity_limits)
 _VELOCITY_LIMIT = 1.0e6
+
+
+@dataclass
+class _Joints:
+    """What this module lays out of a model's joints and keeps for the steps, the notifications and the other modules
+    (``SolverIPC._joints``): a new record for every solve that ``SolverIPC._build_engine`` builds, the distance joints'
+    fields set by ``_plan_distance_joints``, the others by ``_add_joints``; a model without joints keeps the
+    defaults."""
+
+    # the distance joints of one length, and the body and anchor of their two sides: (joint, side, (body, anchor))
+    distance: np.ndarray | None = None
+    distance_anchor: np.ndarray | None = None
+    # the fixed body that stands for the world, -1 without one
+    world_body: int = -1
+    # per kind of libuipc joint: the joint of every group row (on the device), the rows' bodies (parent or world,
+    # child), their penalties, and for revolute and prismatic joints the coordinates and the rates at the start of this
+    # step, of the step before and the one before that (_shift_joint_history)
+    rows: dict = field(default_factory=dict)
+    bodies: dict = field(default_factory=dict)
+    strength: dict = field(default_factory=dict)
+    history: dict = field(default_factory=dict)
+    rate: dict = field(default_factory=dict)
+    # (joint_count,): the type _store_joints and _joint_wrenches take every joint for (_JointMap.store), and its row
+    # among the group rows of its kind (-1 for none)
+    store_type: wp.array | None = None
+    element: wp.array | None = None
+    # the D6 joints the D6 kernels store, and the free and ball joints, whose joint_f acts through the bodies' wrenches
+    d6: wp.array | None = None
+    wrenched: wp.array | None = None
+    # (joint_coord_count,): the joint_q the solver wrote last, NaN for none (the next step takes state_in's)
+    q_written: wp.array | None = None
 
 
 @dataclass(frozen=True)
@@ -265,8 +296,8 @@ def _plan_distance_joints(solver: SolverIPC) -> None:
     -1, and ``joint_X_c`` in the child's, after the anchors of the attachments; for every such joint the body and the
     anchor of its two sides."""
     model = solver.model
-    solver._distance_joints = np.zeros(0, np.int32)
-    solver._distance_anchor = np.zeros((0, 2, 2), np.int64)  # joint, side (parent, child), (body, anchor)
+    solver._joints.distance = np.zeros(0, np.int32)
+    solver._joints.distance_anchor = np.zeros((0, 2, 2), np.int64)  # joint, side (parent, child), (body, anchor)
     if model.joint_count == 0:
         return
     joints = _map_joints(model).distance
@@ -276,20 +307,20 @@ def _plan_distance_joints(solver: SolverIPC) -> None:
     for k, j in enumerate(joints):
         sides = ((parent[k] if parent[k] >= 0 else model.body_count, X_p[j, :3]), (child[k], X_c[j, :3]))
         for side, (b, point) in enumerate(sides):
-            points = solver._body_anchors.get(int(b), np.zeros((0, 3)))
+            points = solver._parts.body_anchors.get(int(b), np.zeros((0, 3)))
             anchor[k, side] = (b, len(points))
-            solver._body_anchors[int(b)] = np.vstack([points, point])
-    solver._distance_joints, solver._distance_anchor = joints, anchor
+            solver._parts.body_anchors[int(b)] = np.vstack([points, point])
+    solver._joints.distance, solver._joints.distance_anchor = joints, anchor
 
 
 def _distance_penalties(solver: SolverIPC, mass: np.ndarray) -> np.ndarray:
     """The penalty of every distance joint of one length: a ball joint's, ``joint_strength_ratio`` times the
     mass of the dynamic bodies it joins, in the units of the incremental potential, so that its stitch's
     stiffness is that over ``dt^2``."""
-    if not len(solver._distance_joints):
+    if not len(solver._joints.distance):
         return np.zeros(1)
-    dynamic = np.append(np.where(solver._kinematic_body, 0.0, mass), 0.0)  # the world's after Newton's bodies
-    bodies = solver._distance_anchor[:, :, 0]
+    dynamic = np.append(np.where(solver._parts.kinematic_body, 0.0, mass), 0.0)  # the world's after Newton's bodies
+    bodies = solver._joints.distance_anchor[:, :, 0]
     return solver._joint_strength_ratio * dynamic[bodies].sum(axis=1)
 
 
@@ -308,35 +339,32 @@ def _add_joints(solver: SolverIPC, scene) -> None:
     """Newton's revolute, prismatic, fixed and ball joints as libuipc's (:ref:`ipc-joints`), and the D6 joints that lock
     what one of them locks (``_map_joints``), joint frames taken as the reference rotations, a fixed affine body without
     mass standing for the world. Sets up what the per-step kernels
-    read: per kind the joint of every group row and the row's penalty (``_joint_strength``, 0 without a dynamic body),
-    per joint its row (``_joint_element``), and the free and ball joints, whose ``joint_f`` acts through the bodies'
+    read (``_Joints``): per kind the joint of every group row and the row's penalty (``strength``, 0 without a dynamic
+    body), per joint its row (``element``), and the free and ball joints, whose ``joint_f`` acts through the bodies'
     wrenches."""
     model, device = solver.model, solver.model.device
-    solver._world_body = -1
-    solver._joint_rows, solver._joint_strength, solver._joint_history, solver._joint_rate = {}, {}, {}, {}
-    solver._joint_bodies = {}
     if model.joint_count == 0:
         return
     # the libuipc joint of every joint: its own type, but for a D6 joint that of the joint that locks what it locks;
     # the type the kernels that write the coordinates and joint_f take it for
     mapping = _map_joints(model)
     joint_type = mapping.kind
-    solver._joint_store_type = model.joint_type
+    solver._joints.store_type = model.joint_type
     if mapping.relabeled:
-        solver._joint_store_type = wp.array(mapping.store, dtype=wp.int32, device=device)
-    solver._d6_joints = wp.array(mapping.d6, dtype=wp.int32, device=device)
+        solver._joints.store_type = wp.array(mapping.store, dtype=wp.int32, device=device)
+    solver._joints.d6 = wp.array(mapping.d6, dtype=wp.int32, device=device)
     parent, child = model.joint_parent.numpy(), model.joint_child.numpy()
     X_p, X_c = model.joint_X_p.numpy().astype(np.float64), model.joint_X_c.numpy().astype(np.float64)
     axis = model.joint_axis.numpy().astype(np.float64).reshape(-1, 3)
     qd_start = model.joint_qd_start.numpy()
     wrenched = np.isin(mapping.store, [int(JointType.FREE), int(JointType.BALL)])
-    solver._wrenched_joints = wp.array(np.flatnonzero(wrenched).astype(np.int32), dtype=wp.int32, device=device)
+    solver._joints.wrenched = wp.array(np.flatnonzero(wrenched).astype(np.int32), dtype=wp.int32, device=device)
     element = np.full(model.joint_count, -1, np.int32)
     joints = np.flatnonzero(joint_type != int(JointType.FREE))
     # the distance joints' stitches need the world's body too, and so may the joints a feature module took (D6)
     world = np.concatenate([joints, mapping.distance])
     if len(world) and np.any(parent[world] < 0):
-        solver._world_body = model.body_count
+        solver._joints.world_body = model.body_count
         scene.add_affine_body(
             np.zeros((0, 3)),
             np.zeros((0, 3), np.int64),
@@ -345,7 +373,7 @@ def _add_joints(solver: SolverIPC, scene) -> None:
             second_moment=np.zeros((3, 3)),
             volume=0.0,
             fixed=True,
-            anchors=solver._body_anchors.get(model.body_count),
+            anchors=solver._parts.body_anchors.get(model.body_count),
         )
     for kind, t in (
         ("revolute", JointType.REVOLUTE),
@@ -357,9 +385,9 @@ def _add_joints(solver: SolverIPC, scene) -> None:
         if not len(rows):
             continue
         element[rows] = np.arange(len(rows), dtype=np.int32)
-        left = np.where(parent[rows] >= 0, parent[rows], solver._world_body)
+        left = np.where(parent[rows] >= 0, parent[rows], solver._joints.world_body)
         bodies = np.stack([left, child[rows]], axis=1)
-        solver._joint_bodies[kind] = bodies
+        solver._joints.bodies[kind] = bodies
         R_p = np.array([_quat_to_matrix_np(q) for q in X_p[rows, 3:7]]).reshape(-1, 3, 3)
         R_c = np.array([_quat_to_matrix_np(q) for q in X_c[rows, 3:7]]).reshape(-1, 3, 3)
         p_p, p_c = X_p[rows, :3], X_c[rows, :3]
@@ -378,16 +406,16 @@ def _add_joints(solver: SolverIPC, scene) -> None:
             scene.add_fixed_joints(bodies, p_p, p_c, strength_ratio=ratio, reference_rotations=reference)
         else:
             scene.add_spherical_joints(bodies, p_p, p_c, strength_ratio=ratio)
-        solver._joint_rows[kind] = wp.array(rows.astype(np.int32), dtype=wp.int32, device=device)
-        solver._joint_strength[kind] = wp.array(strength, dtype=wp.float64, device=device)
+        solver._joints.rows[kind] = wp.array(rows.astype(np.int32), dtype=wp.int32, device=device)
+        solver._joints.strength[kind] = wp.array(strength, dtype=wp.float64, device=device)
         if kind in ("revolute", "prismatic"):
             # the coordinate at the start of this step, of the step before (BDF2's drives), and the one before
             # that step's, which grow() takes back when it solves that step again
-            solver._joint_history[kind] = tuple(wp.zeros(len(rows), dtype=wp.float64, device=device) for _ in range(3))
+            solver._joints.history[kind] = tuple(wp.zeros(len(rows), dtype=wp.float64, device=device) for _ in range(3))
             # their rates likewise, for the armature and the effort limit (_joint_rates)
-            solver._joint_rate[kind] = tuple(wp.zeros(len(rows), dtype=wp.float64, device=device) for _ in range(3))
-    solver._joint_element = wp.array(element, dtype=wp.int32, device=device)
-    solver._joint_q_written = wp.full(model.joint_coord_count, np.nan, dtype=wp.float32, device=device)
+            solver._joints.rate[kind] = tuple(wp.zeros(len(rows), dtype=wp.float64, device=device) for _ in range(3))
+    solver._joints.element = wp.array(element, dtype=wp.int32, device=device)
+    solver._joints.q_written = wp.full(model.joint_coord_count, np.nan, dtype=wp.float32, device=device)
 
 
 def _joint_strengths(solver: SolverIPC, kind: str, mass: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -396,9 +424,9 @@ def _joint_strengths(solver: SolverIPC, kind: str, mass: np.ndarray) -> tuple[np
     bodies count 0), where libuipc's ratio multiplies the masses of both bodies. The per-step kernels take the
     penalty: a fixed or ball joint's as it is, a revolute or prismatic joint's divided by the masses it was built
     with, which libuipc keeps."""
-    bodies = solver._joint_bodies[kind]
+    bodies = solver._joints.bodies[kind]
     everything = np.append(mass, 0.0)  # the world's mass after Newton's bodies
-    dynamic = np.append(np.where(solver._kinematic_body, 0.0, mass), 0.0)
+    dynamic = np.append(np.where(solver._parts.kinematic_body, 0.0, mass), 0.0)
     mass_sum, dynamic_sum = everything[bodies].sum(axis=1), dynamic[bodies].sum(axis=1)
     stiffness = solver._joint_strength_ratio * dynamic_sum
     ratio = np.divide(stiffness, mass_sum, out=np.zeros(len(bodies)), where=mass_sum > 0.0)
@@ -410,7 +438,7 @@ def _shift_joint_history(solver: SolverIPC) -> None:
     for grow() (on the device, also inside a captured graph); and so do their rates (``_joint_rates``)."""
     if solver._config.integrator != "bdf2":
         return
-    for q_start, q_prev, q_kept in (*solver._joint_history.values(), *solver._joint_rate.values()):
+    for q_start, q_prev, q_kept in (*solver._joints.history.values(), *solver._joints.rate.values()):
         wp.copy(q_kept, q_prev)
         wp.copy(q_prev, q_start)
 
@@ -427,10 +455,10 @@ def _load_joints(solver: SolverIPC, state_in: State) -> None:
                 _adopt_joint_angles,
                 groups.revolute.n,
                 inputs=[
-                    solver._joint_rows["revolute"],
+                    solver._joints.rows["revolute"],
                     solver.model.joint_q_start,
                     state_in.joint_q,
-                    solver._joint_q_written,
+                    solver._joints.q_written,
                 ],
                 outputs=[groups.revolute.current],
                 device=solver.model.device,
@@ -439,12 +467,12 @@ def _load_joints(solver: SolverIPC, state_in: State) -> None:
     if groups.prismatic is not None:
         groups.prismatic.compute_current_distances(x)
     model = solver.model
-    for kind, (rate, _, _) in solver._joint_rate.items():  # the rates at the step's start (_joint_rates)
+    for kind, (rate, _, _) in solver._joints.rate.items():  # the rates at the step's start (_joint_rates)
         wp.launch(
             _joint_rates,
             rate.shape[0],
             inputs=[
-                solver._joint_rows[kind],
+                solver._joints.rows[kind],
                 int(kind == "prismatic"),
                 model.joint_parent,
                 model.joint_child,
@@ -475,14 +503,14 @@ def _write_joint_controls(solver: SolverIPC, control: Control, dt: float) -> Non
     for kind, group, scale in (("revolute", groups.revolute, 1.0), ("prismatic", groups.prismatic, 0.5)):
         if group is None:
             continue
-        q_start, q_prev, _ = solver._joint_history[kind]
-        rate_start, rate_prev, _ = solver._joint_rate[kind]
+        q_start, q_prev, _ = solver._joints.history[kind]
+        rate_start, rate_prev, _ = solver._joints.rate[kind]
         force_on, force = (group.tq_on, group.tq) if kind == "revolute" else (group.f_on, group.f)
         wp.launch(
             _joint_terms,
             group.n,
             inputs=[
-                solver._joint_rows[kind],
+                solver._joints.rows[kind],
                 model.joint_q_start,
                 model.joint_qd_start,
                 model.joint_enabled,
@@ -504,7 +532,7 @@ def _write_joint_controls(solver: SolverIPC, control: Control, dt: float) -> Non
                 target_q,
                 target_qd,
                 joint_f,
-                solver._joint_strength[kind],
+                solver._joints.strength[kind],
                 group.mass_sum,
                 group.current,
                 q_prev,
@@ -537,7 +565,7 @@ def _write_joint_controls(solver: SolverIPC, control: Control, dt: float) -> Non
             wp.launch(
                 _enable_anchor_joints,
                 group.n,
-                inputs=[solver._joint_rows[kind], model.joint_enabled, solver._joint_strength[kind]],
+                inputs=[solver._joints.rows[kind], model.joint_enabled, solver._joints.strength[kind]],
                 outputs=[group.kappa],
                 device=model.device,
             )

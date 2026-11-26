@@ -538,7 +538,7 @@ def test_reset_of_one_world_keeps_the_others(test, device):
             else:
                 test.fail("no step with contact in every world")
             one = world == 1
-            joints = solver._joint_rows["revolute"].numpy()
+            joints = solver._joints.rows["revolute"].numpy()
             drive_one = model.body_world.numpy()[model.joint_child.numpy()[joints]] == 1
             glob = model.world_count  # the mask's global entry
             cases = ("none", 1, "all", ("state", 1)) + (() if coupled else (glob,))

@@ -372,7 +372,7 @@ def _universal_strengths(solver: SolverIPC, bodies: np.ndarray) -> np.ndarray:
     dynamic bodies it joins (the world and kinematic bodies count 0), as a ball joint's."""
     model = solver.model
     mass = model.body_mass.numpy().astype(np.float64) if model.body_count else np.zeros(0)
-    dynamic = np.append(np.where(solver._kinematic_body, 0.0, mass), 0.0)  # the world's after Newton's bodies
+    dynamic = np.append(np.where(solver._parts.kinematic_body, 0.0, mass), 0.0)  # the world's after Newton's bodies
     return solver._joint_strength_ratio * dynamic[bodies].sum(axis=1)
 
 
@@ -404,7 +404,9 @@ def build(solver: SolverIPC, scene) -> None:
     if len(joints):
         qd_start = model.joint_qd_start.numpy()
         axis = model.joint_axis.numpy().astype(np.float64)
-        bodies = np.stack([np.where(parent[joints] >= 0, parent[joints], solver._world_body), child[joints]], axis=1)
+        bodies = np.stack(
+            [np.where(parent[joints] >= 0, parent[joints], solver._joints.world_body), child[joints]], axis=1
+        )
         positions = np.stack([X_p[joints, :3], X_c[joints, :3]], axis=1)
         axes = np.zeros((len(joints), 2, 2, 3))
         for k, j in enumerate(joints):
@@ -523,7 +525,7 @@ def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> 
             wp.launch(
                 _adopt_universal_angles,
                 len(universal.joints),
-                inputs=[universal.rows, model.joint_q_start, state_in.joint_q, solver._joint_q_written],
+                inputs=[universal.rows, model.joint_q_start, state_in.joint_q, solver._joints.q_written],
                 outputs=[group.current],
                 device=model.device,
             )
@@ -553,7 +555,7 @@ def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observab
             state_out.body_q,
             state_out.body_qd,
         ],
-        outputs=[state_out.joint_q, state_out.joint_qd, solver._joint_q_written],
+        outputs=[state_out.joint_q, state_out.joint_qd, solver._joints.q_written],
         device=model.device,
     )
 

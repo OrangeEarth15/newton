@@ -125,14 +125,14 @@ def test_coupled_entry_steps_as_alone(test, device):
             tris, tris0 = (np.asarray(e._engine.surface["triangles"]).reshape(-1, 3) for e in (ipc, solo))
             test.assertEqual(len(tris), len(tris0))
             test.assertFalse(np.isin(tris, vbd_cloth).any())
-            test.assertTrue(np.all(ipc._fixed_particle[vbd_cloth]))
+            test.assertTrue(np.all(ipc._parts.fixed_particle[vbd_cloth]))
             # the elements of the contact points and half planes, which VBD's cloth meets none of
             points = np.asarray(ipc._engine.contact_points, np.int64)
             held = np.unique(np.concatenate([ipc._cids[points], ipc._plane_cids]))
             test.assertFalse(ipc._enabled[np.ix_(np.unique(ipc._cids[vbd_cloth]), held)].any())
             if layout == "full":
                 offsets = ipc._scene.layout().body_vertex_offsets
-                test.assertTrue(ipc._kinematic_body[sphere])
+                test.assertTrue(ipc._parts.kinematic_body[sphere])
                 test.assertEqual(offsets[sphere + 1] - offsets[sphere], 0)
             ipc.check_status()
 
@@ -188,7 +188,7 @@ def test_proxy_box_rests_on_cloth(test, device):
             coupled = _proxy_coupler(model, box, mode, **_CONVERGED)
             ipc = coupled.solver("ipc")
             test.assertTrue(ipc._proxy_body.all())
-            test.assertFalse(ipc._kinematic_body.any())
+            test.assertFalse(ipc._parts.kinematic_body.any())
             # the proxy's shape does not meet the static support, and meets the cloth
             support, shape = 0, int(model.body_shapes[box][0])
             e = ipc._enabled
@@ -882,7 +882,7 @@ def test_proxy_feedback_is_the_contact_force(test, device):
     com = _transform_points(s0.body_q.numpy()[top], model.body_com.numpy()[top : top + 1])[0]
     force, torque = np.zeros(3), np.zeros(3)
     particle_force = np.zeros(3)
-    for name, (vertices, forces) in solver._contact_export.numpy().items():
+    for name, (vertices, forces) in solver._contact_export.records.numpy().items():
         count = 1 if name.startswith("PH") else (4 if name[:2] in ("PT", "EE") else 3 if name[:2] == "PE" else 2)
         for k in range(count):
             v, f = vertices[:, k], forces[:, k].astype(np.float64)

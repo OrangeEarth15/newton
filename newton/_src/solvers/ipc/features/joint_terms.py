@@ -297,8 +297,8 @@ def _rows(solver: SolverIPC) -> dict:
     out = {}
     for kind in ("revolute", "prismatic"):
         row = np.full(solver.model.joint_count, -1, np.int64)
-        if kind in solver._joint_rows:
-            joints = solver._joint_rows[kind].numpy()
+        if kind in solver._joints.rows:
+            joints = solver._joints.rows[kind].numpy()
             row[joints] = np.arange(len(joints))
         out[kind] = row
     return out
@@ -307,7 +307,7 @@ def _rows(solver: SolverIPC) -> dict:
 def _mimic_stiffness(solver: SolverIPC, bodies: np.ndarray) -> float:
     """A mimic relation's penalty: ``joint_strength_ratio`` times the mass of the dynamic bodies among ``bodies``."""
     mass = solver.model.body_mass.numpy().astype(np.float64)
-    dynamic = np.where(solver._kinematic_body, 0.0, mass)
+    dynamic = np.where(solver._parts.kinematic_body, 0.0, mass)
     return solver._joint_strength_ratio * float(dynamic[bodies[bodies >= 0]].sum())
 
 

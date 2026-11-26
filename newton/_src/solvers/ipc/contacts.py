@@ -34,6 +34,25 @@ if TYPE_CHECKING:
 _CONTACT_ROW_BLOCK = 256
 
 
+@dataclass
+class _Export:
+    """libuipc-warp's ``ContactForces`` of the engine and what the contact rows and the proxies' feedback read besides
+    it (``SolverIPC._contact_export``, made by ``_make_contact_export``)."""
+
+    records: object  # libuipc-warp's ContactForces: the records of every slot of the engine's contact lists
+    records_of: wp.array  # (1,): the step count when the records were written, -1 for never
+    records_stale: wp.array  # (1,): whether the records are not those of the last step
+    threads: int  # the threads of the kernels over the records, a grid that strides over them
+    records_graph: object = None  # the graph that brings the records up to date outside a capture (_refresh_records)
+    # CONTACT_F's rows: the shape of every engine vertex (-1 elsewhere), and the half planes' shapes, points and
+    # normals, which only the rows of a vertex / half-plane term read; None for the proxies' feedback alone, the planes'
+    # None without a half plane
+    vertex_shape: wp.array | None = None
+    plane_shape: wp.array | None = None
+    plane_P: wp.array | None = None
+    plane_N: wp.array | None = None
+
+
 def _compatible_groups(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Newton's collision-group rule for two shapes that take part in shape contact (``shape_contact_pairs.py``): a
     positive group meets itself and every negative group, a negative group every group but itself. A shape of group 0
@@ -418,10 +437,10 @@ def _check_al_ipc(solver: SolverIPC) -> None:
     this path does not run. Contact with vertices without mass is taken: those of a static mesh shape, a cloth or
     tetrahedron particle of no mass and a body of no mass never move, and libuipc-warp's AL-IPC gives such a vertex no
     penalty of its own, so that a pair takes the penalty of its side that moves."""
-    if len(solver._aim_bodies):
+    if len(solver._parts.aim_bodies):
         raise NotImplementedError(
             "SolverIPC: kinematic_motion='aim' would move the kinematic body "
-            f"{int(solver._aim_bodies[0])} toward its aims; leave kinematic_motion at its default (None) or pass "
+            f"{int(solver._parts.aim_bodies[0])} toward its aims; leave kinematic_motion at its default (None) or pass "
             "'jump', under which contact_constitution='al-ipc' sweeps the moves of kinematic bodies. AL-IPC tests "
             "animated aims with a check of its own, which SolverIPC does not run."
         )
@@ -432,18 +451,23 @@ def _make_contact_export(solver: SolverIPC) -> None:
     any capture: once a container requested ``CONTACT_F`` (:ref:`ipc-contact-output`), with what the contact rows read
     besides it, for a model whose contact holds a shape (one without has no rows); and for a coupled solver's proxies,
     whose feedback is the force of the contact terms on them (:ref:`ipc-coupling`). None otherwise."""
-    solver._contact_export = solver._records_graph = None
+    solver._contact_export = None
     if solver._engine is None:
         return
     rows = solver._contact_output and len(solver._contact_shapes) > 0
     if not (rows or solver._proxies):
         return
     device = solver.model.device
-    solver._contact_export = solver._uipc_warp.arrays.ContactForces(solver._engine)
-    # the step count when the records were written (-1: never), and the flag of records not of the last step; outside a
-    # graph capture the records are brought up to date by a graph of their own, which decides on the device too
-    solver._records_of = wp.full(1, -1, dtype=wp.int64, device=device)
-    solver._records_stale = wp.zeros(1, dtype=wp.int32, device=device)
+    records = solver._uipc_warp.arrays.ContactForces(solver._engine)
+    blocks = max(1, min(-(-records.capacity // _CONTACT_ROW_BLOCK), 4 * device.sm_count))
+    export = _Export(
+        records,
+        records_of=wp.full(1, -1, dtype=wp.int64, device=device),
+        records_stale=wp.zeros(1, dtype=wp.int32, device=device),
+        threads=blocks * _CONTACT_ROW_BLOCK,
+    )
+    solver._contact_export = export
+    # outside a graph capture the records are brought up to date by a graph of their own, which decides on the device
     gc_enabled = gc.isenabled()
     gc.disable()  # a collection inside the capture would record the release of other arrays
     try:
@@ -452,20 +476,15 @@ def _make_contact_export(solver: SolverIPC) -> None:
     finally:
         if gc_enabled:
             gc.enable()
-    solver._records_graph = capture.graph
-    records = solver._contact_export.capacity
-    blocks = max(1, min(-(-records // _CONTACT_ROW_BLOCK), 4 * device.sm_count))
-    solver._contact_threads = blocks * _CONTACT_ROW_BLOCK
+    export.records_graph = capture.graph
     if not rows:
         return
-    solver._contact_vertex_shape = wp.array(solver._vertex_shape, dtype=wp.int32, device=device)
-    # the half planes' shapes, points and normals, which only the rows of a vertex / half-plane term read
+    export.vertex_shape = wp.array(solver._vertex_shape, dtype=wp.int32, device=device)
     P, N, shapes = solver._planes
-    solver._contact_plane_shape = solver._contact_plane_P = solver._contact_plane_N = None
     if len(shapes):
-        solver._contact_plane_shape = wp.array(np.asarray(shapes, np.int32), dtype=wp.int32, device=device)
-        solver._contact_plane_P = wp.array(np.asarray(P, np.float64).reshape(-1, 3), dtype=wp.vec3d, device=device)
-        solver._contact_plane_N = wp.array(np.asarray(N, np.float64).reshape(-1, 3), dtype=wp.vec3d, device=device)
+        export.plane_shape = wp.array(np.asarray(shapes, np.int32), dtype=wp.int32, device=device)
+        export.plane_P = wp.array(np.asarray(P, np.float64).reshape(-1, 3), dtype=wp.vec3d, device=device)
+        export.plane_N = wp.array(np.asarray(N, np.float64).reshape(-1, 3), dtype=wp.vec3d, device=device)
 
 
 def _write_contacts(solver: SolverIPC, observables: SolverBase.Observables | None, state_out: State | None) -> None:
@@ -480,26 +499,26 @@ def _write_contacts(solver: SolverIPC, observables: SolverBase.Observables | Non
     contact_f.zero_()
     if solver._contact_export is None or state_out is None or len(solver._contact_shapes) == 0:
         return
-    export = _contact_records(solver)
+    export, records = solver._contact_export, _contact_records(solver)
     model = solver.model
     # only the rows of a shape on a body read the bodies' poses and centres of mass
     body_q = state_out.body_q if model.body_count and state_out.body_q is not None else None
     body_com = model.body_com if model.body_count else None
     wp.launch(
         _contact_rows,
-        solver._contact_threads,
+        export.threads,
         inputs=[
-            export.vertices,
-            export.forces,
-            export.counts,
-            export.segment_offsets,
-            solver._contact_threads,
+            records.vertices,
+            records.forces,
+            records.counts,
+            records.segment_offsets,
+            export.threads,
             solver._engine.vm.x,
             model.particle_count,
-            solver._contact_vertex_shape,
-            solver._contact_plane_shape,
-            solver._contact_plane_P,
-            solver._contact_plane_N,
+            export.vertex_shape,
+            export.plane_shape,
+            export.plane_P,
+            export.plane_N,
             model.shape_body,
             model.shape_margin,
             body_q,
@@ -538,15 +557,15 @@ def _write_contacts(solver: SolverIPC, observables: SolverBase.Observables | Non
 def _refresh_records(solver: SolverIPC) -> None:
     """Enqueue the update of the contact records where they are not those of the last step: the step count and the
     count when the records were written are compared on the device, and a conditional node runs ``update()``."""
-    device = solver.model.device
-    wp.launch(_records_due, 1, inputs=[solver._step_count, solver._records_of], outputs=[solver._records_stale],
+    device, export = solver.model.device, solver._contact_export
+    wp.launch(_records_due, 1, inputs=[solver._step_count, export.records_of], outputs=[export.records_stale],
               device=device)  # fmt: skip
 
     def update():
-        solver._contact_export.update()
-        wp.launch(_records_written, 1, inputs=[solver._step_count], outputs=[solver._records_of], device=device)
+        export.records.update()
+        wp.launch(_records_written, 1, inputs=[solver._step_count], outputs=[export.records_of], device=device)
 
-    wp.capture_if(solver._records_stale, on_true=update)
+    wp.capture_if(export.records_stale, on_true=update)
 
 
 def _contact_records(solver: SolverIPC):
@@ -557,5 +576,5 @@ def _contact_records(solver: SolverIPC):
     if solver.model.device.is_capturing:
         _refresh_records(solver)
     else:
-        wp.capture_launch(solver._records_graph)
-    return solver._contact_export
+        wp.capture_launch(solver._contact_export.records_graph)
+    return solver._contact_export.records

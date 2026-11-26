@@ -489,7 +489,7 @@ def test_body_stiffness_takes_a_turn_in_one_iteration(test, device):
     i_max = float(np.linalg.eigvalsh(model.body_inertia.numpy()[0].astype(np.float64)).max())
 
     def stiffness():
-        return float(solver._ortho.kappa.numpy()[list(solver._ortho_body).index(0)])
+        return float(solver._ortho.kappa.numpy()[list(solver._parts.ortho_body).index(0)])
 
     def expected(dt):
         return min(1.0e8, 25.0 * i_max / (1.0 * dt * dt))  # a 1 m cube: V = 1 m^3

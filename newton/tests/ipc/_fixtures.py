@@ -216,7 +216,7 @@ def _world_rows(model, copies):
 def _solver_snapshot(solver):
     """What a step changes: the engine's state (its dump) and the solver's own device state."""
     arrays = [solver._body_q_written, solver._body_qd_written, solver._body_hold]
-    for history in solver._joint_history.values():
+    for history in solver._joints.history.values():
         arrays += list(history)
     return solver._engine.state_dict(), [(a, a.numpy().copy()) for a in arrays]
 

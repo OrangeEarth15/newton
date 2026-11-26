@@ -190,12 +190,12 @@ def build(solver: SolverIPC, scene) -> None:
             "SolverIPC: the drives, springs, damping, armature and friction of ball joints need libuipc-warp's ball "
             "terms (uipc_warp.ext.ball); install a libuipc-warp that has them, or set those of every ball joint to 0."
         ) from e
-    element = solver._joint_element.numpy()[joints]
+    element = solver._joints.element.numpy()[joints]
     X_p, X_c = model.joint_X_p.numpy().astype(np.float64), model.joint_X_c.numpy().astype(np.float64)
     solver._features.ball = _State(
         joints=joints,
         rows=wp.array(joints, dtype=wp.int32, device=model.device),
-        bodies=solver._joint_bodies["spherical"][element],
+        bodies=solver._joints.bodies["spherical"][element],
         frames=tuple(np.array([_quat_to_matrix_np(q) for q in X[joints, 3:7]]) for X in (X_p, X_c)),
     )
 
