@@ -61,7 +61,9 @@ compare it with Newton's other solvers.
 Construction and stepping
 -------------------------
 
-SolverIPC runs on the optional ``libuipc-warp`` package, 0.5.0 or later.
+SolverIPC runs on the optional ``libuipc-warp`` package, 0.5.0 or a later 0.5
+release. A 0.x minor release of libuipc-warp may change the interface the solver
+calls, so the solver refuses 0.6 and later until it has been tested with them.
 libuipc-warp has no package on PyPI: install it from its GitHub repository into
 the environment of Newton. The repository is private until libuipc-warp is
 released, and access is given on request.
@@ -74,8 +76,8 @@ Its README gives the requirements: Linux, an NVIDIA driver that supports CUDA
 12.4 or newer, and Python 3.11 to 3.13.
 
 Building the first solver imports libuipc-warp, and raises
-:class:`ImportError` when it is missing, older, or lacks one of the calls the
-solver makes; the message names what is missing. Build the model on a CUDA
+:class:`ImportError` when it is missing, older than 0.5.0, 0.6 or later, or
+lacks one of the calls the solver makes; the message names what is wrong. Build the model on a CUDA
 device and step it as any other solver:
 
 .. code-block:: python

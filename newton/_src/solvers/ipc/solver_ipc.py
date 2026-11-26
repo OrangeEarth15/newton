@@ -125,10 +125,14 @@ else:
                 return method
 
 
-# The oldest libuipc-warp SolverIPC takes, its development builds counted as their release ("0.5.0.dev0" as 0.5.0), and
-# where to install it from
+# The libuipc-warp releases SolverIPC takes, development builds counted as their release ("0.5.0.dev0" as 0.5.0): from
+# _UIPC_WARP_MINIMUM up to, and not including, _UIPC_WARP_BELOW. libuipc-warp is 0.x, where a minor release may change
+# its interface incompatibly (0.5.0 did), so the next one is refused until SolverIPC is tested with it. And where to
+# install libuipc-warp from, and a release that SolverIPC takes.
 _UIPC_WARP_MINIMUM = (0, 5, 0)
+_UIPC_WARP_BELOW = (0, 6)
 _UIPC_WARP_INSTALL = "pip install git+https://github.com/OrangeEarth15/libuipc-warp"
+_UIPC_WARP_INSTALL_TAKEN = "pip install git+https://github.com/OrangeEarth15/libuipc-warp@v0.5.0"
 # grow-and-redo attempts of an eager step whose contact lists keep overflowing, as libuipc-warp's FrameRunner
 _MAX_REGROWS = 8
 # libuipc's strength ratio of a joint (the default of its joints' apply_to): the default joint_strength_ratio
@@ -398,7 +402,7 @@ class SolverIPC(SolverBase, CouplingInterface):
     (:ref:`ipc-contact-output`), and the solver is an entry of Newton's coupled
     solvers (:ref:`ipc-coupling`).
 
-    This solver requires the optional ``libuipc-warp`` package, 0.5.0 or newer (``import uipc_warp``).
+    This solver requires the optional ``libuipc-warp`` package, 0.5.0 or a later 0.5 release (``import uipc_warp``).
 
     Args:
         model: The model to simulate.
@@ -891,8 +895,9 @@ class SolverIPC(SolverBase, CouplingInterface):
 
     @classmethod
     def _import_uipc_warp(cls):
-        """Import libuipc-warp once: raise when it is missing, older than ``_UIPC_WARP_MINIMUM``, without one of the
-        capabilities SolverIPC calls (``_capabilities``) or with other status bits than ``StatusBits``."""
+        """Import libuipc-warp once: raise when it is missing, older than ``_UIPC_WARP_MINIMUM``, at
+        ``_UIPC_WARP_BELOW`` or later, without one of the capabilities SolverIPC calls (``_capabilities``) or with other
+        status bits than ``StatusBits``."""
         if cls._uipc_warp is not None:
             return cls._uipc_warp
         try:
@@ -902,16 +907,22 @@ class SolverIPC(SolverBase, CouplingInterface):
         except ImportError as e:
             raise ImportError(f"SolverIPC requires the libuipc-warp package: {_UIPC_WARP_INSTALL}") from e
         version = getattr(uipc_warp, "__version__", "0")
-        minimum = ".".join(map(str, _UIPC_WARP_MINIMUM))
+        minor = ".".join(map(str, _UIPC_WARP_MINIMUM[:2]))
+        taken = f"{'.'.join(map(str, _UIPC_WARP_MINIMUM))} or a later {minor} release"
         if _release(version) < _UIPC_WARP_MINIMUM:
             raise ImportError(
-                f"SolverIPC requires libuipc-warp {minimum} or newer, and the installed one is {version}: "
-                f"{_UIPC_WARP_INSTALL}"
+                f"SolverIPC requires libuipc-warp {taken}, and the installed one is {version}: {_UIPC_WARP_INSTALL}"
+            )
+        if _release(version) >= _UIPC_WARP_BELOW:
+            raise ImportError(
+                f"SolverIPC requires libuipc-warp {taken}, and the installed one is {version}. A 0.x minor release of "
+                f"libuipc-warp may change the interface SolverIPC calls, so SolverIPC takes {minor} releases only, the "
+                f"ones it is tested with. Install one: {_UIPC_WARP_INSTALL_TAKEN}"
             )
         missing = [name for name, present in _capabilities(uipc_warp).items() if not present]
         if missing:
             raise ImportError(
-                f"SolverIPC requires libuipc-warp {minimum} or newer with {', '.join(_capabilities(uipc_warp))}; "
+                f"SolverIPC requires libuipc-warp {taken} with {', '.join(_capabilities(uipc_warp))}; "
                 f"the installed one ({version}) lacks {', '.join(missing)}: {_UIPC_WARP_INSTALL}"
             )
         # write_frame_status writes libuipc-warp's FrameStatusFlags into the status arrays: every StatusBits bit must be

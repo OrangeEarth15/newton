@@ -1281,10 +1281,10 @@ class TestSolverIPCInputs(unittest.TestCase):
         self.assertGreater(bent, 1.0)  # folded hinges too, not only flat ones
 
     def test_import_checks_the_version_and_the_capabilities(self):
-        """Refuse a libuipc-warp older than the release SolverIPC is written for, naming it, and one without a
-        capability SolverIPC calls (the rigid flight, AL-IPC's sweep of kinematic moves, the frame restart, the start
-        check of written positions, a d_hat per part of the scene), naming what it lacks; take a development build of
-        the release. Every refusal says where to install it from."""
+        """Refuse a libuipc-warp older than the release SolverIPC is written for, naming it, one of the next minor
+        release or later, saying why, and one without a capability SolverIPC calls (the rigid flight, AL-IPC's sweep of
+        kinematic moves, the frame restart, the start check of written positions, a d_hat per part of the scene),
+        naming what it lacks; take a development build of the release. Every refusal says where to install it from."""
         import uipc_warp  # noqa: PLC0415
 
         imported = newton.solvers.SolverIPC._uipc_warp
@@ -1295,14 +1295,22 @@ class TestSolverIPCInputs(unittest.TestCase):
                 newton.solvers.SolverIPC._import_uipc_warp()
 
         names = uipc_warp.EngineOptions.names()
+        taken = "0\\.5\\.0 or a later 0\\.5 release"
         try:
-            for version in ("0.5.0.dev0", "0.5.0", "0.5.1.dev0", "1.0"):
+            for version in ("0.5.0.dev0", "0.5.0", "0.5.1.dev0", "0.5.12"):
                 with mock.patch.object(uipc_warp, "__version__", version):
                     newton.solvers.SolverIPC._uipc_warp = None
                     self.assertIs(newton.solvers.SolverIPC._import_uipc_warp(), uipc_warp)
             for version in ("0.4.4.dev0", "0.4.4", "0.4.3"):
                 with mock.patch.object(uipc_warp, "__version__", version):
-                    refused(f"requires libuipc-warp 0\\.5\\.0 or newer, and the installed one is {version}")
+                    refused(f"requires libuipc-warp {taken}, and the installed one is {version}:")
+            for version in ("0.6.0.dev0", "0.6.0", "0.7.1", "1.0"):
+                with mock.patch.object(uipc_warp, "__version__", version):
+                    refused(
+                        f"requires libuipc-warp {taken}, and the installed one is {version}\\. A 0\\.x minor release "
+                        "of libuipc-warp may change the interface SolverIPC calls, so SolverIPC takes 0\\.5 releases "
+                        "only, the ones it is tested with\\. Install one: (?=.*@v0\\.5\\.0$)"
+                    )
             for option in ("affine_rotation", "al_sweep_kinematic"):
                 without = tuple(name for name in names if name != option)
                 with mock.patch.object(uipc_warp.EngineOptions, "names", return_value=without):
