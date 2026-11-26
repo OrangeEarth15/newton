@@ -6,8 +6,8 @@
 What the solver simulates (its particles, elements, kinematic bodies and a coupled solver's proxies) and the worlds
 as libuipc subscenes; particles and tetrahedra, cloth with Newton's rest shapes, springs, and the stitches of
 particle-body attachments and springs of rest length 0; shapes triangulated into meshes, rigid bodies as affine bodies
-with their dyadic masses and orthogonality stiffness, static planes as half planes; and the default ``d_hat`` of
-every shape and particle.
+with their dyadic masses and orthogonality stiffness, static infinite planes as half planes and finite ones as a quad of
+their extent; and the default ``d_hat`` of every shape and particle.
 """
 
 from __future__ import annotations
@@ -59,10 +59,20 @@ def _colliding_shapes(model: Model) -> np.ndarray:
     return (flags & mask) != 0
 
 
+def _infinite_planes(model: Model) -> np.ndarray:
+    """Which shapes are infinite planes, of width and length 0, which the solver adds as libuipc's half planes
+    (``_collect_planes``); it triangulates a finite plane as a quad of its extent (``_shape_mesh``)."""
+    if not model.shape_count:
+        return np.zeros(0, bool)
+    scale = model.shape_scale.numpy()
+    return (model.shape_type.numpy() == int(GeoType.PLANE)) & (scale[:, 0] <= 0.0) & (scale[:, 1] <= 0.0)
+
+
 def _shape_half_sizes(model: Model) -> np.ndarray:
     """The half-size [m] of every shape by which its default d_hat is lowered: a sphere's or capsule's radius, the
     smaller of a cylinder's or cone's radius and half height, a box's or ellipsoid's smallest half extent, half of a
-    mesh's thinnest extent that is not zero; ``inf`` for a plane, a height field and a shape that does not collide."""
+    mesh's thinnest extent that is not zero, half of a finite plane's shorter side; ``inf`` for an infinite plane, a
+    height field and a shape that does not collide."""
     half = np.full(model.shape_count, np.inf)
     if not model.shape_count:
         return half
@@ -79,6 +89,8 @@ def _shape_half_sizes(model: Model) -> np.ndarray:
             extent = np.ptp(np.asarray(model.shape_source[s].vertices, np.float64).reshape(-1, 3) * sc, axis=0)
             extent = extent[extent > 0.0]
             h = 0.5 * extent.min() if len(extent) else np.inf
+        elif t == GeoType.PLANE and sc[0] > 0.0 and sc[1] > 0.0:
+            h = 0.5 * min(sc[0], sc[1])
         else:
             continue
         if h > 0.0:
@@ -191,7 +203,7 @@ def _set_d_hats(solver: SolverIPC, elements: _ContactElements) -> None:
     particle_d_hat = _mesh_minimum(n, cells, particle_d_hat)
     solver._shape_d_hat, solver._particle_d_hat = shape_d_hat, particle_d_hat
     # the solve's: the smallest of the shapes it triangulates and of the particles (libuipc's contact/d_hat)
-    meshed = shapes[model.shape_type.numpy()[shapes] != int(GeoType.PLANE)] if len(shapes) else shapes
+    meshed = shapes[~_infinite_planes(model)[shapes]] if len(shapes) else shapes
     solver._config.d_hat = float(np.concatenate([[_D_HAT], shape_d_hat[meshed], particle_d_hat]).min())
 
 
@@ -369,7 +381,8 @@ def _weld(v: np.ndarray, f: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _shape_mesh(model: Model, s: int, segments: int) -> tuple[np.ndarray, np.ndarray]:
-    """Closed triangle mesh of shape ``s`` in its local frame, scaled."""
+    """Triangle mesh of shape ``s`` in its local frame, scaled: closed, but for the open surfaces of a height field and
+    of a finite plane, a quad of its width and length on its local z = 0, as ImplicitMPM meshes it."""
     t = int(model.shape_type.numpy()[s])
     sc = model.shape_scale.numpy()[s].astype(np.float64)
     opts = {"compute_normals": False, "compute_uvs": False, "compute_inertia": False}
@@ -392,6 +405,8 @@ def _shape_mesh(model: Model, s: int, segments: int) -> tuple[np.ndarray, np.nda
         return _weld(np.asarray(src.vertices, np.float64) * sc, np.asarray(src.indices))
     elif t == GeoType.HFIELD:
         return _heightfield_mesh(model, s)
+    elif t == GeoType.PLANE:
+        mesh = Mesh.create_plane(sc[0], sc[1], **opts)
     else:
         raise NotImplementedError(
             f"SolverIPC: shape {s} is a {GeoType(t).name} shape; give it another type, or clear its collide flags. "
@@ -1022,8 +1037,8 @@ def _element_inputs_now(solver: SolverIPC) -> tuple:
 def _add_shapes_and_bodies(
     solver: SolverIPC, scene, elements: _ContactElements
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Static non-plane shapes as fixed triangle meshes; every body as an affine body. Returns the bodies'
-    dyadic masses."""
+    """Static shapes other than infinite planes as fixed triangle meshes; every body as an affine body. Returns the
+    bodies' dyadic masses."""
     model = solver.model
     meshes: dict[int, list] = {b: [] for b in range(model.body_count)}
     solver._obstacle_shapes = []  # the shape of every obstacle, in the order they are added
@@ -1035,6 +1050,7 @@ def _add_shapes_and_bodies(
         colliding = _colliding_shapes(model)
         shape_xform = model.shape_transform.numpy().astype(np.float64)
         margin = model.shape_margin.numpy().astype(np.float64)
+        scale = model.shape_scale.numpy()
         for s in range(model.shape_count):
             if not colliding[s]:
                 continue
@@ -1045,7 +1061,15 @@ def _add_shapes_and_bodies(
                         f"SolverIPC: the plane shape {s} is on body {b}; put planes on the world (body -1). libuipc's "
                         "half planes do not move."
                     )
-                continue
+                width, length = float(scale[s, 0]), float(scale[s, 1])
+                if (width > 0.0) != (length > 0.0):
+                    raise NotImplementedError(
+                        f"SolverIPC: the plane shape {s} has width {width:g} and length {length:g}; give it both, for "
+                        "a finite plane, or neither, for an infinite one. Newton's shape contacts take such a plane as "
+                        "finite and its particle contacts as infinite."
+                    )
+                if width <= 0.0:
+                    continue  # an infinite plane: a half plane (_collect_planes)
             v, f = _shape_mesh(model, s, solver._shape_segments)
             if len(f) == 0:
                 continue  # a height field without a cell
@@ -1219,29 +1243,17 @@ def _engine_dyadic(solver: SolverIPC, dyadic: tuple) -> tuple:
 
 
 def _collect_planes(solver: SolverIPC) -> tuple[np.ndarray, np.ndarray, list[int]]:
-    """The points, normals and shapes of the static planes that collide, each point moved out by the shape's
+    """The points, normals and shapes of the static infinite planes that collide, each point moved out by the shape's
     margin."""
     model = solver.model
     if model.shape_count == 0:
         return np.zeros((0, 3)), np.zeros((0, 3)), []
-    shape_type = model.shape_type.numpy()
     shape_body = model.shape_body.numpy()
-    colliding = _colliding_shapes(model)
+    infinite = _infinite_planes(model) & _colliding_shapes(model) & (shape_body == -1)
     shape_xform = model.shape_transform.numpy()
-    shape_scale = model.shape_scale.numpy()
     margin = model.shape_margin.numpy().astype(np.float64)
     P, N, shapes = [], [], []
-    for s in range(model.shape_count):
-        if shape_type[s] != int(GeoType.PLANE) or shape_body[s] != -1:
-            continue
-        if not colliding[s]:
-            continue
-        if shape_scale[s][0] > 0.0 or shape_scale[s][1] > 0.0:
-            warnings.warn(
-                f"SolverIPC treats the finite plane shape {s} as an infinite half space.",
-                NewtonWarning,
-                stacklevel=4,
-            )
+    for s in np.flatnonzero(infinite).tolist():
         xf = shape_xform[s].astype(np.float64)
         n = _quat_rotate_np(xf[3:7], np.array([0.0, 0.0, 1.0]))
         # a half plane has no thickness: its margin moves its surface out along the normal

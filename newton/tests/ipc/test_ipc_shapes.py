@@ -3,7 +3,7 @@
 
 """SolverIPC's triangulation of Newton's collision shapes: capsules, cylinders, cones, ellipsoids, convex hulls and
 scaled meshes rest on the ground at their triangulated extents, along local Z, with ``shape_segments`` segments around;
-a plane on a body is refused."""
+a finite plane ends at its edges; a plane on a body is refused."""
 
 import unittest
 
@@ -11,7 +11,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.tests.ipc._fixtures import _TIGHT
+from newton.tests.ipc._fixtures import _TIGHT, D_HAT, _assert_refused, _box_body, _run
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 _D_HAT = 1.0e-3
@@ -165,6 +165,41 @@ def test_primitives_rest_at_their_triangulated_extents(test, device):
     )
 
 
+def test_finite_plane_ends_at_its_edges(test, device):
+    """Let a box that slides past the edge of a finite plane fall, and hold one on an infinite plane.
+
+    A frictionless box 0.1 m wide starts 2 mm above a plane, moving at 1 m/s along x. A plane 0.4 m wide and long still
+    holds it at 0.15 s, with its centre 0.15 m out, and by 0.5 s has let it fall until its centre is below the plane (to
+    -0.096 m); a quad of twice that size, as a width read as a half extent would give, would only have begun to tip it
+    then. A plane of width and length 0 holds the box throughout. A plane with a width but no length is refused.
+    """
+    final = {}
+    for width in (0.4, 0.0):
+        builder = newton.ModelBuilder()
+        builder.default_shape_cfg.mu = 0.0
+        builder.add_shape_plane(width=width, length=width)
+        box = _box_body(builder, (0.0, 0.0, 0.052), (0.05, 0.05, 0.05))
+        builder.body_qd[box] = (1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        model = builder.finalize(device=device)
+        body_q = _run(model, newton.solvers.SolverIPC(model), 50, field="body_q")
+        with test.subTest(width=width):
+            test.assertGreater(body_q[14, box, 2], 0.05)  # at 0.15 s, the centre 0.15 m out, on the plane
+            final[width] = body_q[-1, box]
+    test.assertLess(final[0.4][2], 0.0)
+    test.assertAlmostEqual(final[0.0][0], 0.5, delta=0.01)
+    test.assertGreater(final[0.0][2], 0.05)
+    test.assertLess(final[0.0][2], 0.05 + D_HAT)
+    builder = newton.ModelBuilder()
+    builder.add_shape_plane(width=0.4, length=0.0)
+    _box_body(builder, (0.0, 0.0, 0.052), (0.05, 0.05, 0.05))
+    _assert_refused(
+        test,
+        builder.finalize(device=device),
+        "SolverIPC: the plane shape 0 has width 0.4 and length 0; give it both, for a finite plane, or neither, for an "
+        "infinite one. Newton's shape contacts take such a plane as finite and its particle contacts as infinite.",
+    )
+
+
 def test_rejects_a_plane_on_a_body(test, device):
     """Refuse a plane shape attached to a body by name when the solver is built.
 
@@ -192,6 +227,7 @@ class TestSolverIPCShapes(unittest.TestCase):
 
 for name, func in (
     ("test_primitives_rest_at_their_triangulated_extents", test_primitives_rest_at_their_triangulated_extents),
+    ("test_finite_plane_ends_at_its_edges", test_finite_plane_ends_at_its_edges),
     ("test_rejects_a_plane_on_a_body", test_rejects_a_plane_on_a_body),
 ):
     add_function_test(TestSolverIPCShapes, name, func, devices=devices)

@@ -481,15 +481,15 @@ limit of the part itself and of every part it can touch:
 
 - a colliding shape: a quarter of its half-size, which is a sphere's or
   capsule's radius, the smaller of a cylinder's or cone's radius and half
-  height, a box's or ellipsoid's smallest half extent, or half of a mesh's
-  thinnest extent;
+  height, a box's or ellipsoid's smallest half extent, half of a mesh's
+  thinnest extent, or half of a finite plane's shorter side;
 - a free particle that collides: a quarter of its radius;
 - the particles of cloth and tetrahedra: half the median rest length of the
   edges of the cloth and tetrahedra of their world.
 
-A plane and a height field set no limit. Two parts can touch where Newton's
-collision groups, collide flags, filter pairs and particle contact let them
-collide, in one world or with a global part.
+An infinite plane and a height field set no limit. Two parts can touch where
+Newton's collision groups, collide flags, filter pairs and particle contact let
+them collide, in one world or with a global part.
 
 A ``d_hat`` that spans a small shape lets it rest up to its own size away, and
 puts more contact pairs inside ``d_hat`` than the contact lists hold. One as long
@@ -502,13 +502,14 @@ particles of one cloth or soft body take the smallest value among them, because
 libuipc needs one value on the corners of a contact triangle.
 
 With several worlds a world's parts get the values they would get with the
-world alone. A global shape other than a plane gets the smallest value of the
-worlds that can touch it, so the pairs of a world with such a shape can be
-closer than with the world alone. The values are chosen whenever the solve is
-built. The solver also keeps the smallest value of all parts as the value for
-the whole model, libuipc's ``contact/d_hat``, from which libuipc's stiffness
-range is computed (``adaptive_kappa``, :ref:`ipc-contact`); with independent
-worlds that range takes the smallest part of every world, not only of its own.
+world alone. A global shape other than an infinite plane gets the smallest
+value of the worlds that can touch it, so the pairs of a world with such a
+shape can be closer than with the world alone. The values are chosen whenever
+the solve is built. The solver also keeps the smallest value of all parts as
+the value for the whole model, libuipc's ``contact/d_hat``, from which
+libuipc's stiffness range is computed (``adaptive_kappa``, :ref:`ipc-contact`);
+with independent worlds that range takes the smallest part of every world, not
+only of its own.
 
 .. _ipc-model-content:
 
@@ -529,8 +530,14 @@ The solver simulates:
   and the drag and lift of triangles (:ref:`ipc-damping`);
 - rigid bodies with box, sphere, capsule, cylinder, cone, ellipsoid, mesh or
   convex mesh shapes, as affine bodies (:ref:`ipc-rigid-bodies`);
-- static shapes as fixed triangle meshes, static planes as half spaces, and
-  height fields as Newton's collision triangles, two per cell of the grid;
+- static shapes as fixed triangle meshes, and height fields as Newton's
+  collision triangles, two per cell of the grid;
+- static planes: one of width and length 0, as
+  :meth:`~newton.ModelBuilder.add_ground_plane` makes it, as a half space, and
+  a finite one as a quad of its width and length, two triangles, so that what
+  slides past its edge falls. The quad is two-sided: content that starts below
+  it stays below it, where Newton's collision takes the side below a plane as
+  inside it;
 - contact between all of these, with friction, between the pairs that Newton's
   collision rules let collide (:ref:`ipc-contact`), and collision meshes whose
   surface moves along itself, such as a conveyor belt
@@ -756,9 +763,9 @@ The contact thickness is the distance at which the barrier becomes infinite:
 - a free particle is a sphere of its :attr:`~newton.Model.particle_radius`, so it
   rests its radius above a shape, and two free particles rest the sum of their
   radii apart;
-- a shape's vertices take its :attr:`~newton.Model.shape_margin`, and a static
-  plane's surface moves out by it, so that two shapes rest the sum of their
-  margins apart;
+- a shape's vertices take its :attr:`~newton.Model.shape_margin`, and an
+  infinite plane's surface moves out by it, so that two shapes rest the sum of
+  their margins apart;
 - the vertices of cloth and tetrahedra take the ``thickness`` argument, not
   their radius. libuipc gives a vertex's thickness to every edge and triangle it
   is on, and finite elements collide with themselves, so a cloth vertex of
@@ -781,8 +788,8 @@ does the same: ``kappa=None`` takes
 step that clamps it warns with :class:`~newton.NewtonWarning`. The range
 follows every step's ``dt``, also in captured steps, and comes from the masses
 when the solve is built: every particle, every vertex of the triangulated
-surfaces of the bodies, and one vertex per plane, each body's mass counted once.
-Newton's static shapes have no mass and count with 0, as an obstacle does on
+surfaces of the bodies, and one vertex per infinite plane, each body's mass
+counted once. Newton's static shapes have no mass and count with 0, as an obstacle does on
 libuipc-warp's array path, where libuipc counts the mass of every body, fixed or
 not. :meth:`~newton.solvers.SolverIPC.contact_stiffness` gives the stiffness of a
 step of any ``dt``, one value per world. With independent worlds every world takes the range of the
@@ -2044,8 +2051,9 @@ what to change:
 - springs of a negative rest length or stiffness or that join a particle to
   itself, and a negative particle-body attachment stiffness;
 - a damping, drag or lift :ref:`ipc-damping` refuses;
-- shape types without a triangulation, such as Gaussian shapes, and a plane
-  on a body: libuipc's half planes do not move;
+- shape types without a triangulation, such as Gaussian shapes, a plane on a
+  body (libuipc's half planes do not move), and a plane with a width but no
+  length or a length but no width;
 - with independent worlds, a moving global entity and an element between two
   worlds (:ref:`ipc-worlds`);
 - a :attr:`~newton.Model.shape_contact_pairs` array assigned to the model,
@@ -2057,8 +2065,7 @@ what to change:
 :class:`ValueError` for an argument out of range (:ref:`ipc-arguments`), for a
 start in contact (:ref:`ipc-start`), for a hinge row whose triangles run its
 edge the same way (:ref:`ipc-cloth`), and for a dynamic body whose inertia is
-not positive definite. A finite plane shape is taken as an infinite half space,
-with a :class:`~newton.NewtonWarning`.
+not positive definite.
 
 .. _ipc-not-read:
 
