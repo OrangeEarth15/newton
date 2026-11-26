@@ -2862,10 +2862,9 @@ class SolverCoupledADMM(SolverCoupled):
                 or not self._entries[body_entry].solver.coupling_supports_particle_body_attachments()
             ):
                 raise ValueError(
-                    "Hard particle-body attachments require both endpoints in the same entry whose solver applies "
-                    "particle-body attachments (coupling_supports_particle_body_attachments(), such as SolverVBD and "
-                    f"SolverIPC); attachment {name} has body entry {body_entry!r} and particle entry "
-                    f"{particle_entry!r}"
+                    "Hard particle-body attachments require both endpoints in the same entry of a solver that applies "
+                    "them, such as SolverVBD (coupling_supports_particle_body_attachments()); attachment "
+                    f"{name} has body entry {body_entry!r} and particle entry {particle_entry!r}"
                 )
             if body_entry is None or particle_entry is None:
                 unowned.append(name)
