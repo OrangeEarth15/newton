@@ -208,13 +208,6 @@ def build(solver: SolverIPC, scene) -> None:
     joints = _rod_joints(model)
     if not len(joints):
         return
-    try:
-        import uipc_warp.ext.rods  # noqa: F401, PLC0415 (libuipc-warp is imported lazily)
-    except ImportError as e:
-        raise ImportError(
-            "SolverIPC: rod joints need libuipc-warp's rod joints (uipc_warp.ext.rods); install a libuipc-warp that "
-            "has them, or use SolverVBD or SolverKamino for rods."
-        ) from e
     parent, child = model.joint_parent.numpy()[joints], model.joint_child.numpy()[joints]
     X_p, X_c = model.joint_X_p.numpy().astype(np.float64), model.joint_X_c.numpy().astype(np.float64)
     solver._features.rods = _State(

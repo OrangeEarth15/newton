@@ -305,13 +305,6 @@ def _parents_requested(solver: SolverIPC) -> None:
     acts as a wrench."""
     state = solver._body_observables
     model, device = solver.model, solver.model.device
-    try:
-        import uipc_warp.ext.element_forces  # noqa: F401, PLC0415
-    except ImportError as e:
-        raise ImportError(
-            f"SolverIPC: BODY_PARENT_F takes the joints' forces from libuipc-warp's uipc_warp.ext.element_forces, which "
-            f"the installed libuipc-warp ({getattr(solver._uipc_warp, '__version__', '?')}) lacks; install a newer one."
-        ) from e
     state.share = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=device)
     if model.joint_count:
         state.no_parent = wp.full(model.joint_count, -1, dtype=wp.int32, device=device)

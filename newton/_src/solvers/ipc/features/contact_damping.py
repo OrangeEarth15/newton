@@ -65,8 +65,7 @@ def check(model: Model, options: FeatureOptions, at: str) -> None:
 
 def build(solver: SolverIPC, scene) -> None:
     """The solve's contact damping (``solver._features.contact_damping``, None without one). ``NotImplementedError``
-    under ``contact_constitution="al-ipc"``, whose contact terms are an active set of its own, and ``ImportError`` when
-    the installed libuipc-warp has no ``uipc_warp.ext.contact_damping``."""
+    under ``contact_constitution="al-ipc"``, whose contact terms are an active set of its own."""
     value = solver._feature_options.contact_damping
     solver._features.contact_damping = None
     if value is None:
@@ -77,15 +76,6 @@ def build(solver: SolverIPC, scene) -> None:
             "terms are an active set with multipliers, which libuipc-warp's contact damping does not act on. Use "
             "contact_constitution='ipc', or leave contact_damping at None."
         )
-    try:
-        import uipc_warp.ext.contact_damping  # noqa: F401, PLC0415
-    except ImportError as e:
-        from ..solver_ipc import _UIPC_WARP_INSTALL  # noqa: PLC0415
-
-        raise ImportError(
-            f"SolverIPC: contact_damping={value!r} needs libuipc-warp's uipc_warp.ext.contact_damping, and the "
-            f"installed libuipc-warp has none. Install a newer one: {_UIPC_WARP_INSTALL}"
-        ) from e
     materials = _materials(solver.model) if value == "material" else None
     solver._features.contact_damping = _Damping(value, materials)
 

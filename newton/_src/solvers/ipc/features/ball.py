@@ -183,13 +183,6 @@ def build(solver: SolverIPC, scene) -> None:
     joints = _with_terms(model)
     if not len(joints):
         return
-    try:
-        import uipc_warp.ext.ball  # noqa: F401, PLC0415 (libuipc-warp is imported lazily)
-    except ImportError as e:
-        raise ImportError(
-            "SolverIPC: the drives, springs, damping, armature and friction of ball joints need libuipc-warp's ball "
-            "terms (uipc_warp.ext.ball); install a libuipc-warp that has them, or set those of every ball joint to 0."
-        ) from e
     element = solver._joints.element.numpy()[joints]
     X_p, X_c = model.joint_X_p.numpy().astype(np.float64), model.joint_X_c.numpy().astype(np.float64)
     solver._features.ball = _State(

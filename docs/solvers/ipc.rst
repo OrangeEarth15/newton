@@ -78,9 +78,11 @@ Its README gives the requirements: Linux, an NVIDIA driver that supports CUDA
 12.4 or newer, and Python 3.11 to 3.13.
 
 Building the first solver imports libuipc-warp, and raises
-:class:`ImportError` when it is missing, older than 0.5.0, 0.6 or later, or
-lacks one of the calls the solver makes; the message names what is wrong. Build the model on a CUDA
-device and step it as any other solver:
+:class:`ImportError` when it is missing, older than 0.5.0, or 0.6 or later; the
+message names what is wrong. Versions compare in PEP 440 order, where a
+development build comes before its release: a build of 0.5.0.dev0 is refused,
+one of 0.5.1.dev0 is taken. Build the model on a CUDA device and step it as any
+other solver:
 
 .. code-block:: python
 

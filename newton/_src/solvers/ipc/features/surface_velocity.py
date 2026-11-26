@@ -113,7 +113,7 @@ def _first_corners(model: Model, s: int, welded: np.ndarray) -> np.ndarray:
 def build(solver: SolverIPC, scene) -> None:
     """Find the colliding meshes with a surface velocity (``solver._features.surface_velocity``, None without one).
     ``NotImplementedError`` for one under ``contact_constitution="al-ipc"``, whose friction in libuipc-warp takes no
-    surface velocity, and ``ImportError`` when the installed libuipc-warp has no ``uipc_warp.ext.surface_velocity``."""
+    surface velocity."""
     shapes = _belt_shapes(solver.model)
     solver._features.surface_velocity = _Belts(shapes) if len(shapes) else None
     if not len(shapes):
@@ -124,16 +124,6 @@ def build(solver: SolverIPC, scene) -> None:
             "contact_constitution='al-ipc' does not take: libuipc-warp's AL-IPC friction has no surface velocity. "
             "Use contact_constitution='ipc', or turn the surface velocity off."
         )
-    try:
-        import uipc_warp.ext.surface_velocity  # noqa: F401, PLC0415
-    except ImportError as e:
-        from ..solver_ipc import _UIPC_WARP_INSTALL  # noqa: PLC0415
-
-        raise ImportError(
-            f"SolverIPC: shape {int(shapes[0])} is a mesh with enable_surface_velocity=True, which needs "
-            "libuipc-warp's uipc_warp.ext.surface_velocity, and the installed libuipc-warp has none. Install a newer "
-            f"one: {_UIPC_WARP_INSTALL}"
-        ) from e
 
 
 def engine_inputs(solver: SolverIPC, inputs: dict) -> None:

@@ -32,7 +32,7 @@ from newton.tests.ipc._fixtures import (
     _with_tendon,
     _with_vector_mimic,
 )
-from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, patch_sys_module, requires
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 
 def _rejects(test, builder, pattern, device):
@@ -1368,14 +1368,13 @@ class TestSolverIPCInputs(unittest.TestCase):
                 bent = max(bent, float(np.abs(angles).max()))
         self.assertGreater(bent, 1.0)  # folded hinges too, not only flat ones
 
-    def test_import_checks_the_version_and_the_capabilities(self):
-        """Refuse a libuipc-warp of the wrong release or without a capability SolverIPC calls, naming the reason.
+    def test_import_checks_the_version(self):
+        """Refuse a libuipc-warp of the wrong release, naming the reason, in PEP 440 order.
 
-        A libuipc-warp older than the release SolverIPC is written for is refused, naming it; one of the next minor
-        release or later is refused, saying why; and one without a capability SolverIPC calls (the rigid flight,
-        AL-IPC's sweep of kinematic moves, the frame restart, the start check of written positions, a d_hat per part of
-        the scene) is refused, naming what it lacks. A development build of the release is taken. Every refusal gives
-        the one install command, pinned to the release SolverIPC is tested with.
+        A libuipc-warp older than the release SolverIPC is written for, a development build of that release among them,
+        is refused, naming it; one of the next minor release or later, its development builds among them, is refused,
+        saying why. The release and later 0.5 versions are taken, their development builds among them. Every refusal
+        gives the one install command, pinned to the release SolverIPC is tested with.
         """
         import uipc_warp  # noqa: PLC0415
 
@@ -1388,14 +1387,13 @@ class TestSolverIPCInputs(unittest.TestCase):
             ):
                 newton.solvers.SolverIPC._import_uipc_warp()
 
-        names = uipc_warp.EngineOptions.names()
         taken = "0\\.5\\.0 or a later 0\\.5 release"
         try:
-            for version in ("0.5.0.dev0", "0.5.0", "0.5.1.dev0", "0.5.12"):
+            for version in ("0.5.0", "0.5.1.dev0", "0.5.12"):
                 with mock.patch.object(uipc_warp, "__version__", version):
                     newton.solvers.SolverIPC._uipc_warp = None
                     self.assertIs(newton.solvers.SolverIPC._import_uipc_warp(), uipc_warp)
-            for version in ("0.4.4.dev0", "0.4.4", "0.4.3"):
+            for version in ("0.5.0.dev0", "0.4.4.dev0", "0.4.4", "0.4.3"):
                 with mock.patch.object(uipc_warp, "__version__", version):
                     refused(f"requires libuipc-warp {taken}, and the installed one is {version}:")
             for version in ("0.6.0.dev0", "0.6.0", "0.7.1", "1.0"):
@@ -1405,27 +1403,6 @@ class TestSolverIPCInputs(unittest.TestCase):
                         "of libuipc-warp may change the interface SolverIPC calls, so SolverIPC takes 0\\.5 releases "
                         "only, the ones it is tested with\\. Install one: "
                     )
-            for option in ("affine_rotation", "al_sweep_kinematic"):
-                without = tuple(name for name in names if name != option)
-                with mock.patch.object(uipc_warp.EngineOptions, "names", return_value=without):
-                    refused(f"lacks EngineOptions\\({option}=\\)")
-
-            class WithoutRestart:  # an engine of a build without the frame restart
-                place_kinematic = uipc_warp.SimEngine.place_kinematic
-
-            with mock.patch.object(uipc_warp, "SimEngine", WithoutRestart):
-                refused(r"lacks the frame restart \(SimEngine\.enable_frame_restart\)")
-            with patch_sys_module("uipc_warp.ext.start_check", None):  # a build without the start check
-                refused(r"lacks the start check of written positions \(uipc_warp\.ext\.start_check\)")
-
-            class WithoutDHat:  # a scene of a build without a d_hat per part
-                def add_vertices(self, x, *, thickness=0.0):
-                    pass
-
-                add_obstacle = add_affine_body = add_vertices
-
-            with mock.patch.object(uipc_warp.arrays, "ArrayScene", WithoutDHat):
-                refused(r"lacks ArrayScene's d_hat per part")
         finally:
             newton.solvers.SolverIPC._uipc_warp = imported
 

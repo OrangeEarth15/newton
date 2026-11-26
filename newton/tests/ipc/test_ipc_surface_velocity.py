@@ -16,7 +16,7 @@ into the world by the shape's pose at the step's start, the part along each cont
 * A tread on a free body drives the body over the ground plane.
 * Captured steps equal eager ones while the velocities are written between steps; steps redone on grown engines
   keep the belt; independent worlds carry their boxes at their own belts' speeds, as alone; AL-IPC refuses a mesh with
-  the property, naming it, and a libuipc-warp without the extension is named.
+  the property, naming it.
 """
 
 import unittest
@@ -26,7 +26,7 @@ import warp as wp
 
 import newton
 from newton.tests.ipc._fixtures import _TIGHT, _TINY_LISTS
-from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, patch_sys_module, requires
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 DT = 0.01
 G = 9.81
@@ -389,19 +389,6 @@ def test_al_ipc_refuses_a_mesh_with_the_property(test, device):
     )
 
 
-def test_a_libuipc_warp_without_the_extension_is_named(test, device):
-    """Raise ``ImportError`` naming ``uipc_warp.ext.surface_velocity`` when libuipc-warp lacks it.
-
-    With a libuipc-warp that has no ``uipc_warp.ext.surface_velocity`` (one before it), a mesh with the property raises
-    ``ImportError`` naming the module when the solver is built, where the solver would otherwise fail at its first
-    engine.
-    """
-    model, _ = _tread(device, (-1.0, 0.0, 0.0))
-    with patch_sys_module("uipc_warp.ext.surface_velocity", None), test.assertRaises(ImportError) as raised:
-        newton.solvers.SolverIPC(model)
-    test.assertIn("needs libuipc-warp's uipc_warp.ext.surface_velocity", str(raised.exception))
-
-
 @requires("uipc_warp")
 class TestSolverIPCSurfaceVelocity(unittest.TestCase):
     """Collision meshes whose surface moves: conveyor belts and treads."""
@@ -418,7 +405,6 @@ for name, func in (
     ("test_steps_redone_on_grown_engines_keep_the_belt", test_steps_redone_on_grown_engines_keep_the_belt),
     ("test_independent_worlds_ride_their_own_belts", test_independent_worlds_ride_their_own_belts),
     ("test_al_ipc_refuses_a_mesh_with_the_property", test_al_ipc_refuses_a_mesh_with_the_property),
-    ("test_a_libuipc_warp_without_the_extension_is_named", test_a_libuipc_warp_without_the_extension_is_named),
 ):
     add_function_test(TestSolverIPCSurfaceVelocity, name, func, devices=devices)
 

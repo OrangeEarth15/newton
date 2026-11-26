@@ -8,8 +8,7 @@ their normal, through libuipc-warp's ``ContactDamping``.
   ``"material"`` gives every engine vertex and plane the row of its coefficient (its shape's ``shape_material_kd``, a
   particle's ``soft_contact_kd``) in a table of means, so that a pair of two shapes takes the mean of their
   coefficients, a particle and a shape the mean of ``soft_contact_kd`` and the shape's, and two particles
-  ``soft_contact_kd``; other values raise ``ValueError``; AL-IPC refuses it; a libuipc-warp without the extension is
-  named.
+  ``soft_contact_kd``; other values raise ``ValueError``; AL-IPC refuses it.
 * A rebound: a box dropped flat at 1 m/s onto the ground plane under BDF2 rebounds as the one-dimensional model of a
   mass on four of libuipc's barrier pairs with the damping says (its rebound over the undamped one to 1e-4), and
   ``"material"`` with the box's and the ground's coefficients takes the steps of their mean given as a number, bit for
@@ -28,7 +27,7 @@ import warp as wp
 import newton
 from newton._src.solvers.ipc import features
 from newton.tests.ipc._fixtures import _TIGHT, _native_contacts, _rigid_rows
-from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, patch_sys_module, requires
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 _CONTACT_F = newton.solvers.SolverBase.ObservableKind.CONTACT_F
 D_HAT = 1.0e-3
@@ -359,18 +358,6 @@ def test_al_ipc_refuses_it(test, device):
     )
 
 
-def test_a_libuipc_warp_without_the_extension_is_named(test, device):
-    """Raise ``ImportError`` naming ``uipc_warp.ext.contact_damping`` when libuipc-warp lacks it.
-
-    With a libuipc-warp that has no ``uipc_warp.ext.contact_damping`` (one before it), a contact damping raises
-    ``ImportError`` naming the module when the solver is built.
-    """
-    model = _drop(device)
-    with patch_sys_module("uipc_warp.ext.contact_damping", None), test.assertRaises(ImportError) as raised:
-        newton.solvers.SolverIPC(model, contact_damping=1.0)
-    test.assertIn("needs libuipc-warp's uipc_warp.ext.contact_damping", str(raised.exception))
-
-
 @requires("uipc_warp")
 class TestSolverIPCContactDamping(unittest.TestCase):
     """A damping of the normal motion of surfaces in contact."""
@@ -390,7 +377,6 @@ for name, func in (
         test_notify_builds_the_solve_again_for_new_coefficients,
     ),
     ("test_al_ipc_refuses_it", test_al_ipc_refuses_it),
-    ("test_a_libuipc_warp_without_the_extension_is_named", test_a_libuipc_warp_without_the_extension_is_named),
 ):
     add_function_test(TestSolverIPCContactDamping, name, func, devices=devices)
 

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import gc
-import inspect
 import logging
 import re
 import warnings
@@ -128,13 +127,15 @@ else:
                 return method
 
 
-# The libuipc-warp releases SolverIPC takes, development builds counted as their release ("0.5.0.dev0" as 0.5.0): from
-# _UIPC_WARP_MINIMUM up to, and not including, _UIPC_WARP_BELOW. libuipc-warp is 0.x, where a minor release may change
-# its interface incompatibly (0.5.0 did), so the next one is refused until SolverIPC is tested with it. And how to
-# install the newest release that SolverIPC is tested with, as every hint and the guide (docs/solvers/ipc.rst) give it,
-# since libuipc-warp's main branch moves on to the next minor release: move both to a later 0.5 tag once it is tested.
-_UIPC_WARP_MINIMUM = (0, 5, 0)
-_UIPC_WARP_BELOW = (0, 6)
+# The libuipc-warp versions SolverIPC takes, in PEP 440 order (_version_key): from the release _UIPC_WARP_MINIMUM, whose
+# development builds sort before it and are refused, up to, and not including, _UIPC_WARP_BELOW, the first development
+# build of the next minor release. A later extension that SolverIPC calls raises _UIPC_WARP_MINIMUM to the 0.5 release
+# that has it. libuipc-warp is 0.x, where a minor release may change its interface incompatibly (0.5.0 did), so the next
+# one is refused until SolverIPC is tested with it. And how to install the newest release that SolverIPC is tested
+# with, as every hint and the guide (docs/solvers/ipc.rst) give it, since libuipc-warp's main branch moves on to the
+# next minor release: move both to a later 0.5 tag once it is tested.
+_UIPC_WARP_MINIMUM = "0.5.0"
+_UIPC_WARP_BELOW = "0.6.0.dev0"
 _UIPC_WARP_INSTALL = "pip install git+https://github.com/OrangeEarth15/libuipc-warp@v0.5.0"
 # grow-and-redo attempts of an eager step whose contact lists keep overflowing, as libuipc-warp's FrameRunner
 _MAX_REGROWS = 8
@@ -166,39 +167,21 @@ _AL_DECAY_FACTOR = 0.9
 _FRAME_STATS = ("newton_iterations", "pcg_iterations", "line_search_trials", "converged")
 
 
-def _release(version: str) -> tuple[int, ...]:
-    """The release numbers at the start of a version string (``"0.4.4.dev0"`` gives ``(0, 4, 4)``)."""
-    match = re.match(r"\d+(?:\.\d+)*", version)
-    return tuple(int(part) for part in match.group(0).split(".")) if match else ()
+# PEP 440's order of a release's pre-releases and development builds: X.devN < XaN < XbN < XrcN < X
+_PRE_RELEASE_RANK = {".dev": 0, "a": 1, "b": 2, "rc": 3, None: 4}
 
 
-def _capabilities(uipc_warp) -> dict[str, bool]:
-    """Whether libuipc-warp has the capabilities SolverIPC calls that a build of ``_UIPC_WARP_MINIMUM`` may lack, a
-    development build among them, by name: the rotation of rigid bodies as a rigid body's (``body_rotation="rigid"``,
-    the default), the sweeps of kinematic moves (the barrier's, ``sweep_kinematic``, and AL-IPC's), the frame
-    restart (an entry of a coupler that restarts its steps), the check of the positions written between steps and a
-    ``d_hat`` per part of the scene (the default ``d_hat`` of every shape and particle)."""
-    options = uipc_warp.EngineOptions.names()
-    engine = uipc_warp.SimEngine
-    scene = uipc_warp.arrays.ArrayScene
-    try:
-        import uipc_warp.ext.start_check  # noqa: PLC0415
-
-        start_check = True
-    except ImportError:
-        start_check = False
-    return {
-        "EngineOptions(affine_rotation=)": "affine_rotation" in options,
-        "EngineOptions(sweep_kinematic=)": "sweep_kinematic" in options,
-        "EngineOptions(al_sweep_kinematic=) with SimEngine.place_kinematic": "al_sweep_kinematic" in options
-        and hasattr(engine, "place_kinematic"),
-        "the frame restart (SimEngine.enable_frame_restart)": hasattr(engine, "enable_frame_restart"),
-        "the start check of written positions (uipc_warp.ext.start_check)": start_check,
-        "ArrayScene's d_hat per part": all(
-            "d_hat" in inspect.signature(add).parameters
-            for add in (scene.add_vertices, scene.add_obstacle, scene.add_affine_body)
-        ),
-    }
+def _version_key(version: str) -> tuple[int, ...]:
+    """``version`` as a key in PEP 440 order, as Newton's tests compare Warp's versions (``0.5.0.dev0`` before
+    ``0.5.0``, ``0.5.1.dev0`` after it): the release numbers, padded to three, then the rank and the number of a
+    pre-release or development suffix; what follows them, such as a local label, is ignored. A version without
+    release numbers sorts first."""
+    match = re.match(r"(\d+(?:\.\d+)*)(?:(\.dev|a|b|rc)(\d+))?", version)
+    if match is None:
+        return ()
+    release, pre, number = match.groups()
+    numbers = (*(int(part) for part in release.split(".")), 0, 0)[:3]
+    return (*numbers, _PRE_RELEASE_RANK[pre], int(number or 0))
 
 
 def _newton_tolerances(
@@ -898,9 +881,8 @@ class SolverIPC(SolverBase, CouplingInterface):
 
     @classmethod
     def _import_uipc_warp(cls):
-        """Import libuipc-warp once: raise when it is missing, older than ``_UIPC_WARP_MINIMUM``, at
-        ``_UIPC_WARP_BELOW`` or later, without one of the capabilities SolverIPC calls (``_capabilities``) or with other
-        status bits than ``StatusBits``."""
+        """Import libuipc-warp once: raise when it is missing, older than ``_UIPC_WARP_MINIMUM`` (a development build
+        of it among them), at ``_UIPC_WARP_BELOW`` or later, or with other status bits than ``StatusBits``."""
         if cls._uipc_warp is not None:
             return cls._uipc_warp
         try:
@@ -910,23 +892,17 @@ class SolverIPC(SolverBase, CouplingInterface):
         except ImportError as e:
             raise ImportError(f"SolverIPC requires the libuipc-warp package: {_UIPC_WARP_INSTALL}") from e
         version = getattr(uipc_warp, "__version__", "0")
-        minor = ".".join(map(str, _UIPC_WARP_MINIMUM[:2]))
-        taken = f"{'.'.join(map(str, _UIPC_WARP_MINIMUM))} or a later {minor} release"
-        if _release(version) < _UIPC_WARP_MINIMUM:
+        minor = _UIPC_WARP_MINIMUM.rsplit(".", 1)[0]
+        taken = f"{_UIPC_WARP_MINIMUM} or a later {minor} release"
+        if _version_key(version) < _version_key(_UIPC_WARP_MINIMUM):
             raise ImportError(
                 f"SolverIPC requires libuipc-warp {taken}, and the installed one is {version}: {_UIPC_WARP_INSTALL}"
             )
-        if _release(version) >= _UIPC_WARP_BELOW:
+        if _version_key(version) >= _version_key(_UIPC_WARP_BELOW):
             raise ImportError(
                 f"SolverIPC requires libuipc-warp {taken}, and the installed one is {version}. A 0.x minor release of "
                 f"libuipc-warp may change the interface SolverIPC calls, so SolverIPC takes {minor} releases only, the "
                 f"ones it is tested with. Install one: {_UIPC_WARP_INSTALL}"
-            )
-        missing = [name for name, present in _capabilities(uipc_warp).items() if not present]
-        if missing:
-            raise ImportError(
-                f"SolverIPC requires libuipc-warp {taken} with {', '.join(_capabilities(uipc_warp))}; "
-                f"the installed one ({version}) lacks {', '.join(missing)}: {_UIPC_WARP_INSTALL}"
             )
         # write_frame_status writes libuipc-warp's FrameStatusFlags into the status arrays: every StatusBits bit must be
         # one of them under its name (but the CCD bit, which libuipc-warp names after the time of impact); a bit that

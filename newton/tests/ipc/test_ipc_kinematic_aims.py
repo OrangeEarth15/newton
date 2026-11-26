@@ -5,7 +5,6 @@
 
 import unittest
 import warnings
-from unittest import mock
 
 import numpy as np
 import warp as wp
@@ -541,25 +540,6 @@ def test_jump_through_a_surface_fails_the_step(test, device):
     test.assertLess(gaps[-1], 0.011)  # on the platform, within d_hat
 
 
-def test_import_requires_the_kinematic_sweep(test, device):
-    """Refuse to import a libuipc-warp build without ``EngineOptions(sweep_kinematic=)``, naming it.
-
-    The sweep of the jumps is libuipc-warp's (``EngineOptions(sweep_kinematic=)``), a capability that a development
-    build of the release SolverIPC asks for may lack.
-    """
-    import uipc_warp  # noqa: PLC0415
-
-    imported = newton.solvers.SolverIPC._uipc_warp
-    without = tuple(name for name in uipc_warp.EngineOptions.names() if name != "sweep_kinematic")
-    try:
-        newton.solvers.SolverIPC._uipc_warp = None
-        with mock.patch.object(uipc_warp.EngineOptions, "names", return_value=without):
-            with test.assertRaisesRegex(ImportError, r"lacks EngineOptions\(sweep_kinematic=\)"):
-                newton.solvers.SolverIPC._import_uipc_warp()
-    finally:
-        newton.solvers.SolverIPC._uipc_warp = imported
-
-
 def test_model_without_contact_asks_for_no_sweep(test, device):
     """Ask libuipc-warp for the kinematic sweep only where the engine has a contact surface.
 
@@ -743,7 +723,6 @@ for name, func in (
     ("test_rekinematic_body_drops_its_twist", test_rekinematic_body_drops_its_twist),
     ("test_al_ipc_takes_aims_without_aiming_bodies", test_al_ipc_takes_aims_without_aiming_bodies),
     ("test_jump_through_a_surface_fails_the_step", test_jump_through_a_surface_fails_the_step),
-    ("test_import_requires_the_kinematic_sweep", test_import_requires_the_kinematic_sweep),
     ("test_model_without_contact_asks_for_no_sweep", test_model_without_contact_asks_for_no_sweep),
     ("test_refused_first_step_takes_state_in_again", test_refused_first_step_takes_state_in_again),
     ("test_aims_pass_the_twist_through", test_aims_pass_the_twist_through),

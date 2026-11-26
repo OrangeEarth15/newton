@@ -9,9 +9,7 @@ the end of the step, which the step's momentum balance gives independently: a bo
 for the torque. That is not the weight in the first steps of a pendulum (Newton's test_parent_force expects a rigid
 joint's): the records follow the momentum balance at every step and reach the weight once the body settles."""
 
-import builtins
 import unittest
-from unittest import mock
 
 import numpy as np
 import warp as wp
@@ -465,27 +463,6 @@ def test_imu_on_a_box_at_rest(test, device):
     np.testing.assert_allclose(imu.gyroscope.numpy()[0], 0.0, atol=1e-3)
 
 
-def test_parent_force_needs_element_forces(test, device):
-    """Refuse BODY_PARENT_F with an ImportError naming ``uipc_warp.ext.element_forces`` when it is missing.
-
-    A libuipc-warp without ``uipc_warp.ext.element_forces`` still takes BODY_QDD.
-    """
-    model = _pendulum(device)
-    solver = newton.solvers.SolverIPC(model)
-    solver.observables(kinds={_KIND.BODY_QDD})
-    real = builtins.__import__
-
-    def without(name, *args, **kwargs):
-        if name.startswith("uipc_warp.ext.element_forces"):
-            raise ImportError(name)
-        return real(name, *args, **kwargs)
-
-    with mock.patch.object(builtins, "__import__", side_effect=without):
-        with test.assertRaisesRegex(ImportError, "uipc_warp.ext.element_forces"):
-            solver.observables(kinds={_KIND.BODY_PARENT_F})
-    test.assertIsNone(solver._body_observables.parents)
-
-
 @requires("uipc_warp")
 class TestSolverIPCObservables(unittest.TestCase):
     """BODY_PARENT_F and BODY_QDD: the wrench of every body's parent joint and the bodies' accelerations."""
@@ -503,7 +480,6 @@ for name, func in (
     ("test_body_observables_of_independent_worlds", test_body_observables_of_independent_worlds),
     ("test_body_qdd_of_a_free_body", test_body_qdd_of_a_free_body),
     ("test_imu_on_a_box_at_rest", test_imu_on_a_box_at_rest),
-    ("test_parent_force_needs_element_forces", test_parent_force_needs_element_forces),
 ):
     add_function_test(TestSolverIPCObservables, name, func, devices=devices)
 
