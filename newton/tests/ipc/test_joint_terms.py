@@ -495,14 +495,23 @@ def test_refusals(test, device):
     joints = [builder.add_joint_d6(-1, body, linear_axes=axes) for body in (reference, follower)]
     builder.add_articulation(joints)
     builder.set_joint_mimic(joints[1], joints[0], coeffs=(0.1, -1.5))
-    message = _refusal(test, builder.finalize(device=device))
-    test.assertIn("the follower of the mimic joint 1 is the D6 joint 1", message)
+    test.assertEqual(
+        _refusal(test, builder.finalize(device=device)),
+        "SolverIPC: the follower of the mimic joint 1 is the D6 joint 1, which has more or other coordinates than one "
+        "angle or one distance; mimic revolute and prismatic joints (or D6 joints of one axis). SolverIPC holds a mimic "
+        "relation of one coordinate.",
+    )
 
     builder = newton.ModelBuilder()
     body = builder.add_body()
     builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
     builder.joint_friction[builder.joint_qd_start[-1] + 3] = 0.5
-    test.assertIn("DOF 3 of the FREE joint 0 has joint_friction 0.5", _refusal(test, builder.finalize(device=device)))
+    test.assertEqual(
+        _refusal(test, builder.finalize(device=device)),
+        "SolverIPC: DOF 3 of the FREE joint 0 has joint_friction 0.5; set it to 0. SolverIPC holds the friction of "
+        "revolute, prismatic, ball and universal joints only, as a force on one coordinate or a torque about each axis "
+        "of a ball joint or each angle of a universal joint.",
+    )
 
 
 @requires("uipc_warp")

@@ -340,12 +340,25 @@ def test_refusals(test, device):
     message = refused(
         lambda b, link: b.add_joint_d6(-1, link, angular_axes=[D(axis=(1.0, 0.0, 0.0)), D(axis=(1.0, 1.0, 0.0))])
     )
-    test.assertIn("the angular axes of the D6 joint 0 are not orthonormal; make them orthonormal.", message)
+    test.assertEqual(
+        message,
+        "SolverIPC: the angular axes of the D6 joint 0 are not orthonormal; make them orthonormal. Newton's "
+        "coordinates of a universal joint assume they are.",
+    )
     message = refused(lambda b, link: b.add_joint_d6(-1, link, linear_axes=[D(axis=newton.Axis.X)],
                                                      angular_axes=[D(axis=newton.Axis.X)]))  # fmt: skip
-    test.assertIn("the D6 joint 0 has 1 linear and 1 angular axes; give it no axis, one axis, two or three", message)
+    test.assertEqual(
+        message,
+        "SolverIPC: the D6 joint 0 has 1 linear and 1 angular axes; give it no axis, one axis, two or three angular "
+        "axes, or three linear and three angular axes. Its axes lock 2 translations and 2 rotations, which no joint of "
+        "SolverIPC locks.",
+    )
     message = refused(lambda b, link: b.add_joint_distance(-1, link, min_distance=0.6, max_distance=0.4))
-    test.assertIn("bounds its distance to [0.6000000238418579, 0.4000000059604645], the lower bound above", message)
+    test.assertEqual(
+        message,
+        "SolverIPC: the DISTANCE joint 0 bounds its distance to [0.6000000238418579, 0.4000000059604645], the lower "
+        "bound above the upper; make the lower bound at most the upper, or negative for none.",
+    )
 
 
 @requires("uipc_warp")

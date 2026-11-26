@@ -30,9 +30,13 @@ import newton
 from newton.tests.ipc._fixtures import (
     _TIGHT_ROTATIONS,
     _TINY_LISTS,
+    _assert_refused,
     _box_body,
     _drive_recurrence,
     _drive_recurrence_bdf2,
+    _model_of,
+    _with_d6,
+    _with_free,
 )
 from newton.tests.ipc.test_observables import _momentum_balance
 from newton.tests.ipc.test_observables import _steps as _observed_steps
@@ -469,12 +473,49 @@ def test_refusals(test, device):
             with test.assertRaises(NotImplementedError) as caught:
                 newton.solvers.SolverIPC(model)
             test.assertIn(message, str(caught.exception))
-    builder = newton.ModelBuilder()
-    body = builder.add_body(xform=wp.transform((0.0, 0.0, 1.0), wp.quat_identity()))
-    builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
-    builder.joint_armature[3] = 0.5
-    with test.assertRaisesRegex(NotImplementedError, "armature of revolute, prismatic, ball and universal joints only"):
-        newton.solvers.SolverIPC(builder.finalize(device=device))
+    drive = (
+        "set the gains, stiffness and damping to 0 and the target mode to NONE, and apply forces through "
+        "Control.joint_f, which acts on every joint. SolverIPC drives, springs and damps revolute, prismatic, ball and "
+        "universal joints only"
+    )
+    d6_ball = (
+        "SolverIPC takes the drives, springs, damping, armature and friction of a BALL joint, on the rotation vector of "
+        "its rotation, and those of no D6 joint of three angular axes, whose coordinates are angles about its axes"
+    )
+    for name, content, message in (
+        (
+            "free armature",
+            _with_free(5, armature=0.5),
+            "SolverIPC: DOF 5 of the FREE joint 0 has joint_armature 0.5; set it to 0. SolverIPC takes the armature of "
+            "revolute, prismatic, ball and universal joints only; that of a free joint, a mass without weight and an "
+            "inertia, has no term.",
+        ),
+        (
+            "free drive",
+            _with_free(0, target_ke=10.0),
+            "SolverIPC: DOF 0 of the FREE joint 0 has target_ke 10.0, target_kd 0.0, stiffness 0.0 and damping 0.0; "
+            f"{drive}.",
+        ),
+        (
+            "free target mode",
+            _with_free(2, target_mode=int(newton.JointTargetMode.POSITION)),
+            f"SolverIPC: DOF 2 of the FREE joint 0 has the target mode POSITION; {drive}.",
+        ),
+        (
+            "D6 damping",
+            _with_d6("", "XYZ", 1, damping=2.0),
+            "SolverIPC: DOF 1 of the D6 joint 0 has target_ke 0.0, target_kd 0.0, stiffness 0.0 and damping 2.0; set "
+            f"the gains, stiffness and damping to 0 and the target mode to NONE. {d6_ball}.",
+        ),
+        (
+            "D6 limits",
+            _with_d6("", "XYZ", 0, limit_lower=-0.5, limit_upper=0.5, limit_ke=100.0),
+            "SolverIPC: DOF 0 of the D6 joint 0 has the limits [-0.5, 0.5] with limit_ke 100.0; set limit_ke to 0, or "
+            "the bounds to -MAXVAL and MAXVAL. libuipc limits revolute and prismatic joints only.",
+        ),
+    ):
+        with test.subTest(name):
+            _assert_refused(test, _model_of(device, content), message)
 
 
 @requires("uipc_warp")

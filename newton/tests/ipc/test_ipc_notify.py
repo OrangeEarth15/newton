@@ -5,13 +5,14 @@
 again: after the change the next steps equal those of a new solver on the changed model, from the same state, and
 leave those of the unchanged one (or the refusal is raised)."""
 
+import re
 import unittest
 
 import numpy as np
 import warp as wp
 
 import newton
-from newton.tests.ipc._fixtures import _box_body
+from newton.tests.ipc._fixtures import _box_body, _model_of, _with_attachment, _with_revolute, _with_spring
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 # converged steps, so that two solves of one step agree to rounding
@@ -272,6 +273,61 @@ def test_notify_checks_the_joints_again(test, device):
     solver.notify_model_changed(newton.ModelFlags.BODY_INERTIAL_PROPERTIES | newton.ModelFlags.SHAPE_PROPERTIES)
 
 
+def test_notify_checks_constraints_attachments_and_springs_again(test, device):
+    """Refuse at notify_model_changed the constraint, attachment and spring values that SolverIPC refuses when built.
+
+    CONSTRAINT_PROPERTIES checks the mimic constraints, then the attachments' damping before their stiffness;
+    JOINT_DOF_PROPERTIES checks the joints' degrees of freedom; MODEL_PROPERTIES with a new spring damping builds the
+    solve again, which refuses a negative one. Each refusal names the item, and a notification after the values are
+    valid again is taken."""
+    flags = newton.ModelFlags
+    model = _model_of(
+        device, _with_revolute(), _with_revolute(), _with_attachment(), _with_attachment(), _with_spring()
+    )
+    solver = newton.solvers.SolverIPC(model)
+
+    def refused(flag, message):
+        with test.assertRaisesRegex(NotImplementedError, f"^{re.escape(message)}$"):
+            solver.notify_model_changed(flag)
+
+    mimic = model.joint_mimic_joint.numpy()  # the two hinges, and the free joints of the attachments' bodies
+    mimic[2] = 0
+    model.joint_mimic_joint.assign(mimic)
+    refused(
+        flags.CONSTRAINT_PROPERTIES,
+        "SolverIPC: the follower of the mimic joint 2 is the FREE joint 2, which has more or other coordinates than "
+        "one angle or one distance; mimic revolute and prismatic joints (or D6 joints of one axis). SolverIPC holds a "
+        "mimic relation of one coordinate.",
+    )
+    mimic[2] = -1
+    model.joint_mimic_joint.assign(mimic)
+    model.attachment_particle_body_stiffness.assign(np.array([-1.0, 1.0e4], np.float32))
+    model.attachment_particle_body_damping.assign(np.array([0.0, -2.0], np.float32))
+    refused(
+        flags.CONSTRAINT_PROPERTIES, "SolverIPC: particle-body attachment 1 has damping -2.0; make it 0 or positive."
+    )
+    model.attachment_particle_body_damping.assign(np.array([0.0, 0.0], np.float32))
+    refused(
+        flags.CONSTRAINT_PROPERTIES,
+        "SolverIPC: particle-body attachment 0 has stiffness -1.0; make it 0 or positive, or infinite for a hard "
+        "attachment.",
+    )
+    model.attachment_particle_body_stiffness.assign(np.array([1.0e4, 1.0e4], np.float32))
+    solver.notify_model_changed(flags.CONSTRAINT_PROPERTIES)
+    friction = model.joint_friction.numpy()
+    friction[5] = 0.5  # the fourth degree of freedom of the free joint 2
+    model.joint_friction.assign(friction)
+    refused(
+        flags.JOINT_DOF_PROPERTIES,
+        "SolverIPC: DOF 5 of the FREE joint 2 has joint_friction 0.5; set it to 0. SolverIPC holds the friction of "
+        "revolute, prismatic, ball and universal joints only, as a force on one coordinate or a torque about each axis "
+        "of a ball joint or each angle of a universal joint.",
+    )
+    model.joint_friction.assign(np.zeros_like(friction))
+    model.spring_damping.assign(np.array([-0.5], np.float32))
+    refused(flags.MODEL_PROPERTIES, "SolverIPC: spring 0 has spring_damping -0.5; make it 0 or positive.")
+
+
 def _falling_box(device):
     """A free box 0.3 m above the ground, falling."""
     builder = newton.ModelBuilder()
@@ -374,6 +430,10 @@ for name, func in (
     ("test_notify_rebuilds_for_new_particles_and_springs", test_notify_rebuilds_for_new_particles_and_springs),
     ("test_notify_rebuilds_for_new_joints", test_notify_rebuilds_for_new_joints),
     ("test_notify_checks_the_joints_again", test_notify_checks_the_joints_again),
+    (
+        "test_notify_checks_constraints_attachments_and_springs_again",
+        test_notify_checks_constraints_attachments_and_springs_again,
+    ),
     ("test_notify_rebuilds_for_another_kinematic_set", test_notify_rebuilds_for_another_kinematic_set),
     ("test_notify_rebuilds_for_new_masses_of_aim_bodies", test_notify_rebuilds_for_new_masses_of_aim_bodies),
 ):

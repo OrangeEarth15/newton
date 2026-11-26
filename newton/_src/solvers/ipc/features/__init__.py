@@ -8,9 +8,7 @@ MuJoCo's spatial tendons (``tendons``), mimic joints, fixed tendons and joint fr
 joints and distance joints with a range (``universal``), the drives, springs, damping, armature, friction and limits of
 ball joints (``ball``), rod joints (``rods``), the surface velocity of a mesh (``surface_velocity``), contact damping
 (``contact_damping``) and the solver observables (``observables``). A module holds what SolverIPC does with its
-feature, and while SolverIPC has no term for it, the refusal of it: each refusal keeps its message, and fires at the
-point and in the order it fired before the modules held them, so that a model refused before is refused with the same
-message.
+feature, and what it refuses of it.
 
 The solver calls every module, in the order of ``FEATURES``, at these points; a module with nothing to do there does
 nothing:

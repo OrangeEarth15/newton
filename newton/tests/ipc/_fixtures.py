@@ -5,6 +5,8 @@
 
 import contextlib
 import inspect
+import re
+import warnings
 from unittest import mock
 
 import numpy as np
@@ -377,3 +379,179 @@ _TIGHT_ROTATIONS = {**_TIGHT, "newton_transrate_tol": 1.0e-6}
 # converged steps for proxies: a proxy's feedback is the force of the step's contact terms at its end, which the stiff
 # barrier makes as accurate as the Newton loop's convergence
 _CONVERGED = {"newton_velocity_tol": 1.0e-4, "linear_tol_rate": 1.0e-10, "semi_implicit": False}
+
+
+# Content for the refusal tests: each ``_with_*`` returns a function of the builder and an x position that adds one
+# item there; ``_model_of`` puts several side by side.
+def _model_of(device, *contents):
+    """A model of ``contents``, the k-th at x = 2k, in this order."""
+    builder = newton.ModelBuilder()
+    for k, content in enumerate(contents):
+        content(builder, 2.0 * k)
+    return builder.finalize(device=device)
+
+
+def _link(builder, x):
+    link = builder.add_link(xform=wp.transform((x, 0.0, 1.0), wp.quat_identity()))
+    builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1)
+    return link
+
+
+def _with_joint(add, offset=0, **dof):
+    """A link and the joint ``add(builder, link, x)`` from the world, in an articulation of its own; ``dof`` sets the
+    joint's arrays (``joint_<name>``) at its DOF ``offset``."""
+
+    def content(builder, x):
+        j = add(builder, _link(builder, x), x)
+        builder.add_articulation([j])
+        for name, value in dof.items():
+            getattr(builder, f"joint_{name}")[builder.joint_qd_start[j] + offset] = value
+
+    return content
+
+
+def _with_revolute(**dof):
+    return _with_joint(lambda b, link, x: b.add_joint_revolute(-1, link, axis=newton.Axis.Y), **dof)
+
+
+def _with_ball(offset=0, **dof):
+    def add(b, link, x):
+        return b.add_joint_ball(-1, link, parent_xform=wp.transform((x, 0.0, 1.2), wp.quat_identity()))
+
+    return _with_joint(add, offset, **dof)
+
+
+def _with_d6(linear, angular, offset=0, **dof):
+    """A D6 joint with a linear axis per entry of ``linear`` and an angular axis per entry of ``angular``."""
+    D = newton.ModelBuilder.JointDofConfig
+
+    def add(b, link, x):
+        return b.add_joint_d6(
+            -1, link, linear_axes=[D(axis=a) for a in linear], angular_axes=[D(axis=a) for a in angular]
+        )
+
+    return _with_joint(add, offset, **dof)
+
+
+def _with_distance(lower, upper):
+    def add(b, link, x):
+        return b.add_joint_distance(
+            -1, link, parent_xform=wp.transform((x, 0.0, 1.5), wp.quat_identity()), min_distance=lower,
+            max_distance=upper,
+        )  # fmt: skip
+
+    return _with_joint(add)
+
+
+def _with_rod():
+    """A rod joint whose first two axes ``add_joint_rod`` made are swapped afterwards: a layout SolverIPC refuses."""
+
+    def add(b, link, x):
+        j = b.add_joint_rod(-1, link)
+        s = b.joint_qd_start[j]
+        b.joint_axis[s], b.joint_axis[s + 1] = b.joint_axis[s + 1], b.joint_axis[s]
+        return j
+
+    return _with_joint(add)
+
+
+def _with_free(offset=0, **dof):
+    """A free body, whose free joint ``add_body`` adds; ``dof`` sets the joint's arrays at its DOF ``offset``."""
+
+    def content(builder, x):
+        _box_body(builder, (x, 0.0, 2.0), (0.1, 0.1, 0.1))
+        for name, value in dof.items():
+            getattr(builder, f"joint_{name}")[builder.joint_qd_start[-1] + offset] = value
+
+    return content
+
+
+def _with_tendon():
+    """One of Newton's own tendons between two links."""
+
+    def content(builder, x):
+        a, b = _link(builder, x), _link(builder, x + 0.3)
+        builder.add_tendon([newton.TendonGuide(body=a), newton.TendonGuide(body=b)])
+
+    return content
+
+
+def _with_muscle():
+    """A legacy muscle between two links."""
+
+    def content(builder, x):
+        a, b = _link(builder, x), _link(builder, x + 0.3)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", newton.NewtonDeprecationWarning)  # legacy muscles are deprecated
+            builder.add_muscle([a, b], [wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0)], 1.0, 0.5, 0.1, 1.0, 0.0)
+
+    return content
+
+
+def _with_vector_mimic():
+    """A mimic of two D6 joints of two linear axes each, which SolverIPC refuses (one coordinate per relation)."""
+
+    def content(builder, x):
+        a, b = _link(builder, x), _link(builder, x + 0.3)
+        axes = [newton.ModelBuilder.JointDofConfig(axis=a) for a in (newton.Axis.X, newton.Axis.Y)]
+        joints = [builder.add_joint_d6(-1, link, linear_axes=axes) for link in (a, b)]
+        builder.add_articulation(joints)
+        builder.set_joint_mimic(joints[1], joints[0])
+
+    return content
+
+
+def _with_equality():
+    """A body and a MuJoCo CONNECT row that holds it to the world, linked to no loop joint."""
+
+    def content(builder, x):
+        body = _box_body(builder, (x, 0.0, 1.0), (0.1, 0.1, 0.1))
+        builder.add_custom_values(
+            **{
+                "mujoco:equality_constraint_type": 0,
+                "mujoco:equality_constraint_objtype": 1,
+                "mujoco:equality_constraint_body1": body,
+                "mujoco:equality_constraint_body2": -1,
+                "mujoco:equality_constraint_anchor": wp.vec3(0.0, 0.0, 1.0),
+                "mujoco:equality_constraint_enabled": True,
+            }
+        )
+
+    return content
+
+
+def _with_spring(damping=0.0, rest=None):
+    """Two particles 0.5 m apart (of Newton's default radius, 0.1 m) and a spring between them."""
+
+    def content(builder, x):
+        first = len(builder.particle_q)
+        for k in range(2):
+            builder.add_particle(wp.vec3(x + 0.5 * k, 3.0, 1.0), wp.vec3(0.0, 0.0, 0.0), 1.0)
+        builder.add_spring(first, first + 1, 1.0e3, damping, 0.0)
+        if rest is not None:
+            builder.spring_rest_length[-1] = rest
+
+    return content
+
+
+def _with_attachment(damping=0.0, stiffness=None):
+    """A particle attached to a body above it."""
+
+    def content(builder, x):
+        builder.add_particle(wp.vec3(x, 3.0, 1.0), wp.vec3(0.0, 0.0, 0.0), 1.0)
+        body = _box_body(builder, (x, 3.0, 1.5), (0.1, 0.1, 0.1))
+        builder.add_attachment_particle_body(
+            len(builder.particle_q) - 1, body, body_point=(0.0, 0.0, -0.5), damping=max(damping, 0.0)
+        )
+        if stiffness is not None:  # which the builder refuses: set afterwards
+            builder.attachment_particle_body_stiffness[-1] = stiffness
+        if damping < 0.0:  # likewise
+            builder.attachment_particle_body_damping[-1] = damping
+
+    return content
+
+
+def _assert_refused(test, model, message, **options):
+    """Assert that building ``SolverIPC(model, **options)`` raises ``NotImplementedError`` with exactly ``message``."""
+    with test.assertRaisesRegex(NotImplementedError, f"^{re.escape(message)}$"):
+        newton.solvers.SolverIPC(model, **options)

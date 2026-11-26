@@ -19,7 +19,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.semi_implicit.kernels_particle import eval_triangle
-from newton.tests.ipc._fixtures import _TIGHT
+from newton.tests.ipc._fixtures import _TIGHT, _assert_refused, _model_of, _with_attachment
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 _DT = 0.01
@@ -274,6 +274,11 @@ def test_refusals(test, device):
     refused(entry("edge_rest_length", hinge, 0.0), f"SolverIPC: bending edge {hinge} has the damping edge_kd "
             "0.0010000000474974513 and the edge_rest_length 0.0; make the rest length positive, which the damping of "
             "a hinge scales with.")  # fmt: skip
+    _assert_refused(
+        test,
+        _model_of(device, _with_attachment(), _with_attachment(damping=-2.0)),
+        "SolverIPC: particle-body attachment 1 has damping -2.0; make it 0 or positive.",
+    )
 
 
 def test_drag_and_lift_as_semi_implicit(test, device):

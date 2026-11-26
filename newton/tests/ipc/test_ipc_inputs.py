@@ -15,7 +15,23 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.tests.ipc._fixtures import _box_body, _cloth
+from newton.tests.ipc._fixtures import (
+    _box_body,
+    _cloth,
+    _model_of,
+    _with_attachment,
+    _with_ball,
+    _with_d6,
+    _with_distance,
+    _with_equality,
+    _with_free,
+    _with_muscle,
+    _with_revolute,
+    _with_rod,
+    _with_spring,
+    _with_tendon,
+    _with_vector_mimic,
+)
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, patch_sys_module, requires
 
 
@@ -332,6 +348,122 @@ def test_rejects_unsupported_joints(test, device):
     ):
         with test.subTest(name):
             _rejects(test, builder, pattern, device)
+
+
+# (name, contents, options, the start of the message): models with two refused inputs, the one named first
+_REFUSAL_ORDER = (
+    ("tendons before muscles", (_with_muscle(), _with_tendon()), {}, "the model has 1 tendons of Newton's own"),
+    ("muscles before mimic constraints", (_with_vector_mimic(), _with_muscle()), {}, "the model has 1 muscles;"),
+    (
+        "mimic constraints before equality rows",
+        (_with_equality(), _with_vector_mimic()),
+        {},
+        "the follower of the mimic joint 2",
+    ),
+    (
+        "the lowest DOF of a category, a D6 joint's that becomes a ball joint",
+        (_with_d6("", "XYZ", 1, friction=0.25), _with_free(0, friction=0.5)),
+        {},
+        "DOF 1 of the D6 joint 0 has joint_friction 0.25;",
+    ),
+    (
+        "the lowest DOF of a category, a free joint's",
+        (_with_free(0, friction=0.5), _with_d6("", "XYZ", 1, friction=0.25)),
+        {},
+        "DOF 0 of the FREE joint 0 has joint_friction 0.5;",
+    ),
+    (
+        "friction before armature",
+        (_with_d6("", "XYZ", 0, armature=0.5), _with_free(3, friction=0.5)),
+        {},
+        "DOF 6 of the FREE joint 1 has joint_friction 0.5;",
+    ),
+    (
+        "a negative armature before the drives of free joints",
+        (_with_free(0, target_ke=10.0), _with_revolute(armature=-0.5)),
+        {},
+        "DOF 6 of the REVOLUTE joint 1 has joint_armature -0.5; make it 0 or positive.",
+    ),
+    (
+        "armature before limits",
+        (_with_ball(0, limit_lower=-0.5, limit_upper=0.5, limit_ke=100.0), _with_free(0, armature=0.5)),
+        {},
+        "DOF 3 of the FREE joint 1 has joint_armature 0.5; set it to 0.",
+    ),
+    (
+        "the drives of free joints before the effort limit",
+        (_with_revolute(target_ke=100.0, effort_limit=-5.0), _with_free(2, target_ke=10.0)),
+        {},
+        "DOF 3 of the FREE joint 1 has target_ke 10.0,",
+    ),
+    (
+        "the axes of a D6 joint before a later cylindrical one",
+        (_with_d6("", ("X", (1.0, 1.0, 0.0), "Z")), _with_d6("X", "X")),
+        {},
+        "the angular axes of the D6 joint 0 are not orthonormal;",
+    ),
+    (
+        "a cylindrical D6 joint before the axes of a later D6 joint",
+        (_with_d6("X", "X"), _with_d6("", ("X", (1.0, 1.0, 0.0), "Z"))),
+        {},
+        "the D6 joint 0 has 1 linear and 1 angular axes;",
+    ),
+    (
+        "D6 joints before distance joints",
+        (_with_distance(0.6, 0.4), _with_d6("X", "X")),
+        {},
+        "the D6 joint 1 has 1 linear and 1 angular axes;",
+    ),
+    (
+        "rod joints before D6 joints",
+        (_with_d6("X", "X"), _with_rod()),
+        {},
+        "the ROD joint 1 does not have three linear",
+    ),
+    (
+        "joints before springs",
+        (_with_spring(damping=0.5), _with_free(3, friction=0.5)),
+        {},
+        "DOF 3 of the FREE joint 0 has joint_friction 0.5;",
+    ),
+    (
+        "the damping of springs before their rest lengths",
+        (_with_spring(rest=-0.1), _with_spring(damping=-0.5)),
+        {},
+        "spring 1 has spring_damping -0.5;",
+    ),
+    (
+        "springs before attachments",
+        (_with_attachment(damping=2.0), _with_spring(rest=-0.1)),
+        {},
+        "spring 0 has spring_rest_length -0.10000000149011612;",
+    ),
+    (
+        "the damping of attachments before their stiffness",
+        (_with_attachment(stiffness=-1.0), _with_attachment(damping=-2.0)),
+        {},
+        "particle-body attachment 1 has damping -2.0;",
+    ),
+    ("the model before contact_damping", (_with_rod(),), {"contact_damping": -1.0}, "the ROD joint 0 does not have"),
+)
+
+
+def test_refuses_the_input_checked_first(test, device):
+    """Refuse a model with two unsupported inputs by the one checked first.
+
+    The checks run in a fixed order: Newton's tendons, muscles, mimic constraints, MuJoCo's equality rows, the joints,
+    springs, attachments, then the contact_damping option. Among the joints a rod joint comes before D6 joints and D6
+    joints before distance joints; the refusals of degrees of freedom go by category (friction, a negative armature,
+    the armature, drives and limits that only some joints take, the effort limit), each naming the lowest degree of
+    freedom whichever kind of joint it belongs to. A refused contact_damping comes after the choices of the other
+    options, such as an unknown integrator."""
+    for name, contents, options, start in _REFUSAL_ORDER:
+        with test.subTest(name):
+            with test.assertRaises(NotImplementedError) as caught:
+                newton.solvers.SolverIPC(_model_of(device, *contents), **options)
+            test.assertTrue(str(caught.exception).startswith(f"SolverIPC: {start}"), str(caught.exception))
+    with test.assertRaisesRegex(ValueError, "integrator must be one of"):
+        newton.solvers.SolverIPC(_model_of(device, _with_revolute()), integrator="bdf3", contact_damping=-1.0)
 
 
 def test_rejects_body_variants(test, device):
@@ -1448,6 +1580,7 @@ for name, func in (
     ("test_rejects_activations", test_rejects_activations),
     ("test_control_activations_refused_at_eager_steps", test_control_activations_refused_at_eager_steps),
     ("test_rejects_unsupported_joints", test_rejects_unsupported_joints),
+    ("test_refuses_the_input_checked_first", test_refuses_the_input_checked_first),
     ("test_rejects_body_variants", test_rejects_body_variants),
     ("test_rejects_invalid_arguments", test_rejects_invalid_arguments),
     ("test_rejects_arguments_the_options_do_not_read", test_rejects_arguments_the_options_do_not_read),
