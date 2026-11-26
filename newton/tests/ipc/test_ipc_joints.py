@@ -21,8 +21,8 @@ def test_unplaced_links_start_at_forward_kinematics(test, device):
     model holds both at the origin, through the ground plane, and the forward kinematics written into the state only
     after the solver is built. The solver is built at the poses newton.eval_fk computes from the model's joint
     coordinates, and steps captured from that state run as those of a solver built from a model that holds the poses. A
-    link that the joint coordinates put into the ground is refused by name: by the first step from that state, and when
-    the first step is captured, by the capture, from the model's state.
+    link that the joint coordinates put into the ground fails the first step from that state before it runs, by name:
+    an eager step raises, and a captured one reports it through check_status.
     """
 
     def pendulum(height=5.0, angle=0.0, posed=False):
@@ -73,17 +73,20 @@ def test_unplaced_links_start_at_forward_kinematics(test, device):
     test.assertLess(float(swung[1, 2]), 5.0 - 1e-3)  # the pendulum swings down
     np.testing.assert_allclose(swung, reference, atol=1e-6)
     # turned down from a pivot 3 m up, the outer link reaches 1 m into the ground: the caller places such links, so the
-    # first step refuses the start it takes from them, by name, and a captured first step the model's
+    # first step's device check refuses the start it takes from them, by name, captured or not
     low = pendulum(height=3.0, angle=0.5 * np.pi)
     state = low.state()
     newton.eval_fk(low, low.joint_q, low.joint_qd, state)
-    pattern = "body 1 \\('link_1'\\) and plane shape 2 start .* in the {}"
-    with test.assertRaisesRegex(ValueError, pattern.format("state of the first step")):
+    pattern = r"before it ran: the state the step took from state_in puts body 1 \('link_1'\) and plane shape 2 "
+    with test.assertRaisesRegex(RuntimeError, "failed on THICKNESS_VIOLATED " + pattern):
         newton.solvers.SolverIPC(low).step(state, low.state(), None, None, 0.001)
     solver = newton.solvers.SolverIPC(low)
-    with test.assertRaisesRegex(ValueError, pattern.format("model's state.*The first step is captured")):
-        with wp.ScopedCapture(device=device):
-            solver.step(state, low.state(), None, None, 0.001)
+    observables = solver.observables({solver.ObservableKind.STATUS})
+    with wp.ScopedCapture(device=device) as capture:
+        solver.step(state, low.state(), None, None, 0.001, observables=observables)
+    wp.capture_launch(capture.graph)
+    with test.assertRaisesRegex(RuntimeError, "The last step failed " + pattern):
+        solver.check_status(observables)
 
 
 def test_pendulum_is_implicit_euler(test, device):

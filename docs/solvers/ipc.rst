@@ -400,11 +400,9 @@ compressed and pushes the surfaces apart in the first steps.
 The start is the state the first step takes. Where the model holds it, the
 solver checks it when it is built. The pose of a kinematic body, and that of a
 link the model leaves at the identity, are the caller's, written before the
-first step: the pairs with such a body are checked by the first step, on its
-``state_in``, before anything runs. A first step captured in a graph cannot read
-its ``state_in`` on the host: it raises when such a pair fails in the model's
-state, and otherwise its start is checked on the device, as every state written
-between steps is (below).
+first step: the first step checks the pairs with such a body on the device, on
+its ``state_in``, captured or not, as it checks every state written between
+steps (below).
 
 The thickness of a pair is the sum of its two sides' (see :ref:`ipc-contact`).
 Surfaces that never move may touch or cross, and pairs that do not collide may

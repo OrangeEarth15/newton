@@ -826,13 +826,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._carried = []
         # integrator="bdf2": the gravity of the steps and of the step before, on the device (_build_engine)
         self._gravity_now = self._gravity_last = None
-        # the failure, in the model's state, of the start of a pair with a body whose start the caller writes, which
-        # a captured first step raises (_check_start)
-        self._start_pending = None
         self._build_engine()
-        _check_start(self)
-        # the first step checks again the start of the pairs with a body whose start the caller writes
-        self._start_unchecked = self._engine is not None and bool(self._posed_body.any())
+        _check_start(self)  # the first step checks the bodies whose start the caller writes, on the device
 
     @property
     def supported_observables(self) -> frozenset[str]:
@@ -1291,8 +1286,6 @@ class SolverIPC(SolverBase, CouplingInterface):
         if self._engine is None:
             _write_contacts(self, observables, None)  # no particles and no bodies: no contact
             return
-        if self._start_unchecked and self.model.device.is_capturing:
-            self._start_in_capture()  # before anything is captured
         if self._restarts:  # an entry of a coupler that restarts its steps (docs/solvers/ipc.rst > "Coupling")
             if self._restore_pending:
                 self._restore_step()
@@ -1306,18 +1299,6 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._dt, self._control, self._observables = dt, control, observables
         self._report_clamp(dt)
         self._load(state_in)
-        if self._start_unchecked:
-            # the first step, not captured: the start of the pairs with a body whose start the caller writes, on the
-            # state just loaded from state_in, before anything runs from it (_check_start)
-            try:
-                _check_start(self, "the state of the first step (its state_in)")
-            except ValueError:
-                if self.model.body_count:
-                    # nothing ran, and the next step is the first again: the kinematic bodies moving toward their
-                    # aims take its state_in too, not the poses this step loaded (_aim_kinematic_bodies held them)
-                    self._body_hold.zero_()
-                raise
-            self._start_unchecked = False
         wp.launch(_count_step, 1, outputs=[self._step_count], device=self.model.device)
         self._write_forces(state_in, control)
         _write_joint_controls(self, control, dt)
@@ -1353,19 +1334,6 @@ class SolverIPC(SolverBase, CouplingInterface):
         observables_module.write(self, observables, state_out)
         features.finish(self, state_out, observables)  # the feature modules' outputs of the step
         observables_module.finish(self, state_out, observables)  # BODY_PARENT_F and BODY_QDD
-
-    def _start_in_capture(self) -> None:
-        """The first step, captured in a graph: it cannot read its ``state_in``, so the pairs with a body whose start
-        the caller writes keep the test of the construction, on the model's state; raise its failure, if any, before
-        anything is captured (``_check_start``)."""
-        if self._start_pending is not None:
-            raise ValueError(
-                f"{self._start_pending} The first step is captured in a graph, which cannot read its state_in, so the "
-                "solver cannot check the start of kinematic bodies and of links that the model leaves at the identity "
-                "on it, as a first step outside capture does. Take the first step outside graph capture, or put the "
-                "start poses into model.body_q before building the solver."
-            )
-        self._start_unchecked = False
 
     def _control_of_model(self) -> Control:
         """The control of a step given none: the model's own control inputs, ``model.control(clone_variables=False)``

@@ -3,10 +3,11 @@
 
 """SolverIPC's check of the start: surfaces that cross or start at or inside their contact thickness.
 
-As libuipc's sanity check does at init, ``_check_start`` tests the state the first step takes, part pair by part pair
-with libuipc-warp's ``SurfaceChecker``, and names the closest pair. The positions a later step takes from its
-``state_in`` without a sweep are checked on the device by libuipc-warp's ``StartCheck``, which the solver gives its
-engine (``SolverIPC._make_engine``); ``_written_failure`` says why such a step failed.
+As libuipc's sanity check does at init, ``_check_start`` tests the model's state when the solver is built, part pair
+by part pair with libuipc-warp's ``SurfaceChecker``, and names the closest pair. The positions a step takes from its
+``state_in`` without a sweep, those of the first step among them, are checked on the device by libuipc-warp's
+``StartCheck``, which the solver gives its engine (``SolverIPC._make_engine``); ``_written_failure`` says why such a
+step failed.
 """
 
 from __future__ import annotations
@@ -28,8 +29,8 @@ if TYPE_CHECKING:
 _START_CHECK_PAIRS = 2**31 - 1
 
 
-def _check_start(solver: SolverIPC, state: str | None = None) -> None:
-    """Raise ``ValueError`` when the surfaces of different bodies cross each other at the start, or start at or
+def _check_start(solver: SolverIPC) -> None:
+    """Raise ``ValueError`` when the surfaces of different bodies cross each other in the model's state, or start at or
     inside their contact thickness.
 
     The barrier needs surfaces that start apart, by more than their contact thickness. A step fails on a contact
@@ -53,20 +54,14 @@ def _check_start(solver: SolverIPC, state: str | None = None) -> None:
     nearly coplanar triangles of a flat sheet from crossing ones). A pair of parts of more than
     ``_START_CHECK_PAIRS`` primitive pairs is skipped with a warning.
 
-    The start is the state the first step takes (:ref:`ipc-state`). At construction (``state`` None) the engine holds
-    the model's state, and a pair that fails there raises, unless one of its bodies is one whose start the caller writes
-    into the state (``_posed_body``: a kinematic body, and a link that the model leaves at the identity where forward
-    kinematics puts it elsewhere). The failure of such a pair is kept (``_start_pending``), and the first step tests the
-    pairs with such a body again: a first step that is not captured on the engine's positions it has just loaded from
-    its ``state_in``, a captured one, which cannot read its ``state_in``, by raising the kept failure
-    (``_start_in_capture``). With ``state``, the name of the state the engine holds in the message, only the pairs with
-    such a body are tested, on the engine's positions as they stand, and a failure raises: the test holds for the state
-    of any step loaded into the engine (it synchronizes).
+    The engine holds the model's state. The pairs with a body whose start the caller writes into the state
+    (``_posed_body``: a kinematic body, and a link that the model leaves at the identity where forward kinematics puts
+    it elsewhere) are not tested here: the first step takes every body's pose from its ``state_in`` and checks them on
+    the device, captured or not, as it checks every state written between steps (:ref:`ipc-start`).
     """
     eng = solver._engine
     if eng is None:
         return
-    posed_only = state is not None
     layout = solver._scene.layout()
     still = np.zeros(layout.n, bool)  # vertices that the solve never moves
     still[: layout.n_fem] = solver._fixed_particle
@@ -103,21 +98,16 @@ def _check_start(solver: SolverIPC, state: str | None = None) -> None:
     ids_group, ids_element, ids_subscene = ids // (n_el * n_sub), ids // n_sub % n_el, ids % n_sub
     posed = np.zeros(len(ids), bool)  # the parts of the bodies whose start the caller writes
     np.logical_or.at(posed, point_group, posed_vertex[points])
-    if posed_only and not posed.any():
-        return
     # Newton's positions are float32: surfaces placed in touching contact come out up to a few float32 steps
     # apart, which the barrier would take as a valid, nearly singular start. Such a gap counts as contact.
     slack = 4.0 * float(np.spacing(np.float32(np.abs(x[points]).max())))
-    # (crossings, gap, distance, pair thickness, part, the half plane (as -1 - plane) or part, the pair's vertices,
-    # whether a body of the pair is one whose start the caller writes)
+    # (crossings, gap, distance, pair thickness, part, the half plane (as -1 - plane) or part, the pair's vertices)
     violations = []
 
     # contact points against half planes, each moved out by its shape's margin: the distance from the plane's own
-    # surface and the margin's share of the pair's thickness (with state, the points of posed bodies alone)
+    # surface and the margin's share of the pair's thickness (the points of posed bodies left to the first step)
     P, N, plane_shapes = solver._planes
-    moves = ~still[points]
-    if posed_only:
-        moves &= posed[point_group]
+    moves = ~still[points] & ~posed[point_group]
     if moves.any() and len(P):
         moving = points[moves]
         margin = solver.model.shape_margin.numpy().astype(np.float64)[plane_shapes]
@@ -132,7 +122,7 @@ def _check_start(solver: SolverIPC, state: str | None = None) -> None:
             for g in np.unique(owner[hit]):
                 k = hit[owner[hit] == g]
                 k = k[np.argmin(gap[k, j])]
-                violations.append((0, gap[k, j], d[k, j], t[k, j], g, -1 - j, (int(moving[k]),), posed[g]))
+                violations.append((0, gap[k, j], d[k, j], t[k, j], g, -1 - j, (int(moving[k]),)))
 
     # triangle meshes and particles, one pair of parts at a time
     lo = np.full((len(ids), 3), np.inf)
@@ -167,16 +157,16 @@ def _check_start(solver: SolverIPC, state: str | None = None) -> None:
     )
     pairs = np.concatenate([pairs, np.stack([lone_parts, lone_parts], axis=1)])
     # not tested: two parts that never move, the inside of a body, two parts whose elements do not collide or
-    # whose subscenes do not interact (worlds that overlap in space); with state, pairs without a posed body
+    # whose subscenes do not interact (worlds that overlap in space), and pairs with a posed body (the first step's)
     a, b = pairs[:, 0], pairs[:, 1]
     keep = (
         ~(all_still[a] & all_still[b])
         & ~((a != b) & (ids_group[a] == ids_group[b]))
         & enabled[ids_element[a], ids_element[b]]
         & subscenes[ids_subscene[a], ids_subscene[b]]
+        & ~posed[a]
+        & ~posed[b]
     )
-    if posed_only:
-        keep &= posed[a] | posed[b]
     pairs = pairs[keep]
     device = solver.model.device
     arrays = (wp.array(body.astype(np.int32), device=device), wp.array(thickness, dtype=wp.float64, device=device))
@@ -193,9 +183,7 @@ def _check_start(solver: SolverIPC, state: str | None = None) -> None:
             continue
         found, gap = result
         if found or gap.gap <= slack:
-            violations.append((found, gap.gap, gap.distance, gap.thickness, a, b, gap.vertices, posed[a] | posed[b]))
-    if not posed_only:
-        solver._start_pending = None
+            violations.append((found, gap.gap, gap.distance, gap.thickness, a, b, gap.vertices))
     if not violations:
         return
     lone_set = set(lone.tolist())
@@ -208,10 +196,9 @@ def _check_start(solver: SolverIPC, state: str | None = None) -> None:
                 return f"particle {v}", v
         return _describe_group(solver, group, points, ids_group[part]), None
 
-    def failure(violations: list, state: str | None = None) -> str:
-        """Why the start fails: the pair that crosses most, or else the closest pair, and how many more fail;
-        ``state``: where (None: the model's state, said for crossings only, as the construction always said)."""
-        found, _, distance, t, a, b, vertices, _ = min(violations, key=lambda v: (-v[0], v[1]))
+    def failure(violations: list) -> str:
+        """Why the start fails: the pair that crosses most, or else the closest pair, and how many more fail."""
+        found, _, distance, t, a, b, vertices = min(violations, key=lambda v: (-v[0], v[1]))
         n = len(violations) - 1
         more = f" ({n} more pair{'s' if n > 1 else ''} of bodies {'do' if n > 1 else 'does'} too)" if n else ""
         one, particle = describe(a, vertices)
@@ -219,30 +206,20 @@ def _check_start(solver: SolverIPC, state: str | None = None) -> None:
             f"plane shape {plane_shapes[-1 - b]}" if b < 0 else describe(b, vertices, particle if a == b else None)[0]
         )
         if found:
-            where = state or "the model's state"
             return (
-                f"SolverIPC: the surfaces of {one} and {other} intersect in {where}: {found} edges of one cross "
-                f"triangles of the other{more}. The barrier needs surfaces that start apart, by more than their "
+                f"SolverIPC: the surfaces of {one} and {other} intersect in the model's state: {found} edges of one "
+                f"cross triangles of the other{more}. The barrier needs surfaces that start apart, by more than their "
                 "contact thickness; a step would keep them crossed."
             )
         need = f" by more than {t - distance:.6g} m" if t - distance > 0.0 else ""
         fix = f"lift {one} off it{need}" if b < 0 else f"move them apart{need}, for example by lifting the upper one"
         rounding = ", up to the rounding of float32 positions" if distance > t else ""
-        at = f" in {state}" if state else ""
         return (
             f"SolverIPC: {one} and {other} start {distance:.6g} m apart, at or inside their contact thickness "
-            f"({t:.6g} m{rounding}){more}{at}. The barrier needs a gap larger than the thickness at the start: "
-            f"{fix}."
+            f"({t:.6g} m{rounding}){more}. The barrier needs a gap larger than the thickness at the start: {fix}."
         )
 
-    if posed_only:
-        raise ValueError(failure(violations, state))
-    now = [v for v in violations if not v[-1]]
-    if now:
-        raise ValueError(failure(now))
-    # only pairs with a body whose start the caller writes fail, in the model's state: the first step tests them
-    # on its state_in, or raises this when it is captured
-    solver._start_pending = failure(violations, "the model's state")
+    raise ValueError(failure(violations))
 
 
 def _near_parts(solver: SolverIPC, lo: np.ndarray, hi: np.ndarray, reach: np.ndarray, slack: float, sub: np.ndarray):

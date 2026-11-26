@@ -604,11 +604,15 @@ def test_refused_first_step_takes_state_in_again(test, device):
     q = through.body_q.numpy()
     q[pusher, 0] = 0.05
     through.body_q.assign(q)
-    with test.assertRaisesRegex(ValueError, r"body 0 and body 1\b.*intersect in the state of the first step"):
+    with test.assertRaisesRegex(
+        RuntimeError,
+        r"before it ran: the state the step took from state_in puts the surfaces of body [01] and body [01] ",
+    ):
         solver.step(through, model.state(), None, None, 0.01)
+    frames = solver._engine.frames
     s1 = model.state()
     solver.step(model.state(), s1, None, None, 0.01)
-    test.assertEqual(solver._engine.frames, 1)
+    test.assertEqual(solver._engine.frames, frames + 1)
     np.testing.assert_allclose(s1.body_q.numpy()[pusher, :3], [1.0, 0.0, 1.0], rtol=0.0, atol=1e-6)
 
 

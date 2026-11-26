@@ -1097,7 +1097,8 @@ def _add_shapes_and_bodies(
     # which move toward their aims
     solver._body_meshed = np.array([bool(meshes[b]) for b in range(model.body_count)], bool)
     solver._aim_bodies = _aiming_bodies(solver, mass)
-    # the bodies whose start the caller writes into the state, which the first step checks (_check_start)
+    # the bodies whose start the caller writes into the state, which the construction's check leaves to the first
+    # step's device check (_check_start)
     solver._posed_body = np.zeros(model.body_count, bool)
     if model.body_count == 0:
         return mass, first, second

@@ -841,9 +841,9 @@ def test_start_of_posed_bodies_is_checked_on_the_first_step(test, device):
     The caller writes a kinematic body's pose. Newton's kinematic-root pendulum, whose probe sphere crosses the root's
     box in the model and is 0.43 m clear of it once the caller turns the root to -1 rad for the first step, runs, and
     the turning box pushes the probe without crossing it. A kinematic box that the first step's state_in puts through a
-    body is refused by that step, by name, before it runs. One that crosses the body in the model is refused also when
-    the first step is captured, which cannot read its state_in: the capture raises before anything is captured, and a
-    first step outside capture from a clear state then runs, and the steps captured after it.
+    body fails that step before it runs, by name, and the first step again from a clear state runs. One that crosses the
+    body in the model is not refused when the solver is built: the first step from the model's state fails, and a first
+    step from a clear state then runs, and the steps captured after it.
     """
 
     def clearance(q):
@@ -898,26 +898,63 @@ def test_start_of_posed_bodies_is_checked_on_the_first_step(test, device):
     # clear in the model, through the body in the first step's state_in
     model, kinematic = boxes(1.0)
     solver = newton.solvers.SolverIPC(model)
-    with test.assertRaisesRegex(ValueError, r"body 0 and body 1 \('pusher'\) intersect in the state of the first step"):
+    through = r"failed on THICKNESS_VIOLATED before it ran: .* puts the surfaces of body [01]{} and body [01]{} through"
+    pusher = r"( \('pusher'\))?"
+    with test.assertRaisesRegex(RuntimeError, through.format(pusher, pusher)):
         solver.step(placed(model, kinematic, 0.05), model.state(), None, None, 0.01)
-    test.assertEqual(solver._engine.frames, 0)
-    solver.step(model.state(), model.state(), None, None, 0.01)  # the first step again, from the model's clear state
-    test.assertEqual(solver._engine.frames, 1)
+    s1 = model.state()
+    solver.step(model.state(), s1, None, None, 0.01)  # the first step again, from the model's clear state
+    np.testing.assert_allclose(s1.body_q.numpy()[kinematic, :3], [1.0, 0.0, 1.0], rtol=0.0, atol=1e-6)
     # through the body in the model: not refused at construction, since the caller writes the pusher's pose
     model, kinematic = boxes(0.05)
     solver = newton.solvers.SolverIPC(model)
     s0, s1 = placed(model, kinematic, 1.0), model.state()
-    with test.assertRaisesRegex(ValueError, r"intersect in the model's state.*The first step is captured"):
-        with wp.ScopedCapture(device=device):
-            solver.step(s0, s1, None, None, 0.01)
-    test.assertEqual(solver._engine.frames, 0)
-    with test.assertRaisesRegex(ValueError, r"intersect in the state of the first step"):
+    with test.assertRaisesRegex(RuntimeError, through.format(pusher, pusher)):
         solver.step(model.state(), s1, None, None, 0.01)
+    frames = solver._engine.frames
     solver.step(s0, s1, None, None, 0.01)
     with wp.ScopedCapture(device=device) as capture:
         solver.step(s1, s0, None, None, 0.01)
     wp.capture_launch(capture.graph)
-    test.assertEqual(solver._engine.frames, 2)
+    test.assertEqual(solver._engine.frames, frames + 2)
+
+
+def test_captured_first_step_checks_posed_bodies_on_the_device(test, device):
+    """Check a kinematic body's start in a captured first step on the pose the step takes from state_in.
+
+    A kinematic box crosses a body in model.body_q. Written clear of it into state_0, the captured first step takes it
+    there and reports no failure, the box at its written pose. Written through the body, the replayed step fails before
+    it runs, and check_status raises, naming the two bodies. A check of the model's state, the one state of the first
+    step that the host can read while it captures, would refuse both.
+    """
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+    _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
+    pusher = builder.add_body(
+        xform=wp.transform(wp.vec3(0.05, 0.0, 1.0), wp.quat_identity()), is_kinematic=True, label="pusher"
+    )
+    builder.add_shape_box(pusher, hx=0.1, hy=0.1, hz=0.1)
+    model = builder.finalize(device=device)
+    for x in (1.0, 0.05):
+        solver = newton.solvers.SolverIPC(model)
+        observables = solver.observables({solver.ObservableKind.STATUS})
+        s0, s1 = model.state(), model.state()
+        q = s0.body_q.numpy()
+        q[pusher, 0] = x
+        s0.body_q.assign(q)
+        with wp.ScopedCapture(device=device) as capture:
+            solver.step(s0, s1, None, None, 0.01, observables=observables)
+        wp.capture_launch(capture.graph)
+        with test.subTest(x=x):
+            if x == 1.0:
+                test.assertFalse(solver.check_status(observables))
+                np.testing.assert_allclose(s1.body_q.numpy()[pusher, :3], [1.0, 0.0, 1.0], rtol=0.0, atol=1.0e-5)
+            else:
+                with test.assertRaisesRegex(
+                    RuntimeError,
+                    r"The last step failed before it ran: the state the step took from state_in puts the surfaces of "
+                    r"body [01]\b.* and body [01]\b.* through each other",
+                ):
+                    solver.check_status(observables)
 
 
 def _pendulum(worlds=1, gravity=-9.81):
@@ -1668,6 +1705,10 @@ for name, func in (
     (
         "test_start_of_posed_bodies_is_checked_on_the_first_step",
         test_start_of_posed_bodies_is_checked_on_the_first_step,
+    ),
+    (
+        "test_captured_first_step_checks_posed_bodies_on_the_device",
+        test_captured_first_step_checks_posed_bodies_on_the_device,
     ),
     ("test_state_written_between_steps_is_checked", test_state_written_between_steps_is_checked),
     ("test_written_state_is_checked_without_a_sweep", test_written_state_is_checked_without_a_sweep),
