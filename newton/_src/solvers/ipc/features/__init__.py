@@ -53,14 +53,15 @@ optional, and a module without it has nothing to do there:
   to build the solve again: returns whether the solve must be built again.
 - ``reset(solver, world_mask)``: in ``SolverIPC.reset`` once the solve is built, with its ``world_mask``, for a module
   that keeps a state across steps; on the device only, since a reset may be captured.
+- ``parent_terms(solver, engine)``: when ``BODY_PARENT_F`` reads the joints' terms of ``engine`` (``observables``): a
+  module whose element groups are terms of a joint returns them, as ``(group, the joint of every element)`` pairs
+  (-1 for an element of no joint).
 
 A module keeps what it needs from one hook to the next in its field of ``solver._features`` (``FeatureState``), which
 its ``build`` sets; nothing else of the module lives on the solver.
 
 The universal module is also offered the joints that ``joints._map_joints`` cannot map onto a libuipc joint
-(``universal.take_d6``, ``universal.take_distance``), and the rods module the rod joints (``rods.take_rods``). A module
-whose element groups are terms of a joint gives them to ``BODY_PARENT_F`` with ``parent_terms(solver, engine)``
-(``observables``).
+(``universal.take_d6``, ``universal.take_distance``), and the rods module the rod joints (``rods.take_rods``).
 """
 
 from __future__ import annotations
@@ -159,3 +160,9 @@ def reset(solver: SolverIPC, world_mask: wp.array | None) -> None:
     """The work of the modules that keep a state across steps in ``SolverIPC.reset(state, world_mask)``."""
     for hook in _hooks("reset"):
         hook(solver, world_mask)
+
+
+def parent_terms(solver: SolverIPC, engine) -> list:
+    """Every module's joint terms of ``engine`` for ``BODY_PARENT_F``, as ``(element group, the joint of every
+    element)`` pairs, in the order of ``FEATURES``."""
+    return [term for hook in _hooks("parent_terms") for term in hook(solver, engine)]

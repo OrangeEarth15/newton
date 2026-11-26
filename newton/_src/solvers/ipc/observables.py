@@ -30,9 +30,9 @@ solver applies to the body as a wrench (free and ball joints, the D6 joints that
 taken at the step's start as the step applies it. A body's parent joint is the joint of an articulation whose child it
 is (else the first joint whose child it is); a body that is no joint's child gets zero. The terms of the joint are the
 libuipc joint it maps onto (its penalty, drive and limit) or the stitch of a distance joint, and the terms another
-feature module adds for the joint: a module that has element groups of a joint's own gives them with
-``parent_terms(solver, engine)``, a list of ``(group, joint)`` pairs, ``joint`` the joint of every element of the group
-(-1 for none). The records are allocated when a container first requests the kind, for the engine then and every engine
+feature module adds for the joint: a module that has element groups of a joint's own gives them through its
+``parent_terms`` hook (``features.parent_terms``), a list of ``(group, joint)`` pairs, ``joint`` the joint of every
+element of the group (-1 for none). The records are allocated when a container first requests the kind, for the engine then and every engine
 built after it (an extension of each engine, ``_Records``).
 
 ``BODY_QDD``. The finite difference ``(qd_out - qd_in) / dt`` of the bodies' twists, as Kamino computes it: the
@@ -53,8 +53,8 @@ import warp as wp
 
 from newton.solvers import SolverBase
 
+from . import features
 from .contacts import _write_contacts
-from .features import FEATURES
 from .kernels import _copy_status, _d6_joint_wrenches, _joint_wrenches
 
 if TYPE_CHECKING:
@@ -239,10 +239,7 @@ class _Parents:
                 rows = stitches.rows - solver._parts.distance_first
                 if len(rows) and (rows >= 0).all():  # the stitches of distance joints, a group of their own
                     terms.append((stitches.group, solver._joints.distance[rows]))
-            for feature in FEATURES:
-                more = getattr(feature, "parent_terms", None)
-                if more is not None:
-                    terms.extend(more(solver, engine))
+            terms.extend(features.parent_terms(solver, engine))
         forces = ElementForces(engine, [group for group, _ in terms])
         model = solver.model
         parent = _parent_joints(model)

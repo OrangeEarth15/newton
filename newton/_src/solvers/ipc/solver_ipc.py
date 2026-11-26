@@ -1304,16 +1304,18 @@ class SolverIPC(SolverBase, CouplingInterface):
                 # libuipc-warp put the worlds that failed back at their state at the step's start and stepped the
                 # others: state_out holds both, then the step raises, naming the worlds that failed
                 failed = self._failed_worlds()
-                _shift_joint_history(self)
-                self._store(state_in.body_q, state_in.body_qd, state_out)
-                observables_module.write(self, observables, state_out)
-                features.finish(self, state_out, observables)
-                observables_module.finish(self, state_out, observables)
+                self._finish_step(state_in, state_out, observables)
                 raise RuntimeError(self._world_failure(failed))
             if status.failed:
                 observables_module.write(self, observables, state_out)
                 self._forget_written()  # the engine holds the failed solve: the next step takes state_in
                 raise RuntimeError(self._failure(status))
+        self._finish_step(state_in, state_out, observables)
+
+    def _finish_step(self, state_in: State, state_out: State, observables: SolverBase.Observables | None) -> None:
+        """Write what a step gives once its solve has run: the joints' history, ``state_out``, the observables and
+        the feature modules' outputs. For a step that succeeded, and for one that failed in some independent worlds
+        alone, whose ``state_out`` holds the other worlds' step."""
         _shift_joint_history(self)
         self._store(state_in.body_q, state_in.body_qd, state_out)
         observables_module.write(self, observables, state_out)

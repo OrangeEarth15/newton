@@ -27,7 +27,8 @@ MuJoCo's JOINT equality rows that repeat the mimic rows Newton's importers made 
 Refused: actuators that drive a tendon and a limit margin other than 0, of every MuJoCo tendon, a mimic or fixed
 tendon over a joint that becomes no revolute or prismatic joint, and the friction of free and distance joints (the ball
 module refuses that of ball joints). The ``tendons`` module holds MuJoCo's spatial tendons and refuses Newton's own. The
-hooks are those of ``features`` (its docstring); ``parent_terms`` gives the terms' forces to ``BODY_PARENT_F``.
+hooks are those of ``features`` (its docstring), ``parent_terms`` among them, which gives the terms' forces to
+``BODY_PARENT_F``.
 """
 
 from __future__ import annotations
