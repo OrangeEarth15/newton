@@ -326,34 +326,20 @@ class SolverIPC(SolverBase, CouplingInterface):
     is captured in a CUDA graph.
 
     The IPC solver page, :doc:`/solvers/ipc`, describes how the solver takes
-    every input of Newton's model, state and control. In short, it simulates:
+    every input of Newton's model, state and control. In short:
 
-    - particles and tetrahedra, with libuipc's stable Neo-Hookean elasticity
-      (:ref:`ipc-model-content`);
-    - cloth: libuipc's strain-limiting Baraff-Witkin membrane and
-      discrete-shell bending, from Newton's rest shapes (:ref:`ipc-cloth`);
-    - springs, and particle-body attachments as libuipc's soft vertex stitch
-      (:ref:`ipc-attachments`);
-    - rigid bodies with box, sphere, capsule, cylinder, cone, ellipsoid or
-      mesh shapes as libuipc's affine bodies (:ref:`ipc-rigid-bodies`);
-    - static shapes as fixed triangle meshes, static planes as half spaces,
-      and height fields;
-    - contact between all of these, with friction, between the pairs that
-      Newton's collision groups, worlds, collide flags and filter pairs let
-      collide (:ref:`ipc-contact`);
-    - kinematic particles and bodies, which follow the poses of
-      ``state_in`` by aims inside the step or by jumps before it
-      (:ref:`ipc-kinematic-bodies`);
-    - revolute, prismatic, fixed and ball joints with drives, springs,
-      damping, limits, armature and :attr:`~newton.Control.joint_f`, D6 joints
-      that lock what one of them locks, and distance joints of one length
-      (:ref:`ipc-joints`);
-    - MuJoCo's spatial tendons, through sites, around spheres and cylinders
-      and over pulleys (:ref:`ipc-spatial-tendons`);
-    - external forces (:attr:`~newton.State.particle_f`,
-      :attr:`~newton.State.body_f`) and gravity per world;
-    - content in several worlds, every world stepping as it would alone, or
-      with ``coupled_worlds`` as one solve (:ref:`ipc-worlds`).
+    - Particles, tetrahedra, cloth, springs and particle-body attachments
+      are libuipc's finite elements and stitches (:ref:`ipc-model-content`).
+    - Rigid bodies are libuipc's affine bodies, their shapes triangulated
+      (:ref:`ipc-rigid-bodies`).
+    - Contact acts between the pairs that Newton's collision settings let
+      collide (:ref:`ipc-contact`).
+    - Joints, rod joints and tendons are energies of the implicit step, joints
+      penalties rather than hard constraints (:ref:`ipc-joints`).
+    - Kinematic particles and bodies follow the poses of ``state_in``
+      (:ref:`ipc-kinematic-bodies`).
+    - Every world is solved as it would be alone, or all of them as one solve
+      (:ref:`ipc-worlds`).
 
     What libuipc has no form for raises :class:`NotImplementedError` when the
     solver is constructed (:ref:`ipc-refused`), and so does a model on the CPU;
@@ -2126,31 +2112,50 @@ class SolverIPC(SolverBase, CouplingInterface):
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
         """Take changed model properties.
 
-        Gravity, of every world (``MODEL_PROPERTIES``), and the bodies' mass, centre of mass and inertia
-        (``BODY_INERTIAL_PROPERTIES``), with the joints' penalties, which follow the masses, are updated in place:
-        graphs captured before take them. With ``integrator="bdf2"`` the next step starts the history of the worlds
-        whose gravity changed anew (see :ref:`ipc-bdf2`). A change of the triangulated shapes (``SHAPE_PROPERTIES`` with
-        new transforms or scales, ``SHAPE_TYPE_AND_SOURCE``), of the friction coefficients and the contact thicknesses
-        (``SHAPE_PROPERTIES`` with a new ``shape_material_mu`` or ``shape_margin``, ``MODEL_PROPERTIES`` with a new
-        ``soft_contact_mu``, ``particle_mu`` or ``particle_radius``, or a ``particle_grid`` set to None or back), of the particles' masses (``MODEL_PROPERTIES``
-        with a new ``particle_mass``, as a coupled solver gives its proxy particles their masses), of the springs
-        (``MODEL_PROPERTIES`` with a new ``spring_rest_length``, ``spring_stiffness`` or ``spring_damping``), of the
-        joints' types, bodies, frames or axes (``JOINT_PROPERTIES``) or of which bodies are kinematic
-        (``BODY_PROPERTIES``, ``BODY_INERTIAL_PROPERTIES``) builds the solve again: the next step reads ``state_in`` in
-        full, and graphs that hold :meth:`step` must be captured again. The joints' other data are read at every step;
-        the joint flags only check them again against what :ref:`ipc-joints` rejects and, once per solver, warn of
-        velocity limits below Newton's default (:ref:`ipc-not-read`). So are the stiffness and the
-        enabled flags of the particle-body attachments (``CONSTRAINT_PROPERTIES``), which that flag checks again against
-        what :ref:`ipc-attachments` rejects; a new body, particle or point of an attachment builds the solve again.
-        ``CONSTRAINT_PROPERTIES`` also checks the mimic constraints and MuJoCo's equality rows again, so that a row
-        enabled since the solver was built that no loop joint holds is refused (:ref:`ipc-joints`). With
-        ``kinematic_motion="aim"`` a change of a kinematic body's mass properties builds the solve again too, since its
-        soft transform constraint follows the masses it was built with. Every notification, whatever its flags, compares
-        the arrays the elements were built from that Newton has no flag of its own for: ``tet_materials``,
-        ``tri_materials``, ``edge_bending_properties``, the rest shapes ``tet_poses``, ``tri_poses`` and
-        ``edge_rest_angle``, and ``particle_flags``; a change of any builds the solve again. Copies from the host: not inside a graph
-        capture. With ``contact_constitution="al-ipc"`` new masses build the solve again too, since the AL-IPC penalty
-        follows the masses it was built with.
+        A property is either updated in place, which graphs captured before take, or it builds the solve again: the
+        next step then reads ``state_in`` in full, and graphs that hold :meth:`step` must be captured again. By flag:
+
+        * ``MODEL_PROPERTIES``: gravity, of every world, in place; with ``integrator="bdf2"`` the next step starts the
+          history of the worlds whose gravity changed anew (:ref:`ipc-bdf2`). A new ``particle_mass`` (as a coupled
+          solver gives its proxy particles their masses), ``particle_radius``, ``soft_contact_mu``, ``particle_mu``,
+          ``spring_rest_length``, ``spring_stiffness`` or ``spring_damping``, a ``particle_grid`` set to None or back,
+          or with ``contact_damping="material"`` a new ``soft_contact_kd``: rebuild.
+        * ``BODY_INERTIAL_PROPERTIES``: the bodies' mass, centre of mass and inertia in place, with what follows them:
+          the penalties of the joints, of hard attachments, of the distance, universal and mimic joints, the default
+          body stiffness, and the limit stiffness of the tendons. A body that becomes kinematic or dynamic, or a change
+          of the mode that ``kinematic_motion=None`` picks: rebuild. New masses under ``contact_constitution="al-ipc"``,
+          whose penalty follows the masses it was built with, and of a kinematic body that aims under
+          ``kinematic_motion="aim"``, whose soft transform constraint does too: rebuild.
+        * ``BODY_PROPERTIES``: which bodies are kinematic (``body_flags``), with the rebuilds of
+          ``BODY_INERTIAL_PROPERTIES``; the masses are updated in place only under that flag.
+        * ``SHAPE_PROPERTIES``: new shape transforms or scales, ``shape_material_mu`` or ``shape_margin``, or with
+          ``contact_damping="material"`` ``shape_material_kd``: rebuild.
+        * ``SHAPE_TYPE_AND_SOURCE``: rebuild.
+        * ``JOINT_PROPERTIES``: new joint types, bodies, frames or axes: rebuild.
+        * ``JOINT_DOF_PROPERTIES``, ``JOINT_DOF_FORCE_PROPERTIES``, ``JOINT_DOF_INERTIAL_PROPERTIES`` and
+          ``JOINT_REFERENCE_POSE_PROPERTIES``: the joints' drives, springs, damping, limits, armature, effort limits and
+          rest poses are read at every step, and their friction is written in place; these flags check them again
+          against what :ref:`ipc-refused-joints` lists and, once per solver, warn of velocity limits below Newton's
+          default (:ref:`ipc-not-read`). A degree of freedom that gains or loses friction, a ball joint that gains a
+          drive, spring, damping, armature or friction, and a distance joint that gains or loses its length or its
+          range: rebuild.
+        * ``CONSTRAINT_PROPERTIES``: the mimic constraints and MuJoCo's equality rows are checked again, so that a row
+          enabled since the solver was built that no loop joint holds is refused (:ref:`ipc-joints`), and the
+          particle-body attachments against what :ref:`ipc-attachments` refuses. The attachments' stiffness and enabled
+          flags are read at every step, and new mimic coefficients are written in place. A new body, particle or point
+          of an attachment, an attachment damping where the solve has none, or a mimic constraint between other joints:
+          rebuild.
+        * ``TENDON_PROPERTIES``: the springs, damping, armature, friction and limits of fixed and spatial tendons in
+          place. A fixed tendon with other joints or coefficients, or a spatial tendon with another path or other shapes
+          on it: rebuild.
+        * ``ACTUATOR_PROPERTIES``: nothing; the solver keeps nothing of the actuators.
+
+        Every notification, whatever its flags, also compares the arrays the elements were built from that Newton has
+        no flag for: ``tet_materials``, ``tri_materials``, ``edge_bending_properties``, the rest shapes ``tet_poses``,
+        ``tri_poses`` and ``edge_rest_angle``, and ``particle_flags``. A change of any of them: rebuild.
+
+        Raises:
+            RuntimeError: When called inside a graph capture: the notification copies from the host.
         """
         if self.model.device.is_capturing:
             raise RuntimeError("SolverIPC.notify_model_changed() copies from the host; call it outside graph capture.")
