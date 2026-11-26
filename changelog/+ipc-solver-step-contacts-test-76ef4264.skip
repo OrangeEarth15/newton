@@ -1,1 +1,0 @@
-Test-only: Newton's test_native_solvers_follow_step_contacts runs SolverIPC as an expected failure with its cause; no user-facing change.

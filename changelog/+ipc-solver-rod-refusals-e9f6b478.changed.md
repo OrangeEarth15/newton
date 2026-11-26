@@ -1,1 +1,0 @@
-``SolverIPC`` refuses SolverVBD's Dahl attributes (``model.vbd.dahl_eps_max``, ``dahl_tau``) other than 0 on a joint that is not a rod joint, or negative on a rod joint, and a ``joint_effort_limit`` below 1e6 on a rod joint's degrees of freedom, which it would otherwise not read.

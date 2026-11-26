@@ -1,1 +1,0 @@
-SolverIPC's AL-IPC contact (contact_constitution="al-ipc") takes static mesh shapes, and particles and bodies without mass, which it refused: libuipc-warp's AL-IPC gives a vertex without mass no penalty of its own, so a pair takes the penalty of its side that moves. Unreleased behaviour, so no release note.

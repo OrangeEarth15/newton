@@ -1,1 +1,0 @@
-Add ``SolverVBD``'s Dahl hysteresis of rod joints to ``SolverIPC``: with ``model.vbd.dahl_eps_max`` and ``model.vbd.dahl_tau`` both above 0 on a rod joint, its bend and twist keep part of a bend after release, and ``SolverIPC.reset`` starts the hysteresis anew, of every world or of those ``world_mask`` selects.
