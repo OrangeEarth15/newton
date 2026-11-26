@@ -31,7 +31,7 @@ from .kernels import (
     _joint_rates,
     _joint_terms,
 )
-from .scene import _quat_to_matrix_np
+from .rotations import _quat_to_matrix_np
 
 if TYPE_CHECKING:
     from .solver_ipc import SolverIPC

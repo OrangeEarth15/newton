@@ -17,7 +17,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.ipc.features import observables as observables_module
+from newton._src.solvers.ipc import observables as observables_module
 from newton.tests.ipc._fixtures import _TIGHT_ROTATIONS, _box_body
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
@@ -299,7 +299,7 @@ def test_body_observables_only_where_requested(test, device):
     s0, s1 = model.state(), model.state()
     newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
     solver.step(s0, s1, None, None, 5e-3, observables=status)
-    test.assertIsNone(getattr(solver, "_body_observables", None))
+    test.assertIsNone(solver._body_observables)
 
     def extensions():
         """What the observables module adds to the inputs of an engine the solver builds."""
@@ -309,10 +309,10 @@ def test_body_observables_only_where_requested(test, device):
 
     test.assertEqual(extensions(), [])
     observables = solver.observables(kinds={_KIND.BODY_QDD})
-    test.assertIsNone(solver._features.observables.parents)
+    test.assertIsNone(solver._body_observables.parents)
     test.assertEqual(extensions(), [])
     observables = solver.observables(kinds={_KIND.BODY_PARENT_F, _KIND.BODY_QDD})
-    test.assertIsNotNone(solver._features.observables.parents)
+    test.assertIsNotNone(solver._body_observables.parents)
     test.assertEqual([type(e).__name__ for e in extensions()], ["_Records"])
     observables.body_parent_f.fill_(wp.spatial_vector(-1.0))
     observables.body_qdd.fill_(wp.spatial_vector(-1.0))
@@ -333,13 +333,13 @@ def test_parent_force_after_the_solve_is_built_again(test, device):
     solver = newton.solvers.SolverIPC(model)
     observables = solver.observables(kinds={_KIND.BODY_PARENT_F})
     _, state = _steps(model, solver, 3, 5e-3, observables)
-    engine, parents = solver._engine, solver._features.observables.parents
+    engine, parents = solver._engine, solver._body_observables.parents
     X_c = model.joint_X_c.numpy()
     X_c[0, 2] = 0.9  # the box 0.9 m below the joint
     model.joint_X_c.assign(X_c)
     solver.notify_model_changed(newton.ModelFlags.JOINT_PROPERTIES)
     test.assertIsNot(solver._engine, engine)
-    rebuilt = solver._features.observables.parents
+    rebuilt = solver._body_observables.parents
     test.assertIsNot(rebuilt, parents)
     test.assertIs(rebuilt.forces.groups[0], solver._uipc_warp.arrays.joint_groups(solver._engine).revolute)
     steps, _ = _steps(model, solver, 5, 5e-3, observables, state=state)
@@ -451,7 +451,7 @@ def test_parent_force_needs_element_forces(test, device):
     with mock.patch.object(builtins, "__import__", side_effect=without):
         with test.assertRaisesRegex(ImportError, "uipc_warp.ext.element_forces"):
             solver.observables(kinds={_KIND.BODY_PARENT_F})
-    test.assertIsNone(solver._features.observables.parents)
+    test.assertIsNone(solver._body_observables.parents)
 
 
 @requires("uipc_warp")

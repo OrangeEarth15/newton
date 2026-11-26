@@ -2,12 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """The solver observables SolverIPC writes (``SolverBase.observables``): its ``STATUS``, the Newton residual
-(``SOLVER_RESIDUAL``), its contacts and their forces (``CONTACT_F``), the wrench every body's parent joint passes to it
-(``BODY_PARENT_F``) and the bodies' accelerations (``BODY_QDD``).
+(``SOLVER_RESIDUAL``), the wrench every body's parent joint passes to it (``BODY_PARENT_F``) and the bodies'
+accelerations (``BODY_QDD``). Its contacts and their forces (``CONTACT_F``) are written by ``contacts``
+(``_write_contacts``), which ``write`` calls, since they come from the contact records that module keeps.
 
 The solver's ``SUPPORTED_OBSERVABLES`` holds ``KINDS`` and ``STATUS``, and its ``supported_observables`` is
 ``supported(solver)``; Newton's ``SolverBase`` refuses an observable outside it. ``SolverIPC.observables`` calls
-``allocate`` for every container it allocates. The hooks are those of ``features`` (its docstring).
+``allocate`` for every container it allocates. A step calls ``prepare`` after the feature modules' ``prepare``,
+``write`` once ``state_out`` is written (also in a step that fails, for ``STATUS``), and ``finish`` after it; every
+engine made from the scene gets ``engine_inputs``. A notification needs nothing of this module: the records of a solve
+built again are made by its engine's extension, and every step reads the bodies' centres of mass and the joints'
+inputs from the model.
+
+``STATUS`` and ``SOLVER_RESIDUAL``. libuipc-warp's ``write_frame_status`` writes the status bits and the Newton
+residual of a frame into one entry of each array: with independent worlds every world's into its own entry
+(``write_world_status``), and with one solve that solve's into every world's entry. The entries of the global world and
+of worlds without unknowns take no step and are not written.
 
 ``BODY_PARENT_F``. A joint of SolverIPC is a penalty, so the wrench it passes to its child body is the force of its
 terms at the end of the step: libuipc-warp's ``ElementForces`` gives the force of every term of the joints' element
@@ -43,12 +53,14 @@ import warp as wp
 
 from newton.solvers import SolverBase
 
-from ..kernels import _d6_joint_wrenches, _joint_wrenches
+from .contacts import _write_contacts
+from .features import FEATURES
+from .kernels import _copy_status, _d6_joint_wrenches, _joint_wrenches
 
 if TYPE_CHECKING:
     from newton import Control, Model, State
 
-    from ..solver_ipc import SolverIPC
+    from .solver_ipc import SolverIPC
 
 # the standard observable kinds SolverIPC writes, besides its own STATUS (SolverIPC.ObservableKind.STATUS)
 KINDS = frozenset(
@@ -186,7 +198,7 @@ class _Records:
     def attach(self, engine):
         solver = self._solver()
         if solver is not None:
-            solver._features.observables.parents = _Parents.of(solver, engine)
+            solver._body_observables.parents = _Parents.of(solver, engine)
 
 
 @dataclass
@@ -208,8 +220,6 @@ class _Parents:
         """The records of ``engine``'s joint terms: the libuipc joints, the distance joints' stitches and the groups
         that feature modules give (``parent_terms``), and the ranges of every body's parent joint."""
         from uipc_warp.ext.element_forces import ElementForces  # noqa: PLC0415 (libuipc-warp is imported lazily)
-
-        from . import FEATURES  # noqa: PLC0415 (the package imports this module)
 
         arrays = solver._uipc_warp.arrays
         terms = []  # (element group, the joint of every element)
@@ -260,7 +270,7 @@ class _Parents:
 
 @dataclass
 class _BodyObservables:
-    """What the body observables of one solver keep (``solver._features.observables``), made by the first container that
+    """What the body observables of one solver keep (``solver._body_observables``), made by the first container that
     requests one: the step's failures (``flags``, one word per world entry, the global world's last); for
     ``BODY_PARENT_F``, what it reads of the solve (``parents``, None until requested), the bodies' shares of their
     parent joints' ``joint_f`` (``share``), and for the solver's joint-force kernels a parent of -1 for every joint and
@@ -293,7 +303,7 @@ def _parent_joints(model: Model) -> np.ndarray:
 def _parents_requested(solver: SolverIPC) -> None:
     """Make what ``BODY_PARENT_F`` needs, once: the records of the solver's engine, and the joints whose ``joint_f``
     acts as a wrench."""
-    state = solver._features.observables
+    state = solver._body_observables
     model, device = solver.model, solver.model.device
     try:
         import uipc_warp.ext.element_forces  # noqa: F401, PLC0415
@@ -325,17 +335,65 @@ def allocate(solver: SolverIPC, observables: SolverBase.Observables) -> None:
     Nothing for a model without bodies, or for a container that requests neither."""
     if solver._engine is None or solver.model.body_count == 0 or not (observables.kinds & _BODY_KINDS):
         return
-    if solver._features.observables is None:
+    if solver._body_observables is None:
         entries = solver.model.world_count + 1
-        solver._features.observables = _BodyObservables(wp.zeros(entries, dtype=wp.int32, device=solver.model.device))
-    if observables.is_requested(SolverBase.ObservableKind.BODY_PARENT_F) and solver._features.observables.share is None:
+        solver._body_observables = _BodyObservables(wp.zeros(entries, dtype=wp.int32, device=solver.model.device))
+    if observables.is_requested(SolverBase.ObservableKind.BODY_PARENT_F) and solver._body_observables.share is None:
         _parents_requested(solver)
+
+
+def write(solver: SolverIPC, observables: SolverBase.Observables | None, state_out: State | None) -> None:
+    """``CONTACT_F`` (``contacts._write_contacts``), ``STATUS`` and ``SOLVER_RESIDUAL`` of the step into
+    ``observables``, when the container requests them (module docstring)."""
+    if observables is None:
+        return
+    _write_contacts(solver, observables, state_out)
+    status = observables.status if observables.is_requested(solver.ObservableKind.STATUS) else None
+    residual = (
+        observables.solver_residual if observables.is_requested(SolverBase.ObservableKind.SOLVER_RESIDUAL) else None
+    )
+    if status is None and residual is None:
+        return
+    if solver._independent:  # every world its own, the entries of the global world and of worlds without unknowns 0
+        write_world_status(solver, status, residual)
+        return
+    if len(solver._world_entries) <= 2:
+        for entry in solver._world_entries:
+            solver._uipc_warp.arrays.write_frame_status(solver._engine, status, residual, index=int(entry))
+        return
+    # many worlds (coupled_worlds): the one solve's status written once, then copied to every entry
+    solver._uipc_warp.arrays.write_frame_status(solver._engine, solver._status_scratch, solver._residual_scratch)
+    wp.launch(
+        _copy_status,
+        len(solver._world_entries),
+        inputs=[
+            solver._world_entries_device,
+            solver._status_scratch,
+            solver._residual_scratch,
+        ],
+        outputs=[status, residual],
+        device=solver.model.device,
+    )
+
+
+def write_world_status(solver: SolverIPC, flags: wp.array | None, residual: wp.array | None) -> None:
+    """With independent worlds: every world's status bits and Newton residual into its entry of ``flags`` and
+    ``residual`` (libuipc-warp's ``write_frame_status`` with ``worlds``, the record of each world), or the one
+    solve's when one world holds unknowns, the engine then being that world's alone; nothing when none does. The
+    entries of the global world and of worlds without unknowns are not written: they take no step."""
+    entries = solver._status_entries
+    if len(entries) > 1:
+        solver._uipc_warp.arrays.write_frame_status(
+            solver._engine, flags, residual, worlds=solver._status_entries_device
+        )
+    elif len(entries) == 1:
+        solver._uipc_warp.arrays.write_frame_status(solver._engine, flags, residual, index=int(entries[0]))
 
 
 def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
     """Once a container has requested ``BODY_PARENT_F``, the extension that makes the records of the engine's joints
     when it is built (``_Records``)."""
-    state = solver._features.observables
+    state = solver._body_observables
     if state is not None and state.share is not None:
         inputs["extensions"].append(_Records(solver))
 
@@ -344,7 +402,7 @@ def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> 
     """What the step's start holds for the step's container (``solver._observables``): the twists of ``state_in`` in
     its ``body_qdd`` (``BODY_QDD``), and the bodies' shares of their parent joints' ``joint_f`` at ``state_in``'s poses,
     as the solver applies it (``BODY_PARENT_F``)."""
-    observables, state = solver._observables, solver._features.observables
+    observables, state = solver._observables, solver._body_observables
     if observables is None or state is None:
         return
     if observables.is_requested(SolverBase.ObservableKind.BODY_QDD):
@@ -411,7 +469,7 @@ def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> 
 def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observables | None) -> None:
     """``BODY_PARENT_F`` and ``BODY_QDD`` of the step, when the container requests them (module docstring), zero in a
     world whose step failed."""
-    state = solver._features.observables
+    state = solver._body_observables
     if observables is None or state is None or state_out is None:
         return
     qdd = observables.is_requested(SolverBase.ObservableKind.BODY_QDD)
@@ -422,7 +480,7 @@ def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observab
     failed = int(solver.StatusBits.FAILED)
     per_world = int(solver._independent)
     if solver._independent:  # every world's word at its entry
-        solver._write_world_status(state.flags, None)
+        write_world_status(solver, state.flags, None)
     else:  # the one solve's word
         solver._uipc_warp.arrays.write_frame_status(solver._engine, state.flags, None, index=0)
     if parent_f:

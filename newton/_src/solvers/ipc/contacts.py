@@ -6,7 +6,8 @@
 libuipc's contact tabular from Newton's collision groups, worlds, collide flags, filter pairs and friction
 coefficients (``_contact_elements``), checked against ``Model.shape_contact_pairs``; what AL-IPC contact refuses; and
 the rows of ``CONTACT_F``, one per contact term of a step with a force, from libuipc-warp's contact records
-(``_write_contacts``), which a coupled solver's proxy feedback reads too.
+(``_write_contacts``, which ``observables.write`` calls with the step's other observables), records that a coupled
+solver's proxy feedback reads too.
 """
 
 from __future__ import annotations

@@ -23,6 +23,7 @@ import warp as wp
 from newton import Axis, BodyFlags, GeoType, Mesh, Model, NewtonWarning, ParticleFlags, ShapeFlags, eval_fk
 
 from .kernels import _body_stiffness, _distance_stiffness, _stitch_stiffness
+from .rotations import _quat_rotate_np, _quat_to_matrix_np
 
 if TYPE_CHECKING:
     from .contacts import _ContactElements
@@ -349,18 +350,6 @@ class _Worlds:
     def subscene(self, world: np.ndarray) -> np.ndarray:
         """The subscene of every entity of ``world`` (-1 for a global one)."""
         return self.lookup[np.asarray(world, np.int64)]
-
-
-def _quat_rotate_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
-    """Rotate the rows of ``v`` by the unit quaternion ``q = (x, y, z, w)``."""
-    u = np.asarray(q[:3], np.float64)
-    w = float(q[3])
-    return v + 2.0 * w * np.cross(u, v) + 2.0 * np.cross(u, np.cross(u, v))
-
-
-def _quat_to_matrix_np(q: np.ndarray) -> np.ndarray:
-    q = np.asarray(q, np.float64) / np.linalg.norm(q)
-    return _quat_rotate_np(q, np.eye(3)).T
 
 
 def _weld(v: np.ndarray, f: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

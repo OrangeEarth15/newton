@@ -22,6 +22,7 @@ from newton import Contacts, Control, JointType, Model, ModelFlags, NewtonWarnin
 from newton.solvers import SolverBase
 
 from . import features
+from . import observables as observables_module
 from .contacts import (
     _CONTACT_ROW_BLOCK,
     _check_al_ipc,
@@ -49,7 +50,6 @@ from .kernels import (
     _aim_kinematic_bodies,
     _any_selected,
     _body_accelerations,
-    _copy_status,
     _count_step,
     _d6_joint_wrenches,
     _forget_kinematic_written,
@@ -607,7 +607,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         ``FrameStatusFlags``): such a bit does not fail the step, and :meth:`SolverIPC.check_status` warns, naming it
         as libuipc-warp does."""
 
-    SUPPORTED_OBSERVABLES = frozenset({*features.observables.KINDS, ObservableKind.STATUS})
+    SUPPORTED_OBSERVABLES = frozenset({*observables_module.KINDS, ObservableKind.STATUS})
 
     # libuipc-warp, imported by the first solver
     _uipc_warp: ClassVar = None
@@ -788,6 +788,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._observables = None  # the observables container of the last step (None: none), which prepare reads
         # what the feature modules keep from one hook to the next, one field per module (features.FeatureState)
         self._features = features.FeatureState()
+        # what BODY_PARENT_F and BODY_QDD keep, made by the first container that requests one (observables)
+        self._body_observables = None
         self._clamp_checked_dt = None  # the step size whose stiffness the clamp warning was last checked for
         self._clamp_reported = False
         self._engine = None
@@ -833,7 +835,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         ``contact_constitution="al-ipc"`` ``STATUS``, ``BODY_PARENT_F`` and ``BODY_QDD`` only: the AL-IPC frame ends on
         its own criterion, without a Newton residual, and its contact is an active set with multipliers, not the barrier
         and friction terms the contact output exports."""
-        return features.observables.supported(self)
+        return observables_module.supported(self)
 
     @override
     def observables(
@@ -852,7 +854,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         if observables.is_requested(SolverBase.ObservableKind.CONTACT_F) and not self._contact_output:
             self._contact_output = True
             _make_contact_export(self)
-        features.observables.allocate(self, observables)  # what the observables module needs for the kinds
+        observables_module.allocate(self, observables)  # what the body observables need of the kinds requested
         return observables
 
     def _contact_term_capacity(self) -> int:
@@ -1186,6 +1188,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._forces = self._uipc_warp.arrays.ExternalAcceleration("newton_forces", self._force_blocks, device)
             inputs["elements"].append(self._forces)
         features.engine_inputs(self, inputs)  # the feature modules' element groups
+        observables_module.engine_inputs(self, inputs)  # the records of BODY_PARENT_F, once requested
         options = dict(self._engine_options)
         self._start_check = None
         if not _has_contact(self._scene.layout()):
@@ -1309,6 +1312,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         _write_stitch_stiffness(self, dt)
         _write_body_stiffness(self, dt)
         features.prepare(self, state_in, control, dt)  # the feature modules' inputs of the step
+        observables_module.prepare(self, state_in, control, dt)  # what the body observables take of the step's start
         if self.model.device.is_capturing:
             # the solve joins the caller's graph; it cannot synchronize, grow or raise (docs/solvers/ipc.rst > "Status")
             self._engine.stop_on_overflow = False
@@ -1324,17 +1328,19 @@ class SolverIPC(SolverBase, CouplingInterface):
                 failed = self._failed_worlds()
                 _shift_joint_history(self)
                 self._store(state_in.body_q, state_in.body_qd, state_out)
-                self._write_observables(observables, state_out)
+                observables_module.write(self, observables, state_out)
                 features.finish(self, state_out, observables)
+                observables_module.finish(self, state_out, observables)
                 raise RuntimeError(self._world_failure(failed))
             if status.failed:
-                self._write_observables(observables, state_out)
+                observables_module.write(self, observables, state_out)
                 self._forget_written()  # the engine holds the failed solve: the next step takes state_in
                 raise RuntimeError(self._failure(status))
         _shift_joint_history(self)
         self._store(state_in.body_q, state_in.body_qd, state_out)
-        self._write_observables(observables, state_out)
+        observables_module.write(self, observables, state_out)
         features.finish(self, state_out, observables)  # the feature modules' outputs of the step
+        observables_module.finish(self, state_out, observables)  # BODY_PARENT_F and BODY_QDD
 
     def _start_in_capture(self) -> None:
         """The first step, captured in a graph: it cannot read its ``state_in``, so the pairs with a body whose start
@@ -1853,53 +1859,11 @@ class SolverIPC(SolverBase, CouplingInterface):
             "Surfaces must start apart (outside their contact thickness), and the state must stay finite."
         )
 
-    def _write_observables(self, observables: SolverBase.Observables | None, state_out: State | None) -> None:
-        if observables is None:
-            return
-        _write_contacts(self, observables, state_out)
-        status = observables.status if observables.is_requested(self.ObservableKind.STATUS) else None
-        residual = (
-            observables.solver_residual if observables.is_requested(SolverBase.ObservableKind.SOLVER_RESIDUAL) else None
-        )
-        if status is None and residual is None:
-            return
-        if self._independent:  # every world its own, the entries of the global world and of worlds without unknowns 0
-            self._write_world_status(status, residual)
-            return
-        if len(self._world_entries) <= 2:
-            for entry in self._world_entries:
-                self._uipc_warp.arrays.write_frame_status(self._engine, status, residual, index=int(entry))
-            return
-        # many worlds (coupled_worlds): the one solve's status written once, then copied to every entry
-        self._uipc_warp.arrays.write_frame_status(self._engine, self._status_scratch, self._residual_scratch)
-        wp.launch(
-            _copy_status,
-            len(self._world_entries),
-            inputs=[
-                self._world_entries_device,
-                self._status_scratch,
-                self._residual_scratch,
-            ],
-            outputs=[status, residual],
-            device=self.model.device,
-        )
-
-    def _write_world_status(self, flags, residual) -> None:
-        """With independent worlds: every world's status bits and Newton residual into its entry of ``flags`` and
-        ``residual`` (libuipc-warp's ``write_frame_status`` with ``worlds``, the record of each world), or the one
-        solve's when one world holds unknowns, the engine then being that world's alone; nothing when none does. The
-        entries of the global world and of worlds without unknowns are not written: they take no step."""
-        entries = self._status_entries
-        if len(entries) > 1:
-            self._uipc_warp.arrays.write_frame_status(self._engine, flags, residual, worlds=self._status_entries_device)
-        elif len(entries) == 1:
-            self._uipc_warp.arrays.write_frame_status(self._engine, flags, residual, index=int(entries[0]))
-
     def _failed_worlds(self) -> dict[int, int]:
         """With independent worlds, after a step that is not captured: the status bits of every world whose step
         failed, by world (reads every world's word back; one synchronization)."""
         self._world_words.zero_()
-        self._write_world_status(self._world_words, None)
+        observables_module.write_world_status(self, self._world_words, None)
         words = self._world_words.numpy()
         failed = int(self.StatusBits.FAILED)
         return {int(k): int(words[k]) for k in np.flatnonzero(words & failed)}
@@ -2493,7 +2457,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             return
         if self._independent:
             self._step_status.zero_()
-            self._write_world_status(self._step_status, None)
+            observables_module.write_world_status(self, self._step_status, None)
         else:
             self._uipc_warp.arrays.write_frame_status(self._engine, self._step_status)
         wp.launch(

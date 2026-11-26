@@ -3,12 +3,23 @@
 
 """SolverIPC's features beyond libuipc's own, one module each, and the points at which the solver calls them.
 
-A feature is Newton input that libuipc has no term for: the damping of springs, attachments and elements (``damping``),
-MuJoCo's spatial tendons (``tendons``), mimic joints, fixed tendons and joint friction (``joint_terms``), universal
-joints and distance joints with a range (``universal``), the drives, springs, damping, armature, friction and limits of
-ball joints (``ball``), rod joints (``rods``), the surface velocity of a mesh (``surface_velocity``), contact damping
-(``contact_damping``) and the solver observables (``observables``). A module holds what SolverIPC does with its
-feature, and what it refuses of it.
+A feature is Newton input that libuipc has no term for. Each module extends one of the solver's core modules, whose
+content it completes with libuipc-warp's extensions:
+
+- ``damping``: the damping of springs, particle-body attachments, triangles, tetrahedra and bending edges, and drag and
+  lift; extends ``scene``, which lays out those elements;
+- ``joint_terms``: mimic joints, MuJoCo's fixed tendons and joint friction, as terms on joint coordinates; extends
+  ``joints``;
+- ``universal``: universal joints and distance joints with a range; extends ``joints``, which offers it the joints it
+  cannot map onto a libuipc joint;
+- ``ball``: the drives, springs, damping, armature and friction of ball joints, and what it refuses of ball, free and
+  distance joints; extends ``joints``;
+- ``rods``: rod joints; extends ``joints``, which offers it the rod joints;
+- ``tendons``: MuJoCo's spatial tendons, paths between the bodies' sites; extends ``joints``, as terms between bodies;
+- ``surface_velocity``: the surface velocity of a mesh, which friction measures slip against; extends ``contacts``;
+- ``contact_damping``: a viscous force on the normal motion of surfaces in contact; extends ``contacts``.
+
+A module holds what SolverIPC does with its feature, and what it refuses of it.
 
 The solver calls every module that defines a hook, in the order of ``FEATURES``, at these points; every hook is
 optional, and a module without it has nothing to do there:
@@ -47,10 +58,9 @@ A module keeps what it needs from one hook to the next in its field of ``solver.
 its ``build`` sets; nothing else of the module lives on the solver.
 
 The universal module is also offered the joints that ``joints._map_joints`` cannot map onto a libuipc joint
-(``universal.take_d6``, ``universal.take_distance``), the rods module the rod joints (``rods.take_rods``), and the
-observables module gives the supported observables (``observables.supported``) and allocates, in
-``SolverIPC.observables`` after Newton's allocation and outside any graph capture, what the kinds a container requests
-need of it (``observables.allocate``).
+(``universal.take_d6``, ``universal.take_distance``), and the rods module the rod joints (``rods.take_rods``). A module
+whose element groups are terms of a joint gives them to ``BODY_PARENT_F`` with ``parent_terms(solver, engine)``
+(``observables``).
 """
 
 from __future__ import annotations
@@ -58,7 +68,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from . import ball, contact_damping, damping, joint_terms, observables, rods, surface_velocity, tendons, universal
+from . import ball, contact_damping, damping, joint_terms, rods, surface_velocity, tendons, universal
 
 if TYPE_CHECKING:
     import warp as wp
@@ -70,14 +80,13 @@ if TYPE_CHECKING:
     from ..solver_ipc import SolverIPC
 
 # the feature modules, in the order the solver calls them
-FEATURES = (damping, tendons, joint_terms, universal, ball, rods, surface_velocity, contact_damping, observables)
+FEATURES = (damping, tendons, joint_terms, universal, ball, rods, surface_velocity, contact_damping)
 
 
 @dataclass
 class FeatureState:
     """What the feature modules keep of a solver (``SolverIPC._features``), one field per module: None until the
-    module's ``build`` makes it, and for a module with nothing to keep in that solve (``observables``: until a container
-    requests a body observable)."""
+    module's ``build`` makes it, and for a module with nothing to keep in that solve."""
 
     damping: damping._Plan | None = None
     tendons: tendons._State | None = None
@@ -87,7 +96,6 @@ class FeatureState:
     rods: rods._State | None = None
     surface_velocity: surface_velocity._Belts | None = None
     contact_damping: contact_damping._Damping | None = None
-    observables: observables._BodyObservables | None = None
 
 
 @dataclass(frozen=True)

@@ -33,7 +33,7 @@ import warp as wp
 from newton import MAXVAL, JointType, ModelFlags
 
 from ..kernels import _EFFORT_BOUND, _LIMIT_OVERSHOOT, _MAXVAL, _d6_angular_coordinates, _drive_inputs
-from ..scene import _quat_to_matrix_np
+from ..rotations import _quat_to_matrix_np
 
 if TYPE_CHECKING:
     from newton import Control, Model, State
