@@ -128,7 +128,8 @@ class Example:
         self.model = builder.finalize(device=sim_device)
         self.model.set_gravity((0.0, 0.0, float(getattr(args, "gravity_z", -9.81))))
 
-        self.collision_pipeline = newton.CollisionPipeline(self.model)
+        # SolverIPC finds its own contacts
+        self.collision_pipeline = None if self.solver_type == "ipc" else newton.CollisionPipeline(self.model)
         if self.solver_type == "kamino":
             config = newton.solvers.SolverKamino.Config.from_model(self.model, dynamics_solver=self.kamino_backend)
             config.use_collision_detector = False
@@ -144,7 +145,7 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.collision_pipeline.contacts()
+        self.contacts = None if self.collision_pipeline is None else self.collision_pipeline.contacts()
 
         if self.state_0.body_q is None:
             raise RuntimeError("Body state is not available.")
@@ -161,6 +162,10 @@ class Example:
         self.capture()
 
     def capture(self):
+        # SolverIPC steps eagerly: only an eager step grows its contact lists and raises when it fails
+        if self.solver_type == "ipc":
+            self.graph = None
+            return
         with wp.ScopedCapture() as capture:
             self.simulate()
         self.graph = capture.graph
@@ -169,7 +174,8 @@ class Example:
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
-            self.collision_pipeline.collide(self.state_0, self.contacts)
+            if self.collision_pipeline is not None:
+                self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
@@ -183,7 +189,8 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        self.viewer.log_contacts(self.contacts, self.state_0)
+        if self.contacts is not None:
+            self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
     def test_final(self):

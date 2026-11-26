@@ -229,7 +229,7 @@ class Example:
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
-        if self.solver_type == "kamino":
+        if self.solver_type in ("kamino", "ipc"):
             self.collision_pipeline = None
             self.contacts = None
         else:
@@ -241,6 +241,10 @@ class Example:
         self.capture()
 
     def capture(self):
+        # SolverIPC steps eagerly: only an eager step grows its contact lists and raises when it fails
+        if self.solver_type == "ipc":
+            self.graph = None
+            return
         with wp.ScopedCapture() as capture:
             self.simulate()
         self.graph = capture.graph

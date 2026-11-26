@@ -194,8 +194,13 @@ class Example:
         builder.color()
         self.model = builder.finalize()
 
-        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="latest")
-        self.contacts = self.collision_pipeline.contacts()
+        if self.solver_type == "ipc":
+            # SolverIPC finds its own contacts
+            self.collision_pipeline = None
+            self.contacts = None
+        else:
+            self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="latest")
+            self.contacts = self.collision_pipeline.contacts()
         if self.solver_type == "kamino":
             config = newton.solvers.SolverKamino.Config.from_model(self.model, dynamics_solver="lox")
             config.use_collision_detector = False
@@ -318,7 +323,8 @@ class Example:
     # ------------------------------------------------------------------
     def capture(self) -> None:
         """Capture the substep loop into a CUDA graph for fast replay."""
-        if self.solver.device.is_cuda:
+        # SolverIPC steps eagerly: only an eager step grows its contact lists and raises when it fails
+        if self.solver.device.is_cuda and self.solver_type != "ipc":
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
@@ -330,7 +336,8 @@ class Example:
             self._apply_command()
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
-            self.collision_pipeline.collide(self.state_0, self.contacts)
+            if self.collision_pipeline is not None:
+                self.collision_pipeline.collide(self.state_0, self.contacts)
             if self.solver_type == "vbd":
                 self.solver.set_rigid_history_update(True)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
@@ -352,7 +359,8 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        self.viewer.log_contacts(self.contacts, self.state_0)
+        if self.contacts is not None:
+            self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
     # ------------------------------------------------------------------

@@ -37,7 +37,7 @@ SUBSTEPS = {
     "ipc": 10,
 }
 SOLVER_CHOICES = ("xpbd", "vbd", "mujoco", "featherstone", "kamino", "ipc")
-NATIVE_CONTACT_SOLVERS = {"mujoco", "kamino"}
+NATIVE_CONTACT_SOLVERS = {"mujoco", "kamino", "ipc"}
 
 
 class Example:
@@ -169,7 +169,8 @@ class Example:
         self.capture()
 
     def capture(self):
-        if wp.get_device().is_cuda:
+        # SolverIPC steps eagerly: only an eager step grows its contact lists and raises when it fails
+        if wp.get_device().is_cuda and self.solver_name != "ipc":
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph

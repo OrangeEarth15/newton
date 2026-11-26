@@ -140,8 +140,13 @@ class Example:
         builder.color(balance_colors=False)
         self.model = builder.finalize(device=args.device)
 
-        self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="latest")
-        self.contacts = self.collision_pipeline.contacts()
+        if self.solver_type == "ipc":
+            # SolverIPC finds its own contacts
+            self.collision_pipeline = None
+            self.contacts = None
+        else:
+            self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching="latest")
+            self.contacts = self.collision_pipeline.contacts()
         if self.solver_type == "kamino":
             use_scc = self.kamino_backend == "scc"
             config = newton.solvers.SolverKamino.Config.from_model(
@@ -183,7 +188,8 @@ class Example:
 
     def capture(self):
         """Capture the simulation loop for CUDA replay."""
-        if self.solver.device.is_cuda:
+        # SolverIPC steps eagerly: only an eager step grows its contact lists and raises when it fails
+        if self.solver.device.is_cuda and self.solver_type != "ipc":
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
@@ -195,7 +201,8 @@ class Example:
         for substep in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.viewer.apply_forces(self.state_0)
-            self.collision_pipeline.collide(self.state_0, self.contacts)
+            if self.collision_pipeline is not None:
+                self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(
                 self.state_0,
                 self.state_1,

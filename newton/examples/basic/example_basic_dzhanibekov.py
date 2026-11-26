@@ -135,7 +135,7 @@ class Example:
             self.contacts = None
         else:
             raise ValueError(
-                f"Unknown solver type: {self.solver_type}. Choose from 'vbd', 'xpbd', 'mujoco', or 'kamino'."
+                f"Unknown solver type: {self.solver_type}. Choose from 'vbd', 'xpbd', 'mujoco', 'kamino', or 'ipc'."
             )
 
         self.state_0 = self.model.state()
@@ -157,7 +157,8 @@ class Example:
         self.capture()
 
     def capture(self):
-        if wp.get_device().is_cuda:
+        # SolverIPC steps eagerly: only an eager step grows its contact lists and raises when it fails
+        if wp.get_device().is_cuda and self.solver_type != "ipc":
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph

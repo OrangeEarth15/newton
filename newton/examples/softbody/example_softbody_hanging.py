@@ -90,14 +90,23 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        self.collision_pipeline = newton.CollisionPipeline(self.model)
-        self.contacts = self.collision_pipeline.contacts()
+        if self.solver_type == "ipc":
+            # SolverIPC finds its own contacts
+            self.collision_pipeline = None
+            self.contacts = None
+        else:
+            self.collision_pipeline = newton.CollisionPipeline(self.model)
+            self.contacts = self.collision_pipeline.contacts()
 
         self.viewer.set_model(self.model)
 
         self.capture()
 
     def capture(self):
+        # SolverIPC steps eagerly: only an eager step grows its contact lists and raises when it fails
+        if self.solver_type == "ipc":
+            self.graph = None
+            return
         with wp.ScopedCapture() as capture:
             self.simulate()
         self.graph = capture.graph
@@ -109,7 +118,8 @@ class Example:
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
-            self.collision_pipeline.collide(self.state_0, self.contacts)
+            if self.collision_pipeline is not None:
+                self.collision_pipeline.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             # swap states
@@ -140,7 +150,8 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        self.viewer.log_contacts(self.contacts, self.state_0)
+        if self.contacts is not None:
+            self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
     @staticmethod
@@ -148,7 +159,7 @@ class Example:
         parser = newton.examples.create_parser()
         parser.add_argument(
             "--solver",
-            help="Type of solver (only 'vbd' supports volumetric soft bodies)",
+            help="Type of solver",
             type=str,
             choices=["vbd", "ipc"],
             default="vbd",

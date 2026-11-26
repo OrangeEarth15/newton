@@ -2110,5 +2110,7 @@ Twelve other examples take ``--solver ipc``: ``basic_dzhanibekov``,
 ``cable_initial_rest_pose``, ``cable_plectoneme``, ``cable_y_junction``,
 ``cloth_hanging``, ``balance_bird``, ``softbody_dropping_to_cloth``,
 ``softbody_gift`` and ``softbody_hanging``, for
-example ``python -m newton.examples basic_pendulum --solver ipc``. Add
-``--viewer null`` to run an example without a display.
+example ``python -m newton.examples basic_pendulum --solver ipc``. With
+SolverIPC they step without a CUDA graph, so that a step grows its contact
+lists when they overflow and raises when it fails, and they skip Newton's
+collision pipeline. Add ``--viewer null`` to run an example without a display.
