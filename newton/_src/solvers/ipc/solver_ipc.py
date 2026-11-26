@@ -127,12 +127,12 @@ else:
 
 # The libuipc-warp releases SolverIPC takes, development builds counted as their release ("0.5.0.dev0" as 0.5.0): from
 # _UIPC_WARP_MINIMUM up to, and not including, _UIPC_WARP_BELOW. libuipc-warp is 0.x, where a minor release may change
-# its interface incompatibly (0.5.0 did), so the next one is refused until SolverIPC is tested with it. And where to
-# install libuipc-warp from, and a release that SolverIPC takes.
+# its interface incompatibly (0.5.0 did), so the next one is refused until SolverIPC is tested with it. And how to
+# install the newest release that SolverIPC is tested with, as every hint and the guide (docs/solvers/ipc.rst) give it,
+# since libuipc-warp's main branch moves on to the next minor release: move both to a later 0.5 tag once it is tested.
 _UIPC_WARP_MINIMUM = (0, 5, 0)
 _UIPC_WARP_BELOW = (0, 6)
-_UIPC_WARP_INSTALL = "pip install git+https://github.com/OrangeEarth15/libuipc-warp"
-_UIPC_WARP_INSTALL_TAKEN = "pip install git+https://github.com/OrangeEarth15/libuipc-warp@v0.5.0"
+_UIPC_WARP_INSTALL = "pip install git+https://github.com/OrangeEarth15/libuipc-warp@v0.5.0"
 # grow-and-redo attempts of an eager step whose contact lists keep overflowing, as libuipc-warp's FrameRunner
 _MAX_REGROWS = 8
 # libuipc's strength ratio of a joint (the default of its joints' apply_to): the default joint_strength_ratio
@@ -917,7 +917,7 @@ class SolverIPC(SolverBase, CouplingInterface):
             raise ImportError(
                 f"SolverIPC requires libuipc-warp {taken}, and the installed one is {version}. A 0.x minor release of "
                 f"libuipc-warp may change the interface SolverIPC calls, so SolverIPC takes {minor} releases only, the "
-                f"ones it is tested with. Install one: {_UIPC_WARP_INSTALL_TAKEN}"
+                f"ones it is tested with. Install one: {_UIPC_WARP_INSTALL}"
             )
         missing = [name for name, present in _capabilities(uipc_warp).items() if not present]
         if missing:

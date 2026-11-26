@@ -1337,8 +1337,8 @@ class TestSolverIPCInputs(unittest.TestCase):
         A libuipc-warp older than the release SolverIPC is written for is refused, naming it; one of the next minor
         release or later is refused, saying why; and one without a capability SolverIPC calls (the rigid flight,
         AL-IPC's sweep of kinematic moves, the frame restart, the start check of written positions, a d_hat per part of
-        the scene) is refused, naming what it lacks. A development build of the release is taken. Every refusal says
-        where to install it from.
+        the scene) is refused, naming what it lacks. A development build of the release is taken. Every refusal gives
+        the one install command, pinned to the release SolverIPC is tested with.
         """
         import uipc_warp  # noqa: PLC0415
 
@@ -1346,7 +1346,9 @@ class TestSolverIPCInputs(unittest.TestCase):
 
         def refused(pattern):
             newton.solvers.SolverIPC._uipc_warp = None
-            with self.assertRaisesRegex(ImportError, pattern + r".*pip install git\+https://github\.com/OrangeEarth15"):
+            with self.assertRaisesRegex(
+                ImportError, pattern + r".*pip install git\+https://github\.com/OrangeEarth15/libuipc-warp@v0\.5\.0$"
+            ):
                 newton.solvers.SolverIPC._import_uipc_warp()
 
         names = uipc_warp.EngineOptions.names()
@@ -1364,7 +1366,7 @@ class TestSolverIPCInputs(unittest.TestCase):
                     refused(
                         f"requires libuipc-warp {taken}, and the installed one is {version}\\. A 0\\.x minor release "
                         "of libuipc-warp may change the interface SolverIPC calls, so SolverIPC takes 0\\.5 releases "
-                        "only, the ones it is tested with\\. Install one: (?=.*@v0\\.5\\.0$)"
+                        "only, the ones it is tested with\\. Install one: "
                     )
             for option in ("affine_rotation", "al_sweep_kinematic"):
                 without = tuple(name for name in names if name != option)
