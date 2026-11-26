@@ -216,7 +216,7 @@ def test_force_range_bounds_the_shoulder(test, device):
     test.assertLess(abs(left), friction + _SLACK)
 
 
-class TestImportedArm(unittest.TestCase):
+class TestSolverIPCImportedArm(unittest.TestCase):
     pass
 
 
@@ -226,7 +226,7 @@ for _name, _func in (
     ("test_arm_rests_in_balance", test_arm_rests_in_balance),
     ("test_force_range_bounds_the_shoulder", test_force_range_bounds_the_shoulder),
 ):
-    add_function_test(TestImportedArm, _name, _func, devices=devices, requires=("uipc_warp",))
+    add_function_test(TestSolverIPCImportedArm, _name, _func, devices=devices, requires=("uipc_warp",))
 
 
 if __name__ == "__main__":

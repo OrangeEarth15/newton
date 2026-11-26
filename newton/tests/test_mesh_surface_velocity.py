@@ -343,7 +343,7 @@ for test_device in devices:
             continue
         requires = MUJOCO_MODULES if name == "mujoco" else ("uipc_warp",) if name == "ipc" else ()
         # SolverIPC (expected failures): the box or sphere of every test starts 1 cm into the plane mesh, which the
-        # barrier refuses; newton/tests/ipc/test_surface_velocity.py runs the first and the third with a clean start
+        # barrier refuses; newton/tests/ipc/test_ipc_surface_velocity.py runs the first and the third with a clean start
         moves, disabled, normal = (
             test_mesh_surface_velocity_moves_rigid_body,
             test_disabled_surface_velocity_runs_rigid_solver,

@@ -91,7 +91,7 @@ def _hinged_pair(builder):
 
 def test_rejects_mimic_constraints(test, device):
     """Reject a mimic relation of joints of more than one coordinate (two D6 joints of two linear axes), before the
-    joints' own checks; a relation of revolute or prismatic joints is a joint coordinate term (test_joint_terms.py)."""
+    joints' own checks; a relation of revolute or prismatic joints is a joint coordinate term (test_ipc_joint_terms.py)."""
     builder = newton.ModelBuilder()
     axes = [newton.ModelBuilder.JointDofConfig(axis=a) for a in (newton.Axis.X, newton.Axis.Y)]
     joints = []

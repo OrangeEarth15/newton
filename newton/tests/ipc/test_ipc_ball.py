@@ -38,8 +38,8 @@ from newton.tests.ipc._fixtures import (
     _with_d6,
     _with_free,
 )
-from newton.tests.ipc.test_observables import _momentum_balance
-from newton.tests.ipc.test_observables import _steps as _observed_steps
+from newton.tests.ipc.test_ipc_observables import _momentum_balance
+from newton.tests.ipc.test_ipc_observables import _steps as _observed_steps
 from newton.tests.test_joint_controllers import test_ball_controller, test_ball_controller_rotated_anchor
 from newton.tests.test_joint_damping import _simulate_ball_joint_damping
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires

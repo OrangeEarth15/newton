@@ -31,8 +31,8 @@ import warp as wp
 
 import newton
 from newton.tests.ipc._fixtures import _TIGHT_ROTATIONS, _TINY_LISTS
-from newton.tests.ipc.test_observables import _momentum_balance
-from newton.tests.ipc.test_observables import _steps as _observed_steps
+from newton.tests.ipc.test_ipc_observables import _momentum_balance
+from newton.tests.ipc.test_ipc_observables import _steps as _observed_steps
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
 
 _KIND = newton.solvers.SolverBase.ObservableKind

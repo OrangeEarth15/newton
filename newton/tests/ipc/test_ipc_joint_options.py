@@ -233,7 +233,7 @@ def test_distance_joint_swings_as_a_pendulum(test, device):
     origins: a sphere hanging 1 m from the world on it at its centre swings 0.02 rad as implicit Euler integrates the
     linearized point-mass pendulum, step by step to 1e-3 of its amplitude, and stays at L within the ball joint's
     penalty. A distance joint with a range or a single bound is no stitch: the universal module takes it
-    (test_universal_range), and refuses one whose lower bound is above its upper."""
+    (test_ipc_universal_range), and refuses one whose lower bound is above its upper."""
     L, theta0, g, h = 1.0, 0.02, 10.0, 1.0e-3
     model = _distance_pendulum(device, L, theta0, L, L, gravity=g)
     solver = newton.solvers.SolverIPC(model, **_CONVERGED)
@@ -365,7 +365,7 @@ def test_armature_is_implicit_euler(test, device):
     take their joint_armature as the inertia of their coordinate: they follow the recurrence of
     (I + a) q'' = ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd + f step by step to 1e-4 of their motion, under
     implicit Euler and, from an implicit Euler step, under BDF2, where the recurrence of I alone is farther off. A free
-    joint's armature is refused (a ball joint's is test_ball's)."""
+    joint's armature is refused (a ball joint's is test_ipc_ball's)."""
     for integrator, recurrence in (("bdf1", _drive_recurrence), ("bdf2", _drive_recurrence_bdf2)):
         for kind, length, scale, armature in (("revolute", 0.1, 1.0, 20.0), ("prismatic", 1.0, 10.0, 200.0)):
             with test.subTest(integrator=integrator, kind=kind):
@@ -489,7 +489,7 @@ def test_rejects_d6_joints_libuipc_lacks(test, device):
     """The D6 joints that lock what no joint of SolverIPC locks are refused, naming what they lock: three linear axes,
     one linear and one angular; and two or three angular axes that are not orthonormal, and drives and limits on the D6
     joints that become a ball joint or no joint. (Two orthonormal angular axes are a universal joint, which the
-    universal module takes: test_universal_range.)"""
+    universal module takes: test_ipc_universal_range.)"""
     D = newton.ModelBuilder.JointDofConfig
 
     def model(linear=(), angular=(), **dof):
