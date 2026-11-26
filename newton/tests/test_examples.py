@@ -347,14 +347,6 @@ def add_example_batch(cls: type, name: str, variants: list[dict[str, Any]]):
         add_example_test(cls, name, devices=[device], use_viewer=True, test_suffix=suffix, variants=selected)
 
 
-def expect_example_failure(cls: type, name: str, test_suffix: str):
-    """Mark the tests of the example ``name`` and ``test_suffix`` that ``add_example_test`` registered on ``cls`` for
-    each device as expected failures."""
-    prefix = f"test_{name}_{test_suffix}_"
-    for attribute in [attribute for attribute in vars(cls) if attribute.startswith(prefix)]:
-        getattr(cls, attribute).__unittest_expecting_failure__ = True
-
-
 class TestExampleOutputRegexes(unittest.TestCase):
     def _run_example_with_stderr(self, stderr: str, allowed_prefix: str) -> unittest.TestResult:
         process_result = subprocess.CompletedProcess(
@@ -655,17 +647,6 @@ add_example_batch(
         },
     ],
 )
-add_basic_example_test(
-    name="basic.example_basic_shapes",
-    devices=cuda_test_devices,
-    test_options={"requires": ("pxr.Usd", "uipc_warp"), "num-frames": 150, "solver": "ipc"},
-    use_viewer=True,
-    test_suffix="ipc",
-    allow_output_regexes=[(_WARP_SDF_CONSTANT_CONVERSION_WARNING_RE, "stderr")],
-)
-# SolverIPC (an expected failure): its bodies rest on the barrier's gap, the sphere 5.8 mm above its rest height within
-# d_hat (10 mm), where test_final allows 0.2 mm
-expect_example_failure(TestBasicExamples, "basic.example_basic_shapes", "ipc")
 
 add_basic_example_test(
     name="basic.example_basic_heightfield",
@@ -1604,17 +1585,6 @@ add_example_test(
     use_viewer=True,
     test_suffix="kamino",
 )
-add_example_test(
-    TestSensorExamples,
-    name="sensors.example_sensor_imu",
-    devices=cuda_test_devices,
-    test_options={"requires": ("pxr.Usd", "uipc_warp"), "num-frames": 200, "solver": "ipc"},
-    use_viewer=True,
-    test_suffix="ipc",
-)
-# SolverIPC (an expected failure): its barrier is nearly elastic at the example's steps of 0.5 ms, so after 1 s the cubes
-# still bounce at about 1 m/s and are in flight when test_final reads gravity from the IMU
-expect_example_failure(TestSensorExamples, "sensors.example_sensor_imu", "ipc")
 
 
 class TestMPMExamples(unittest.TestCase):

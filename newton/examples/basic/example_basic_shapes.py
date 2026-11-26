@@ -16,7 +16,6 @@ Runs:
 - `python -m newton.examples basic_shapes --solver vbd`
 - `python -m newton.examples basic_shapes`
 - `python -m newton.examples basic_shapes --solver kamino`
-- `python -m newton.examples basic_shapes --solver ipc`
 """
 
 import warp as wp
@@ -123,8 +122,6 @@ class Example:
             solver_config.dynamics.cull_speculative_contacts = False
             solver_config.scc.max_alternating_iterations = 2
             self.solver = newton.solvers.SolverKamino(self.model, config=solver_config)
-        elif self.solver_type == "ipc":
-            self.solver = newton.solvers.SolverIPC(self.model)
         else:
             self.solver = newton.solvers.SolverXPBD(self.model, iterations=5)
 
@@ -301,8 +298,8 @@ if __name__ == "__main__":
         "--solver",
         type=str,
         default="xpbd",
-        choices=["vbd", "xpbd", "kamino", "ipc"],
-        help="Solver type: xpbd (default), vbd, kamino, or ipc",
+        choices=["vbd", "xpbd", "kamino"],
+        help="Solver type: xpbd (default), vbd, or kamino",
     )
 
     viewer, args = newton.examples.init(parser)

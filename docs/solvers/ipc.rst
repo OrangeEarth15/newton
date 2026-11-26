@@ -461,9 +461,9 @@ The barrier distance d_hat
 
 ``d_hat`` [m] is the distance below which the barrier acts. With the default
 stiffness a surface at rest settles just inside it: the box above rests 9.3 mm
-over the ground with ``d_hat`` 1 cm, and in Newton's ``basic_shapes`` example a
-sphere rests 5.8 mm, a capsule 6.4 mm and a cylinder 8.5 mm above their rest
-heights. Pass a smaller ``d_hat`` for tighter contact; the solver gives a
+over the ground with ``d_hat`` 1 cm, and of the shapes of Newton's
+``basic_shapes`` example a sphere rests 5.8 mm, a capsule 6.4 mm and a cylinder
+8.5 mm above their rest heights. Pass a smaller ``d_hat`` for tighter contact; the solver gives a
 ``d_hat`` argument to every shape and particle. A smaller value makes the
 barrier steeper, which can take more Newton iterations, and leaves less room
 for a kinematic jump, which fails the step when it meets a surface (see
@@ -2101,10 +2101,10 @@ substeps in a CUDA graph and checks every substep's status:
 
    python -m newton.examples cloth_ipc
 
-Fourteen other examples take ``--solver ipc``: ``basic_dzhanibekov``,
-``basic_joints``, ``basic_mimic_joint``, ``basic_pendulum``, ``basic_shapes``,
+Twelve other examples take ``--solver ipc``: ``basic_dzhanibekov``,
+``basic_joints``, ``basic_mimic_joint``, ``basic_pendulum``,
 ``cable_initial_rest_pose``, ``cable_plectoneme``, ``cable_y_junction``,
-``cloth_hanging``, ``balance_bird``, ``sensor_imu``,
-``softbody_dropping_to_cloth``, ``softbody_gift`` and ``softbody_hanging``, for
+``cloth_hanging``, ``balance_bird``, ``softbody_dropping_to_cloth``,
+``softbody_gift`` and ``softbody_hanging``, for
 example ``python -m newton.examples basic_pendulum --solver ipc``. Add
 ``--viewer null`` to run an example without a display.
