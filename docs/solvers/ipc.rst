@@ -125,7 +125,9 @@ solve as a CUDA graph of its own, then reads how it ended (one
 synchronization): when a contact list overflowed, it enlarges the lists and
 solves the step again; when the step failed, it raises :class:`RuntimeError`.
 A captured step can do neither, and reports through the ``STATUS`` observable
-instead (see :ref:`ipc-status`).
+instead (see :ref:`ipc-status`). :meth:`~newton.solvers.SolverIPC.frame_stats`
+gives the last step's Newton iterations, PCG iterations and line-search trials,
+and whether its Newton loop converged.
 
 Pass ``None`` as the ``contacts`` argument of
 :meth:`~newton.solvers.SolverIPC.step`: the solver detects its own contacts and
@@ -781,7 +783,7 @@ surfaces of the bodies, and one vertex per plane, each body's mass counted once.
 Newton's static shapes have no mass and count with 0, as an obstacle does on
 libuipc-warp's array path, where libuipc counts the mass of every body, fixed or
 not. :meth:`~newton.solvers.SolverIPC.contact_stiffness` gives the stiffness of a
-step of any ``dt``. With independent worlds every world takes the range of the
+step of any ``dt``, one value per world. With independent worlds every world takes the range of the
 same world alone (:ref:`ipc-worlds`).
 
 ``adaptive_kappa`` is not libuipc's adaptive stiffness, which is a different
@@ -1608,7 +1610,7 @@ of the step's loops: the Newton iterations of its slowest world. With
 ``adaptive_kappa=True`` every world takes libuipc's stiffness range of the same
 world alone, from the mass and extent of its own vertices and the global ones
 and from the model's ``d_hat`` (:ref:`ipc-d-hat`);
-``contact_stiffness(dt)`` then gives one value per world. MAS preconditions every
+``contact_stiffness(dt)`` then gives each world its own value. MAS preconditions every
 world as the same world alone (:ref:`ipc-mas`), and AL-IPC runs every world's
 augmented-Lagrangian loop as the same world alone (:ref:`ipc-al-ipc`). The
 engine's Newton exit check is not used.

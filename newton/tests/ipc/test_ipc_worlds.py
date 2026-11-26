@@ -721,7 +721,7 @@ def test_independent_worlds_take_their_own_stiffness_range(test, device):
         test.assertEqual(kappa.shape, (len(specs),))
         test.assertEqual(len(set(kappa.tolist())), len(specs))
         for k, one in enumerate(singles):
-            test.assertEqual(kappa[k], newton.solvers.SolverIPC(one, **adaptive).contact_stiffness(dt), f"world {k}")
+            test.assertEqual(kappa[k], newton.solvers.SolverIPC(one, **adaptive).contact_stiffness(dt)[0], f"world {k}")
     lows = solver.contact_stiffness(0.01)
     given = float(np.sqrt(lows.min() * lows.max()))
     clamped = newton.solvers.SolverIPC(model, kappa=given, adaptive_kappa=True, d_hat=D_HAT)
@@ -730,7 +730,7 @@ def test_independent_worlds_take_their_own_stiffness_range(test, device):
     for k, one in enumerate(singles):
         test.assertEqual(
             used[k],
-            newton.solvers.SolverIPC(one, kappa=given, adaptive_kappa=True, d_hat=D_HAT).contact_stiffness(0.01),
+            newton.solvers.SolverIPC(one, kappa=given, adaptive_kappa=True, d_hat=D_HAT).contact_stiffness(0.01)[0],
         )
     s0, s1 = model.state(), model.state()
     with warnings.catch_warnings(record=True) as caught:
@@ -972,6 +972,8 @@ def test_rejects_what_independent_worlds_do_not_take(test, device):
     adaptive = newton.solvers.SolverIPC(_two_worlds(device, box), adaptive_kappa=True, kappa=None)
     test.assertTrue(adaptive._independent)
     test.assertEqual(adaptive.contact_stiffness(0.01).shape, (2,))
+    coupled = newton.solvers.SolverIPC(_two_worlds(device, box), coupled_worlds=True)
+    test.assertEqual(coupled.contact_stiffness(0.01).tolist(), [1.0e9, 1.0e9])  # the one solve's kappa in every world
     al = newton.solvers.SolverIPC(_two_worlds(device, box), contact_constitution="al-ipc")
     test.assertTrue(al._independent)
     mas = newton.solvers.SolverIPC(_two_worlds(device, soft), fem_preconditioner="mas")

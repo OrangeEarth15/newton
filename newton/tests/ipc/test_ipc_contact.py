@@ -240,7 +240,7 @@ def test_excluded_pairs_never_collide(test, device):
             for k in range(1, 31):
                 solver.step(s0, s1, None, None, dt)
                 s0, s1 = s1, s0
-                candidates += solver.frame_stats()["contact_candidates"]
+                candidates += solver._engine.frame_stats()["contact_candidates"]
                 if falls:
                     test.assertAlmostEqual(_engine_z(solver, body), _free_fall(model, body, k), delta=1e-6)
             if falls:
@@ -684,7 +684,7 @@ def test_kappa_is_taken_as_given(test, device):
             warnings.simplefilter("error")
             _run(model, solver, 3)
         for dt in (0.01, 1.0 / 600.0):
-            test.assertEqual(solver.contact_stiffness(dt), kappa)
+            test.assertEqual(solver.contact_stiffness(dt).tolist(), [kappa])
         tabular = solver._scene.engine_inputs(solver._config, "cpu")["contact_tabular"]  # what the engine is given
         np.testing.assert_array_equal(solver._config.kappa if tabular is None else tabular["kappa"], kappa)
     with test.assertRaisesRegex(ValueError, "kappa=None, libuipc's default stiffness, needs adaptive_kappa=True"):
@@ -700,15 +700,16 @@ def test_adaptive_kappa_is_libuipcs(test, device):
     for dt in (0.01, 1.0 / 600.0):
         lo, hi = _libuipc_corridor(model, dt, D_HAT)
         default = newton.solvers.SolverIPC(model, kappa=None, **adaptive).contact_stiffness(dt)
-        test.assertAlmostEqual(default / lo, 1.0, places=12)
+        test.assertEqual(default.shape, (1,))
+        test.assertAlmostEqual(default[0] / lo, 1.0, places=12)
     lo, hi = _libuipc_corridor(model, 0.01, D_HAT)
     inside = newton.solvers.SolverIPC(model, kappa=3.0 * lo, **adaptive)
-    test.assertEqual(inside.contact_stiffness(0.01), 3.0 * lo)
+    test.assertEqual(inside.contact_stiffness(0.01).tolist(), [3.0 * lo])
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         _run(model, inside, 2)
     above = newton.solvers.SolverIPC(model, kappa=1.0e3 * hi, **adaptive)
-    test.assertAlmostEqual(above.contact_stiffness(0.01) / hi, 1.0, places=12)
+    test.assertAlmostEqual(above.contact_stiffness(0.01)[0] / hi, 1.0, places=12)
     s0, s1 = model.state(), model.state()
     given, used = re.escape(f"{1.0e3 * hi:g}"), re.escape(f"{hi:.6g}")
     with test.assertWarnsRegex(newton.NewtonWarning, rf"kappa={given} is outside .* the steps use {used} Pa"):

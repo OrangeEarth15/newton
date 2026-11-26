@@ -25,6 +25,7 @@ def test_drop_on_ground(test, device):
     test.assertLess(min_z[-1], 0.01)  # and it settles inside the activation distance
     test.assertLess(np.abs(traj[-1] - traj[-2]).max(), 1e-5)
     stats = solver.frame_stats()
+    test.assertEqual(set(stats), {"newton_iterations", "pcg_iterations", "line_search_trials", "converged"})
     test.assertTrue(stats["converged"])
 
 
@@ -184,7 +185,7 @@ def test_cloth_drapes_over_sphere(test, device):
     test.assertGreater(q[mid, 2], center[2] + radius)  # the middle rests on the top of the sphere
     test.assertLess(q[mid, 2], center[2] + radius + D_HAT + 1e-3)
     test.assertLess(q[:, 2].min(), center[2])  # and the sheet hangs down around it
-    test.assertFalse(solver.frame_stats()["contact_overflow"])
+    test.assertFalse(solver._engine.frame_stats()["contact_overflow"])
 
 
 def test_cloth_self_contact_folded_sheet(test, device):
@@ -230,7 +231,7 @@ def test_cloth_self_contact_folded_sheet(test, device):
         solver.step(s0, s1, None, None, 0.01)
         s0, s1 = s1, s0
         hits += checker.intersections(solver._engine.vm.x)
-        pairs = max(pairs, solver.frame_stats()["contact_candidates"])
+        pairs = max(pairs, solver._engine.frame_stats()["contact_candidates"])
     test.assertEqual(hits, 0)
     test.assertGreater(pairs, 0)  # the only surface is the sheet's: these are self-contact pairs
     # particles are numbered row by row along x; column i of the top layer lies over column nx - i

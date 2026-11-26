@@ -152,6 +152,8 @@ _FRICTION_TOLERANCE = 0.4
 # boxes comes to rest, where libuipc's default 0.3 drops the pair within three outer updates (docs/solvers/ipc.rst >
 # "AL-IPC contact")
 _AL_DECAY_FACTOR = 0.9
+# the counters of libuipc-warp's frame_stats() that SolverIPC.frame_stats() returns, the ones it documents
+_FRAME_STATS = ("newton_iterations", "pcg_iterations", "line_search_trials", "converged")
 # MuJoCo's CONNECT and WELD equality types (mjtEq), and the target kind with which Newton's importers link an equality
 # row to the loop joint they turned it into (MjcEqualityTargetKind.JOINT); neither has a public name in Newton
 _EQ_CONNECT, _EQ_WELD = 0, 1
@@ -2501,29 +2503,41 @@ class SolverIPC(SolverBase, CouplingInterface):
         for live, kept in self._carried:
             wp.copy(live, kept)
 
-    def contact_stiffness(self, dt: float) -> float | np.ndarray:
-        """The contact stiffness [Pa] of every contact pair in a step of length ``dt`` [s]: ``kappa``, or with
-        ``adaptive_kappa`` ``kappa`` clamped into libuipc's stiffness range for this model and ``dt``, the range's lower
-        bound when ``kappa`` is None (see :ref:`ipc-contact`). 0 for a model without particles and bodies, which has no
-        contact.
+    def contact_stiffness(self, dt: float) -> np.ndarray:
+        """The contact stiffness [Pa] of every contact pair in a step of length ``dt`` [s], per world: a float64 array
+        of shape ``(model.world_count,)``, world ``k``'s pairs taking entry ``k``.
 
-        With ``adaptive_kappa`` and independent worlds every world has a range of its own, that of the world alone (see
-        :ref:`ipc-worlds`), and the stiffness is one value per world, a float64 array of ``model.world_count``: world
-        ``k``'s pairs take entry ``k``, and a world in which nothing moves, which has no contact, 0."""
+        It is ``kappa``, or with ``adaptive_kappa`` ``kappa`` clamped into libuipc's stiffness range for this model and
+        ``dt``, the range's lower bound when ``kappa`` is None (see :ref:`ipc-contact`). With ``adaptive_kappa`` and
+        independent worlds every world has a range of its own, that of the world alone (see :ref:`ipc-worlds`), and a
+        world in which nothing moves, which has no contact, has 0; otherwise every entry is the one solve's value. 0
+        everywhere for a model without particles and bodies, which has no contact."""
+        out = np.zeros(self.model.world_count, np.float64)
         if self._engine is None:
-            return 0.0
+            return out
         policies = self._engine.world_contact_stiffness
         if policies is not None:  # every world's own range (libuipc-warp's independent worlds)
-            out = np.zeros(self.model.world_count, np.float64)
             out[self._status_entries] = [policy.resolve(dt)[1] for policy in policies]
             return out
         policy = self._engine.contact_stiffness
-        return float(self._config.kappa if policy is None else policy.resolve(dt)[1])
+        out[:] = self._config.kappa if policy is None else policy.resolve(dt)[1]
+        return out
 
-    def frame_stats(self) -> dict:
-        """Solver counters of the last step: Newton/PCG iterations, line-search trials, convergence.
+    def frame_stats(self) -> dict[str, int | bool]:
+        """The solver's counters of the last step. Synchronizes with the device.
 
-        With independent worlds the counts are those of the step's loops, which run as long as a world is in them: the
-        Newton iterations of the slowest world. Synchronizes with the device.
+        The keys are:
+
+        * ``newton_iterations``: the Newton iterations of the step; with independent worlds those of the step's loop,
+          which runs as long as a world is in it, so those of the slowest world.
+        * ``pcg_iterations``: the PCG iterations of the step, summed over its Newton iterations.
+        * ``line_search_trials``: the trials of the step's line searches, summed over its Newton iterations.
+        * ``converged``: whether the Newton loop ended on its convergence test (with independent worlds: in every
+          world), not at ``newton_max_iter`` or on a failure.
+
+        A model without particles and bodies has no solve: 0 iterations and trials, and ``converged``.
         """
-        return {} if self._engine is None else self._engine.frame_stats()
+        if self._engine is None:
+            return {"newton_iterations": 0, "pcg_iterations": 0, "line_search_trials": 0, "converged": True}
+        stats = self._engine.frame_stats()
+        return {key: stats[key] for key in _FRAME_STATS}
