@@ -1383,7 +1383,7 @@ class TestSolverIPCInputs(unittest.TestCase):
         def refused(pattern):
             newton.solvers.SolverIPC._uipc_warp = None
             with self.assertRaisesRegex(
-                ImportError, pattern + r".*pip install git\+https://github\.com/OrangeEarth15/libuipc-warp@v0\.5\.0$"
+                ImportError, pattern + r".*pip install git\+https://github\.com/OrangeEarth15/libuipc-warp@v0\.5\.1$"
             ):
                 newton.solvers.SolverIPC._import_uipc_warp()
 

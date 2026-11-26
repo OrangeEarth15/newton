@@ -136,7 +136,7 @@ else:
 # next minor release: move both to a later 0.5 tag once it is tested.
 _UIPC_WARP_MINIMUM = "0.5.0"
 _UIPC_WARP_BELOW = "0.6.0.dev0"
-_UIPC_WARP_INSTALL = "pip install git+https://github.com/OrangeEarth15/libuipc-warp@v0.5.0"
+_UIPC_WARP_INSTALL = "pip install git+https://github.com/OrangeEarth15/libuipc-warp@v0.5.1"
 # grow-and-redo attempts of an eager step whose contact lists keep overflowing, as libuipc-warp's FrameRunner
 _MAX_REGROWS = 8
 # libuipc's strength ratio of a joint (the default of its joints' apply_to): the default joint_strength_ratio

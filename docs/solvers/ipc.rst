@@ -72,7 +72,7 @@ request.
 
 .. code-block:: console
 
-   pip install git+https://github.com/OrangeEarth15/libuipc-warp@v0.5.0
+   pip install git+https://github.com/OrangeEarth15/libuipc-warp@v0.5.1
 
 Its README gives the requirements: Linux, an NVIDIA driver that supports CUDA
 12.4 or newer, and Python 3.11 to 3.13.
@@ -318,7 +318,7 @@ The status is a mask of :class:`~newton.solvers.SolverIPC.StatusBits`. A bit of
   ``1 << 4``, as libuipc-warp's ``FrameStatusFlags.INVALID_TOI``, which the
   engine names after the time of impact (TOI) that CCD computes; libuipc-warp's
   `array interface guide
-  <https://github.com/OrangeEarth15/libuipc-warp/blob/v0.5.0/docs/array-api.md#how-a-frame-ended>`__
+  <https://github.com/OrangeEarth15/libuipc-warp/blob/v0.5.1/docs/array-api.md#how-a-frame-ended>`__
   describes that flag.
 - ``TRAVERSAL_EXHAUSTED``: a search of the collision tree ran out of its node
   budget, so contact candidates are missing.
@@ -781,7 +781,7 @@ into a range it computes from the scene, here called libuipc's stiffness range,
 :math:`\kappa_{lo} = c\,\bar m / \Delta t^2`, where :math:`\bar m` is the mean
 mass of the vertices and :math:`c` a factor of the scene's diagonal and
 ``d_hat`` (libuipc-warp's
-`options guide <https://github.com/OrangeEarth15/libuipc-warp/blob/v0.5.0/docs/options.md#contact-stiffness>`__
+`options guide <https://github.com/OrangeEarth15/libuipc-warp/blob/v0.5.1/docs/options.md#contact-stiffness>`__
 gives the formula). A scene that sets no contact model takes
 :math:`\kappa_{lo}`, and a stiffness the user gives is clamped into the range.
 ``adaptive_kappa=True`` means "use libuipc's stiffness range": the solver then
