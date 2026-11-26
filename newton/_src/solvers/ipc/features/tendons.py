@@ -32,8 +32,9 @@ import warp as wp
 import newton
 from newton import GeoType, ModelFlags, ShapeFlags
 
+from ..kernels import _LIMIT_OVERSHOOT
 from ..rotations import _quat_to_matrix_np
-from .joint_terms import _DEFAULT_SOLREF, _LIMIT_OVERSHOOT, _SOLREF_FORCE_SPACE
+from .joint_terms import _DEFAULT_SOLREF, _SOLREF_FORCE_SPACE
 
 if TYPE_CHECKING:
     from newton import Control, Model, State

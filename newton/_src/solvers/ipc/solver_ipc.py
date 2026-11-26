@@ -47,6 +47,9 @@ from .joints import (
     _write_joint_controls,
 )
 from .kernels import (
+    _EQ_CONNECT,
+    _EQ_TARGET_JOINT,
+    _EQ_WELD,
     _aim_kinematic_bodies,
     _any_selected,
     _body_accelerations,
@@ -154,10 +157,6 @@ _FRICTION_TOLERANCE = 0.4
 _AL_DECAY_FACTOR = 0.9
 # the counters of libuipc-warp's frame_stats() that SolverIPC.frame_stats() returns, the ones it documents
 _FRAME_STATS = ("newton_iterations", "pcg_iterations", "line_search_trials", "converged")
-# MuJoCo's CONNECT and WELD equality types (mjtEq), and the target kind with which Newton's importers link an equality
-# row to the loop joint they turned it into (MjcEqualityTargetKind.JOINT); neither has a public name in Newton
-_EQ_CONNECT, _EQ_WELD = 0, 1
-_EQ_TARGET_JOINT = 1
 
 
 def _release(version: str) -> tuple[int, ...]:

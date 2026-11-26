@@ -24,6 +24,11 @@ _MAXVAL = wp.constant(wp.float32(MAXVAL))
 # Newton's default joint_effort_limit, which bounds no drive
 _EFFORT_LIMIT = 1.0e6
 _EFFORT_BOUND = wp.constant(wp.float64(_EFFORT_LIMIT))
+# MuJoCo's equality types (mjtEq: CONNECT, WELD, JOINT), and the target kinds with which Newton's importers link an
+# equality row to the joint or the mimic row they made of it (MjcEqualityTargetKind.JOINT, MIMIC); none has a public
+# name in Newton
+_EQ_CONNECT, _EQ_WELD, _EQ_JOINT = 0, 1, 2
+_EQ_TARGET_JOINT, _EQ_TARGET_MIMIC = 1, 2
 
 
 @wp.func

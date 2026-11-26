@@ -41,6 +41,8 @@ import warp as wp
 import newton
 from newton import JointType, ModelFlags
 
+from ..kernels import _EQ_JOINT, _EQ_TARGET_MIMIC, _LIMIT_OVERSHOOT
+
 if TYPE_CHECKING:
     from newton import Control, Model, State
 
@@ -54,11 +56,6 @@ _TRN_TENDON = 2
 _SOLREF_FORCE_SPACE = 0
 # MuJoCo's default solref of a limit (time constant [s], damping ratio)
 _DEFAULT_SOLREF = (0.02, 1.0)
-# MuJoCo's JOINT equality (EqType.JOINT) and the target kind with which Newton's importers link it to the mimic row
-# they made of it (MjcEqualityTargetKind.MIMIC); neither has a public name in Newton
-_EQ_JOINT, _EQ_TARGET_MIMIC = 2, 2
-# the overshoot at which SolverIPC's cubic limit has a limit's stiffness (kernels._LIMIT_OVERSHOOT) [m or rad]
-_LIMIT_OVERSHOOT = wp.constant(wp.float64(1.0e-3))
 
 
 def _one_coordinate(model: Model) -> np.ndarray:

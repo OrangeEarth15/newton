@@ -51,8 +51,6 @@ if TYPE_CHECKING:
     from ..solver_ipc import SolverIPC
     from . import FeatureOptions
 
-# a rod joint's degrees of freedom, in the order of add_joint_rod's axes
-_DOFS = ("shear_x", "shear_y", "stretch", "bend_x", "bend_y", "twist")
 _REMEDY = "A rod's stiffness and damping are its joint_target_ke and joint_target_kd, its rest joint_rest_q"
 
 
