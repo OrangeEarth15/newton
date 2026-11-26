@@ -28,9 +28,10 @@ from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 
 def test_contact_at_start_fails(test, device):
-    """A step that starts with surfaces in touching contact fails: eagerly it raises, captured it sets the bit.
+    """Fail a step that starts with surfaces in touching contact.
 
-    The solver refuses such a start at construction, so the step takes it from a state written between steps.
+    Eagerly the step raises; captured, it sets the status bit. The solver refuses such a start at construction, so the
+    step takes it from a state written between steps.
     """
     model, touching = _boxes_apart(device)
     solver = newton.solvers.SolverIPC(model)
@@ -57,8 +58,10 @@ def test_contact_at_start_fails(test, device):
 
 
 def test_check_status(test, device):
-    """check_status returns False after a clean step, warns when the Newton loop reached its iteration limit, and
-    refuses a container without the status."""
+    """Return False from check_status after a clean step and warn at the Newton iteration limit.
+
+    check_status also refuses a container without the status.
+    """
     import warnings  # noqa: PLC0415
 
     model, _ = _boxes_apart(device)
@@ -82,10 +85,13 @@ def test_check_status(test, device):
 
 
 def test_status_bits_of_a_later_libuipc_warp(test, device):
-    """A libuipc-warp with a status bit SolverIPC does not name (a made-up LATER_FLAG, 1 << 20) is taken: the import
-    checks only that every StatusBits bit is one of its flags under its name. check_status takes the extra bit as no
-    failure and warns, naming it as libuipc-warp does, and still raises on a failure next to it. A libuipc-warp without
-    a StatusBits bit, or with one under another name, is refused."""
+    """Accept a libuipc-warp with extra status bits and refuse one that lacks or renames a StatusBits bit.
+
+    A libuipc-warp with a status bit SolverIPC does not name (a made-up LATER_FLAG, 1 << 20) is taken: the import checks
+    only that every StatusBits bit is one of its flags under its name. check_status takes the extra bit as no failure
+    and warns, naming it as libuipc-warp does, and still raises on a failure next to it. A libuipc-warp without a
+    StatusBits bit, or with one under another name, is refused.
+    """
     import enum  # noqa: PLC0415
 
     import uipc_warp.arrays  # noqa: PLC0415
@@ -124,9 +130,12 @@ def test_status_bits_of_a_later_libuipc_warp(test, device):
 
 
 def test_pcg_limit_warns_and_invalid_stitch_fails(test, device):
-    """libuipc-warp's PCG_LIMIT (a linear solve stopped at its iteration limit) is a notice: check_status warns and
-    the step stands. Its INVALID_STITCH (a stitch value written between steps that is not finite or is negative)
-    fails the step, and check_status says which input to fix."""
+    """Warn on libuipc-warp's PCG_LIMIT and fail the step on its INVALID_STITCH.
+
+    PCG_LIMIT (a linear solve stopped at its iteration limit) is a notice: check_status warns and the step stands.
+    INVALID_STITCH (a stitch value written between steps that is not finite or is negative) fails the step, and
+    check_status says which input to fix.
+    """
     model, _ = _boxes_apart(device)
     solver = newton.solvers.SolverIPC(model)
     observables = solver.observables({solver.ObservableKind.STATUS})
@@ -142,12 +151,13 @@ def test_pcg_limit_warns_and_invalid_stitch_fails(test, device):
 
 
 def test_default_d_hat_follows_small_features(test, device):
-    """Without a d_hat argument the solver lowers d_hat to a quarter of the smallest colliding feature.
+    """Lower the default d_hat to a quarter of the smallest colliding feature.
 
-    The tip of Newton's balance_bird example, a sphere of 8 mm radius 1 mm above the 6 mm top of a static cone,
-    overflowed the contact lists of captured steps with libuipc's 0.01 m; with the default 2 mm it does not. A cloth of
-    5 mm cells gets 2.5 mm and rests unstretched; with 0.01 m the barrier between its non-adjacent primitives
-    stretches it. An explicit d_hat is kept, and a model of large features keeps 0.01 m.
+    Without a d_hat argument the solver lowers d_hat this way. The tip of Newton's balance_bird example, a sphere of 8
+    mm radius 1 mm above the 6 mm top of a static cone, overflowed the contact lists of captured steps with libuipc's
+    0.01 m; with the default 2 mm it does not. A cloth of 5 mm cells gets 2.5 mm and rests unstretched; with 0.01 m the
+    barrier between its non-adjacent primitives stretches it. An explicit d_hat is kept, and a model of large features
+    keeps 0.01 m.
     """
 
     def tip():
@@ -203,10 +213,12 @@ def test_default_d_hat_follows_small_features(test, device):
 
 
 def test_default_d_hat_follows_small_free_particles(test, device):
-    """Without a d_hat argument the solver also keeps d_hat at or below a quarter of the smallest radius of a free
-    particle that collides: 25 free particles of radius 1 mm, falling 3 cm onto the ground in eager steps of 1/120 s,
+    """Keep the default d_hat at or below a quarter of the smallest radius of a colliding free particle.
+
+    Without a d_hat argument, 25 free particles of radius 1 mm, falling 3 cm onto the ground in eager steps of 1/120 s,
     get 0.25 mm and rest less than 0.3 mm above it, where libuipc's 0.01 m rested them ten radii above. Particles that
-    meet nothing (no shape that collides with particles, no particle grid) and inactive ones leave d_hat as it is."""
+    meet nothing (no shape that collides with particles, no particle grid) and inactive ones leave d_hat as it is.
+    """
 
     def particles(ground=True, grid=True, flags=int(newton.ParticleFlags.ACTIVE)):
         builder = newton.ModelBuilder()
@@ -243,14 +255,15 @@ def _vertex_d_hat(solver):
 
 
 def test_d_hat_per_shape(test, device):
-    """Without a d_hat argument every shape and particle takes a d_hat of its own, as a libuipc geometry takes its meta
-    d_hat: libuipc's 0.01 m, lowered to a quarter of its own size and of the size of every part it can touch, so that a
-    pair, which takes the mean of its two values, stays below both parts' shares.
+    """Give every shape and particle a default d_hat of its own, as a libuipc geometry takes its meta d_hat.
+
+    Without a d_hat argument each takes libuipc's 0.01 m, lowered to a quarter of its own size and of the size of every
+    part it can touch, so that a pair, which takes the mean of its two values, stays below both parts' shares.
 
     A box of half size 0.1 m and one of 8 mm on the ground, in collision groups that never meet: the large box's
-    vertices carry 0.01 m and it rests 5 to 10 mm above the ground, the small box's carry 2 mm and it rests less than
-    2 mm above it. With one value per model the large box took the small one's 2 mm. In one group both carry 2 mm on
-    every vertex, the model's value as before.
+    vertices carry 0.01 m and it rests 5 to 10 mm above the ground, the small box's carry 2 mm and it rests less than 2
+    mm above it. With one value per model the large box took the small one's 2 mm. In one group both carry 2 mm on every
+    vertex, the one value the model's smallest part allows.
     """
 
     def model(groups):
@@ -286,12 +299,14 @@ def test_d_hat_per_shape(test, device):
 
 
 def test_d_hat_per_world(test, device):
-    """With several worlds the shapes of a world take the d_hat of what they can touch, their world and the global
-    shapes, as with the world alone: a box of half size 8 mm in world 0 (2 mm) and one of 0.1 m in world 1 (0.01 m)
-    over the global ground plane, which has none (a vertex and a half plane take the vertex's). World 1's box carries
-    0.01 m, and its run stays within 1e-6 m of the run of world 1 alone, where with one value per model it took world
-    0's 2 mm. A global static box that both worlds can touch takes the smallest value of the worlds, so that each of its
-    pairs stays below both parts' shares."""
+    """Give the shapes of each world the default d_hat of what they can touch, as with the world alone.
+
+    With several worlds the shapes of a world take the d_hat of their world and the global shapes. The model has a box
+    of half size 8 mm in world 0 (2 mm) and one of 0.1 m in world 1 (0.01 m) over the global ground plane, which has
+    none (a vertex and a half plane take the vertex's). World 1's box carries 0.01 m, and its run stays within 1e-6 m of
+    the run of world 1 alone, where with one value per model it took world 0's 2 mm. A global static box that both
+    worlds can touch takes the smallest value of the worlds, so that each of its pairs stays below both parts' shares.
+    """
 
     def world(half):
         content = newton.ModelBuilder()
@@ -335,11 +350,13 @@ def test_d_hat_per_world(test, device):
 
 
 def test_cloth_takes_one_d_hat(test, device):
-    """The particles of a cloth take one d_hat, the smallest of its particles, since libuipc needs one value on the
-    particles of a contact triangle: a cloth of 2 cm cells with three particles attached to a sphere of radius 4 mm,
-    beside a box of half size 0.2 m. The attached particles do not collide with the sphere, so alone they would keep
-    0.01 m; every particle of the cloth takes the 1 mm of the others, and the solver builds (libuipc-warp refuses a
-    contact triangle whose particles differ)."""
+    """Give all particles of a cloth one d_hat, the smallest of its particles.
+
+    libuipc needs one value on the particles of a contact triangle. A cloth of 2 cm cells has three particles attached
+    to a sphere of radius 4 mm, beside a box of half size 0.2 m. The attached particles do not collide with the sphere,
+    so alone they would keep 0.01 m; every particle of the cloth takes the 1 mm of the others, and the solver builds
+    (libuipc-warp refuses a contact triangle whose particles differ).
+    """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
     _cloth(builder, 10, 0.02, 0.5)
@@ -360,7 +377,7 @@ def test_cloth_takes_one_d_hat(test, device):
 
 
 def test_overflow_grows(test, device):
-    """Contact lists that overflow grow: at once in an eager step, after grow() when the step is captured.
+    """Grow contact lists that overflow, at once in an eager step and after grow() when the step is captured.
 
     Either way the cubes come to rest without an intersection, and a captured step sets the overflow bit.
     """
@@ -418,9 +435,11 @@ def test_overflow_grows(test, device):
 
 
 def test_grown_lists_keep_a_changed_gravity(test, device):
-    """A gravity changed through notify_model_changed holds after contact lists that overflow have grown, in an eager
-    step and through grow(): the cubes fall and land as those of a model built with that gravity, whose lists grow the
-    same way. (The grown solve used to take the gravity the model was laid out with.)"""
+    """Keep a gravity changed through notify_model_changed after overflowing contact lists grow.
+
+    In an eager step and through grow(), the cubes fall and land as those of a model built with that gravity, whose
+    lists grow the same way. (The grown solve used to take the gravity the model was laid out with.)
+    """
     tight = {"newton_velocity_tol": 1e-6, "linear_tol_rate": 1e-12, "semi_implicit": False}
     g = (0.0, 0.0, -2.0 * 9.81)
 
@@ -459,7 +478,7 @@ def test_grown_lists_keep_a_changed_gravity(test, device):
 
 
 def test_teleport_equals_fresh_solver(test, device):
-    """A state written between graph replays continues as a solver started from it does."""
+    """Continue from a state written between graph replays as a solver started from it does."""
     tight = {"newton_velocity_tol": 1e-6, "linear_tol_rate": 1e-12, "semi_implicit": False}
 
     def scene():
@@ -521,10 +540,10 @@ def test_teleport_equals_fresh_solver(test, device):
 
 
 def test_reset_inside_captured_graph(test, device):
-    """A reset captured before every step discards the friction of the last step's contacts.
+    """Discard the last step's contact friction with a reset captured before every step.
 
-    A cube sliding at 1 m/s on the ground then keeps its speed, as a solver started anew every step would. A mask
-    that selects no world with content leaves the steps as they are without a reset: friction slows the cube.
+    A cube sliding at 1 m/s on the ground then keeps its speed, as a solver started anew every step would. A mask that
+    selects no world with content leaves the steps as they are without a reset: friction slows the cube.
     """
     g, mu, v0, dt = 9.81, 0.5, 1.0, 0.01
     runs = {}
@@ -587,12 +606,15 @@ def _hanging_cloth(device):
 
 
 def test_graph_outdated_after_long_solves(test, device):
-    """graph_outdated() gives the engine the Newton and PCG iterations of the captured steps replayed since it was last
+    """Return True from graph_outdated() after long PCG solves and keep the PCG loop after short ones.
+
+    graph_outdated() gives the engine the Newton and PCG iterations of the captured steps replayed since it was last
     called (libuipc-warp's SimEngine.graph_outdated, whose choice of the PCG loop its own tests hold). A cloth hanging
     from its top edge, solved to 1e-12, takes about 270 PCG iterations per Newton iteration: the first call after
-    replays returns True, a second call False, and the steps captured from then on, with the other loop, end where
-    the steps of the old graph end, to 1e-6. A soft cube falling freely, solved to 1e-3, takes fewer than 128, and the
-    loop stays."""
+    replays returns True, a second call False, and the steps captured from then on, with the other loop, end where the
+    steps of the old graph end, to 1e-6. A soft cube falling freely, solved to 1e-3, takes fewer than 128, and the loop
+    stays.
+    """
     import uipc_warp  # noqa: PLC0415
 
     for long in (True, False):
@@ -636,12 +658,15 @@ def test_graph_outdated_after_long_solves(test, device):
 
 
 def test_graph_outdated_takes_the_engines_guesses(test, device):
-    """When the engine says that a step captured from now on would hold better guesses of its size ladders or another
-    PCG loop (libuipc-warp's SimEngine.graph_outdated, whose ladders and loop its own tests hold), graph_outdated()
-    gives it the iterations of the replayed steps and returns True, the engine takes the guesses for the next capture
+    """Hand the engine's guesses to the next capture through graph_outdated() and drop the solver's graph.
+
+    When the engine says that a step captured from now on would hold better guesses of its size ladders or another PCG
+    loop (libuipc-warp's SimEngine.graph_outdated, whose ladders and loop its own tests hold), graph_outdated() gives it
+    the iterations of the replayed steps and returns True, the engine takes the guesses for the next capture
     (prepare_capture, as libuipc-warp's FrameRunner does before it captures) and the solver drops its own graph of a
-    step, which the next eager step captures anew; when the engine says no, it returns False and asks for nothing. The
-    engine's answers are given here."""
+    step, which the next eager step captures anew. When the engine says no, it returns False and asks for nothing. The
+    engine's answers are given here.
+    """
     import uipc_warp  # noqa: PLC0415
 
     model = _hanging_cloth(device)
@@ -678,8 +703,11 @@ def test_graph_outdated_takes_the_engines_guesses(test, device):
 
 
 def test_default_control_is_built_once(test, device):
-    """step(control=None) builds the model's Control once, not at every step, and again when the model holds other
-    arrays for the inputs the solver reads (here joint_f, which then drives a hinge)."""
+    """Build the model's default Control once, and again when the model holds other input arrays.
+
+    step(control=None) builds the model's Control once, not at every step, and again when the model holds other arrays
+    for the inputs the solver reads (here joint_f, which then drives a hinge).
+    """
     model, state, _ = _hinged(device)
     solver = newton.solvers.SolverIPC(model, **_CONVERGED)
     built = []
@@ -706,9 +734,9 @@ def test_default_control_is_built_once(test, device):
 
 
 def test_notify_updates_gravity_and_inertia_in_place(test, device):
-    """Gravity, mass and inertia changed after a capture take effect in its replays.
+    """Apply gravity, mass and inertia changed after a capture in its replays.
 
-    A box under a constant force and torque, and a particle: their accelerations follow the new gravity and the
+    A box is under a constant force and torque, next to a particle: their accelerations follow the new gravity and the
     box's doubled mass and inertia without a new capture.
     """
     builder = newton.ModelBuilder()
@@ -764,9 +792,11 @@ def test_notify_updates_gravity_and_inertia_in_place(test, device):
 
 
 def test_notify_new_masses_without_joints(test, device):
-    """A model of bodies without joints (links that no joint holds) takes new masses in place: a box built with
-    add_link, given twice its mass and inertia, falls as before (gravity does not depend on the mass) and the
-    engine holds the new dyadic mass."""
+    """Take new masses in place in a model of bodies without joints.
+
+    The bodies are links that no joint holds: a box built with add_link, given twice its mass and inertia, falls as
+    before (gravity does not depend on the mass) and the engine holds the new dyadic mass.
+    """
     builder = newton.ModelBuilder()
     b = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()))
     builder.add_shape_box(b, hx=0.1, hy=0.1, hz=0.1)
@@ -785,10 +815,12 @@ def test_notify_new_masses_without_joints(test, device):
 
 
 def test_notify_new_particle_masses(test, device):
-    """New particle masses reported with MODEL_PROPERTIES, as a coupled solver gives its proxy particles theirs, build
-    the solve again with them: a particle pushed up by particle_f = 10 N, its mass doubled from 1 kg to 2 kg, accelerates
-    at 10 / 2 - 9.81 m/s^2 in implicit Euler's steps (with 1 kg it would rise), and the same notification without a
-    new mass keeps the solve."""
+    """Rebuild the solve with new particle masses reported through MODEL_PROPERTIES.
+
+    A coupled solver gives its proxy particles their masses this way. A particle pushed up by particle_f = 10 N, its
+    mass doubled from 1 kg to 2 kg, accelerates at 10 / 2 - 9.81 m/s^2 in implicit Euler's steps (with 1 kg it would
+    rise), and the same notification without a new mass keeps the solve.
+    """
     builder = newton.ModelBuilder()
     builder.add_particle(wp.vec3(0.0, 0.0, 1.0), wp.vec3(0.0, 0.0, 0.0), mass=1.0, radius=0.01)
     model = builder.finalize(device=device)
@@ -829,11 +861,14 @@ def _beam_cloth_particle(device):
 
 
 def test_notify_takes_element_arrays_changed_in_place(test, device):
-    """The materials and rest shapes of tetrahedra, triangles and hinges and the particles' flags, which Newton has no
-    flag of its own for, are compared at every notification: each changed in place (stiffer tetrahedra and hinges, a
-    softer membrane, smaller rest shapes, other rest angles, a particle no longer ACTIVE), a notification of an
-    unrelated flag builds the solve again, and the next steps equal those of a new solver on the changed model, where
-    they leave the steps of the unchanged one; with nothing changed the notification keeps the solve."""
+    """Compare element materials, rest shapes and particle flags at every notification and rebuild on a change.
+
+    Newton has no flag of its own for the materials and rest shapes of tetrahedra, triangles and hinges or for the
+    particles' flags. Each changed in place (stiffer tetrahedra and hinges, a softer membrane, smaller rest shapes,
+    other rest angles, a particle no longer ACTIVE), a notification of an unrelated flag builds the solve again, and the
+    next steps equal those of a new solver on the changed model, where they leave the steps of the unchanged one. With
+    nothing changed the notification keeps the solve.
+    """
 
     def scaled(factor, columns=None):
         def change(values):
@@ -882,9 +917,12 @@ def test_notify_takes_element_arrays_changed_in_place(test, device):
 
 
 def test_gravity_per_world(test, device):
-    """A global particle and body fall with the global world's gravity (the last entry of Model.gravity) and a
-    particle and body of world 0 with world 0's, as implicit Euler from rest. New gravities of both worlds, set with
-    set_gravity and notify_model_changed(MODEL_PROPERTIES) after a capture, take effect in its next replays."""
+    """Apply each world's gravity to its particles and bodies, also after a capture.
+
+    A global particle and body fall with the global world's gravity (the last entry of Model.gravity) and a particle and
+    body of world 0 with world 0's, as implicit Euler from rest. New gravities of both worlds, set with set_gravity and
+    notify_model_changed(MODEL_PROPERTIES) after a capture, take effect in its next replays.
+    """
     dt = 0.01
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, -2.0))  # the global world's
     bodies, particles = [], []

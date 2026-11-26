@@ -75,7 +75,10 @@ def _pose(p=(0.0, 0.0, 0.0), axis=(1.0, 0.0, 0.0), angle=0.0) -> list:
 
 
 def test_kamino_expectations(test, device):
-    """SolverKamino's rod tests' expectations, one step of 10 ms each (``test_kamino_solver_kamino_rods.py``)."""
+    """Meet SolverKamino's rod-test expectations in one step of 10 ms each.
+
+    The expectations are those of ``test_kamino_solver_kamino_rods.py``.
+    """
     with test.subTest("the stretch restores, its damping slows"):
         model, _, child = _rod(device, stretch_stiffness=100.0)
         test.assertLess(_step(model, body_q=[_pose((0.0, 0.0, 0.1))])[child, 2], 0.0)
@@ -142,9 +145,12 @@ def test_kamino_expectations(test, device):
 
 
 def test_joint_f_is_a_world_wrench(test, device):
-    """A rod joint's ``joint_f`` (12 N along x, 6 N m about y) is a world wrench at the child's centre of mass, the
-    parent taking its reaction there, as SolverVBD applies it: the step's velocities to 1e-5 and no angular momentum
-    about the world's origin (``newton/tests/test_cable.py``, ``_rod_vbd_joint_f_applies_six_dof_wrench_impl``)."""
+    """Apply a rod joint's ``joint_f`` as a world wrench at the child's centre of mass, as SolverVBD does.
+
+    The wrench (12 N along x, 6 N m about y) acts at the child's centre of mass, the parent taking its reaction there:
+    the step's velocities match to 1e-5, and the bodies have no angular momentum about the world's origin
+    (``newton/tests/test_cable.py``, ``_rod_vbd_joint_f_applies_six_dof_wrench_impl``).
+    """
     mass, force, torque, dt = 2.0, 12.0, 6.0, 1.0 / 60.0
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     parent = builder.add_link(
@@ -211,12 +217,15 @@ def _settle(model, solver, steps, dt, contacts=None):
 
 
 def test_static_shapes_against_vbd(test, device):
-    """The bend-stiffness sweep's cables, after 15 s under gravity, rest in the shapes SolverVBD rests them in: every
-    segment's centre within 1e-3 of the cable's length (2 m), the softest cable's tip more than 0.5 m below its root.
-    Both minimize the same elastic energy at rest: the stretch and shear springs and the bend of the discrete elastic
-    rod, below Newton's cap on the bend (168.6 degrees per joint). The bodies take libuipc's stiffness, 1e8 Pa: the
-    default, lowered for a step of 1/60 s, lets each segment shear, which relieves the bend of the joint it is the
-    parent of, and the stiffest cable's tip then rests 0.16 m lower."""
+    """Rest the bend-stiffness sweep's cables in the shapes SolverVBD rests them in.
+
+    After 15 s under gravity every segment's centre lies where SolverVBD rests it, within 1e-3 of the cable's length
+    (2 m), and the softest cable's tip is more than 0.5 m below its root. Both minimize the same elastic energy at rest:
+    the stretch and shear springs and the bend of the discrete elastic rod, below Newton's cap on the bend
+    (168.6 degrees per joint). The bodies take libuipc's stiffness, 1e8 Pa: the default, lowered for a step of 1/60 s,
+    lets each segment shear, which relieves the bend of the joint it is the parent of, and the stiffest cable's tip then
+    rests 0.16 m lower.
+    """
     model, cables = _sweep(device, vbd=True)
     vbd = _settle(model, newton.solvers.SolverVBD(model, iterations=40), 4500, 1.0 / 300.0).body_q.numpy()
     model, cables = _sweep(device, vbd=False)
@@ -273,9 +282,12 @@ def _torque_cycle(model, joint, solver, dt=0.002):
 
 
 def test_dahl_hysteresis_against_vbd(test, device):
-    """A twist with Dahl hysteresis (``eps_max`` 0.5, ``tau`` 0.05) under a torque that rises to 1 N m and falls back
-    to 0: the twist follows SolverVBD's to 2% of its largest, and after the torque is gone keeps the residual twist
-    SolverVBD keeps (2%); without hysteresis less than 5% of it remains."""
+    """Follow SolverVBD's twist under Dahl hysteresis and keep its residual twist.
+
+    A twist with Dahl hysteresis (``eps_max`` 0.5, ``tau`` 0.05) under a torque that rises to 1 N m and falls back to 0
+    follows SolverVBD's to 2% of its largest, and after the torque is gone keeps the residual twist SolverVBD keeps
+    (2%); without hysteresis less than 5% of it remains.
+    """
     model, joint = _twister(device, vbd=True)
     vbd = _torque_cycle(model, joint, newton.solvers.SolverVBD(model, iterations=20))
     model, joint = _twister(device, vbd=False)
@@ -289,8 +301,11 @@ def test_dahl_hysteresis_against_vbd(test, device):
 
 
 def test_reset_restarts_the_hysteresis(test, device):
-    """After the torque cycle the joint keeps a Dahl stress; ``reset`` starts it anew: one step from the same state
-    with the stress (the residual twist held) and after a reset (the joint released to its elastic rest)."""
+    """Start a rod joint's Dahl stress anew at a reset.
+
+    After the torque cycle the joint keeps a Dahl stress; ``reset`` starts it anew: one step from the same state with
+    the stress (the residual twist held) and after a reset (the joint released to its elastic rest).
+    """
     model, joint = _twister(device, vbd=False)
     solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
     twist = _torque_cycle(model, joint, solver)
@@ -321,10 +336,13 @@ def _hanging(device, n=4, **rod):
 
 
 def test_parent_force_is_the_momentum_balance(test, device):
-    """A hanging cable of four segments released from rest with a sideways push: at every step of 20, each dynamic
+    """Write each cable segment's BODY_PARENT_F as the momentum balance of the segments it holds up.
+
+    A hanging cable of four segments is released from rest with a sideways push: at every step of 20, each dynamic
     segment's ``BODY_PARENT_F`` is the momentum balance of the segments it holds up, itself and those below it, the
     force within 1e-5 of a segment's weight and the torque about its centre of mass within 1e-5 N m (its rod joint's
-    terms, ``features.rods.parent_terms``; the last segment's is its own balance)."""
+    terms, ``features.rods.parent_terms``; the last segment's is its own balance).
+    """
     model, bodies, _ = _hanging(device)
     solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
     observables = solver.observables(kinds={_KIND.BODY_PARENT_F})
@@ -349,8 +367,11 @@ def test_parent_force_is_the_momentum_balance(test, device):
 
 
 def test_joint_coordinates_are_eval_iks(test, device):
-    """After 30 steps of a swinging, twisting cable, every rod joint's ``joint_q`` and ``joint_qd`` are what
-    ``newton.eval_ik`` computes from the bodies' state (a free joint's: the child's anchor frame in the parent's)."""
+    """Write every rod joint's ``joint_q`` and ``joint_qd`` as ``newton.eval_ik`` computes them.
+
+    After 30 steps of a swinging, twisting cable, every rod joint's ``joint_q`` and ``joint_qd`` are what
+    ``newton.eval_ik`` computes from the bodies' state (a free joint's: the child's anchor frame in the parent's).
+    """
     model, bodies, joints = _hanging(device, twist_stiffness=0.5)
     solver = newton.solvers.SolverIPC(model)
     s0, s1 = model.state(), model.state()
@@ -374,8 +395,10 @@ def test_joint_coordinates_are_eval_iks(test, device):
 
 
 def test_captured_steps_equal_eager_steps(test, device):
-    """Steps of a swinging, twisting cable, captured in a graph with its bend stiffness written between replays, as
-    eager steps, to 1e-6."""
+    """Step a cable in a captured graph as eager steps do, with its bend stiffness written between replays.
+
+    The cable swings and twists, and the captured steps equal the eager ones to 1e-6.
+    """
 
     def run(capture):
         model, _, joints = _hanging(device, twist_stiffness=0.5)
@@ -410,9 +433,12 @@ def test_captured_steps_equal_eager_steps(test, device):
 
 
 def test_grown_lists_keep_the_rods(test, device):
-    """A cable with Dahl hysteresis falls onto a box; when it lands the contact lists, made short, overflow, and the
-    eager step grows them and solves the step again with the rods and their hysteresis of that step's start: every body
-    as in a solver with room, to 1e-6."""
+    """Keep the rods and their hysteresis when an eager step grows overflowing contact lists.
+
+    A cable with Dahl hysteresis falls onto a box; when it lands the contact lists, made short, overflow, and the eager
+    step grows them and solves the step again with the rods and their hysteresis of that step's start: every body as in
+    a solver with room, to 1e-6.
+    """
 
     def run(tiny):
         builder = newton.ModelBuilder()
@@ -449,9 +475,12 @@ def test_grown_lists_keep_the_rods(test, device):
 
 
 def test_gains_and_rests_at_every_step(test, device):
-    """A rod joint's gains and rest written into the model after the solver was built act from the next step, with or
+    """Read a rod joint's gains and rest at every step, with or without ``notify_model_changed``.
+
+    A rod joint's gains and rest written into the model after the solver was built act from the next step, with or
     without ``notify_model_changed`` (they are read at every step, as a joint's drives are): a twist stiffness given
-    later turns the body, and a rest twist given later turns it the other way."""
+    later turns the body, and a rest twist given later turns it the other way.
+    """
     model, _, child = _rod(device)
     solver = newton.solvers.SolverIPC(model, **_RIGID)
     s0, s1 = model.state(), model.state()
@@ -474,7 +503,10 @@ def test_gains_and_rests_at_every_step(test, device):
 
 
 def test_a_disabled_joint_acts_on_nothing(test, device):
-    """A rod joint disabled (``joint_enabled`` False) leaves its body to fall freely; enabled again, it holds it."""
+    """Let a disabled rod joint's body fall freely, and hold it again once the joint is enabled.
+
+    A rod joint disabled (``joint_enabled`` False) leaves its body to fall freely; enabled again, it holds it.
+    """
     model, bodies, joints = _hanging(device, n=2)
     enabled = model.joint_enabled.numpy()
     enabled[joints] = False
@@ -489,8 +521,11 @@ def test_a_disabled_joint_acts_on_nothing(test, device):
 
 
 def test_independent_worlds(test, device):
-    """Two worlds of a hanging cable, the second's bend twice as stiff, solved as independent worlds: each world's
-    bodies as those of the same model alone, to 1e-9 m."""
+    """Step two independent worlds of hanging cables as each world alone.
+
+    Two worlds of a hanging cable, the second's bend twice as stiff, are solved as independent worlds: each world's
+    bodies are those of the same model alone, to 1e-9 m.
+    """
 
     def model_of(bends, first=0):
         builder = newton.ModelBuilder()
@@ -514,9 +549,11 @@ def test_independent_worlds(test, device):
 
 
 def test_refusals(test, device):
-    """What SolverIPC refuses of a rod joint, each with its message: among them an effort limit below Newton's default
-    on a rod's degree of freedom, and SolverVBD's Dahl attributes other than 0 on a joint that is not a rod joint or
-    negative on one, which would otherwise take no effect."""
+    """Refuse what a rod joint cannot take, each with its message.
+
+    Among them are an effort limit below Newton's default on a rod's degree of freedom, and SolverVBD's Dahl attributes
+    other than 0 on a joint that is not a rod joint or negative on one, which would otherwise take no effect.
+    """
 
     def model_of(dof=None, mode=None, layout=False):
         builder = newton.ModelBuilder()

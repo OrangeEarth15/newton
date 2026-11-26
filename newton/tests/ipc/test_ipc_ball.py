@@ -94,9 +94,11 @@ def _set(model, **arrays):
 
 
 def test_newton_ball_drive_tests(test, device):
-    """Newton's ball-joint controller tests of SolverMuJoCo (test_joint_controllers), with SolverIPC: a quarter turn
-    about x, y and z as a position target, a quarter turn per second about each as a velocity target, and both with a
-    child frame turned 30 degrees about y."""
+    """Pass Newton's ball-joint controller tests of SolverMuJoCo with SolverIPC.
+
+    The tests of test_joint_controllers take a quarter turn about x, y and z as a position target, a quarter turn per
+    second about each as a velocity target, and both with a child frame turned 30 degrees about y.
+    """
     quarter = np.pi / 2.0
     for axis, k in (("x", 0), ("y", 1), ("z", 2)):
         target = [0.0, 0.0, 0.0]
@@ -125,9 +127,12 @@ def test_newton_ball_drive_tests(test, device):
 
 
 def test_ball_damping_against_featherstone(test, device):
-    """SolverSteel's ball-joint damping test with SolverIPC: without damping the joint keeps its speed, with
+    """Damp a ball joint as SolverFeatherstone does in SolverSteel's ball-joint damping test.
+
+    In SolverSteel's ball-joint damping test with SolverIPC, without damping the joint keeps its speed, with
     ``joint_damping`` 3 it slows by more than 15%, and its final speed is SolverFeatherstone's within 2%, about every
-    axis and with a turned parent frame."""
+    axis and with a turned parent frame.
+    """
     turned = wp.transform(wp.vec3(0.1, 0.0, 0.0), wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.3))
 
     def featherstone(model):
@@ -153,13 +158,16 @@ def test_ball_damping_against_featherstone(test, device):
 
 
 def test_terms_are_implicit_euler(test, device):
-    """A sphere turning about z on its ball joint: a drive toward a target with a velocity target, a spring toward a
-    rest, damping and an armature follow implicit Euler's recurrence of the angle with the inertia ``I + a``, as a
-    revolute joint's terms do, to 2e-5 of the motion over 150 steps, from 2 rad/s toward 0.6 rad; and BDF2's (started by
-    an implicit Euler step) under ``integrator="bdf2"``, 30 times slower and smaller, since BDF2 predicts a turning
-    body along a straight line, which loses about ``(omega dt)^2`` of its spin per step. (Under implicit Euler the solver
+    """Integrate a ball joint's drive, spring, damping and armature as a revolute joint's terms.
+
+    A sphere turns about z on its ball joint: a drive toward a target with a velocity target, a spring toward a rest,
+    damping and an armature follow implicit Euler's recurrence of the angle with the inertia ``I + a``, as a revolute
+    joint's terms do, to 2e-5 of the motion over 150 steps, from 2 rad/s toward 0.6 rad; and BDF2's (started by an
+    implicit Euler step) under ``integrator="bdf2"``, 30 times slower and smaller, since BDF2 predicts a turning body
+    along a straight line, which loses about ``(omega dt)^2`` of its spin per step. (Under implicit Euler the solver
     turns a body as a rigid one, whose kinetic term of a turn ``delta`` off its flight is ``I (1 - cos(delta))``.) The
-    armature changes the motion by more than 1% of it."""
+    armature changes the motion by more than 1% of it.
+    """
     gains = {"target_ke": 2.0, "target_kd": 0.05, "stiffness": 1.0, "damping": 0.03}
     for integrator, recurrence, scale in (
         ("bdf1", _drive_recurrence, 1.0),
@@ -187,9 +195,12 @@ def test_terms_are_implicit_euler(test, device):
 
 
 def test_effort_limit(test, device):
-    """A drive of 100 N m/rad toward 3 rad about z with an effort limit of 0.05 N m: the joint turns under the constant
+    """Turn a ball joint at its effort limit under the limit's constant torque.
+
+    A drive of 100 N m/rad toward 3 rad about z with an effort limit of 0.05 N m turns the joint under the constant
     torque 0.05 N m from the first step, as implicit Euler's recurrence of it says; with
-    ``enable_joint_effort_limit=False`` the solver refuses the limit, as for a revolute joint."""
+    ``enable_joint_effort_limit=False`` the solver refuses the limit, as for a revolute joint.
+    """
     model, state, inertia = _sphere(device)
     _set(model, target_ke=100.0, effort_limit=0.05)
     control = model.control()
@@ -202,9 +213,12 @@ def test_effort_limit(test, device):
 
 
 def test_friction(test, device):
-    """``joint_friction`` 0.1 N m on the ball joint against a ``joint_f`` about z: 0.05 N m does not turn the joint but
-    for libuipc's creep below ``eps_velocity``, ``eps_v (1 - sqrt(1 - tau / F))`` rad/s, to 1e-5 of it; 0.2 N m turns
-    it faster by ``h (tau - F) / I`` at every step once it slides, to 2e-5 (the float32 ``joint_qd``)."""
+    """Creep under a ``joint_f`` below a ball joint's friction and speed up under one above it.
+
+    With ``joint_friction`` 0.1 N m on the ball joint against a ``joint_f`` about z, 0.05 N m does not turn the joint
+    but for libuipc's creep below ``eps_velocity``, ``eps_v (1 - sqrt(1 - tau / F))`` rad/s, to 1e-5 of it; 0.2 N m
+    turns it faster by ``h (tau - F) / I`` at every step once it slides, to 2e-5 (the float32 ``joint_qd``).
+    """
     for tau in (0.05, 0.2):
         with test.subTest(joint_f=tau):
             model, state, inertia = _sphere(device, friction=0.1)
@@ -226,11 +240,14 @@ def test_friction(test, device):
 
 
 def test_friction_slides_at_the_default_tolerances(test, device):
-    """``joint_friction`` 0.1 N m and a ``joint_f`` of 1.5 times it about z of the joint frame, along a coordinate axis
-    of the world and along its diagonal: with the Newton tolerances a model with joint friction takes by default, 0.4
-    ``eps_velocity`` (``features.joint_terms``), the joint slides, turning faster by ``h (tau - F) / I`` at every step
-    to 1%. At SolverIPC's defaults for a model without friction the loop would end inside the friction's smoothing band
-    and the joint would creep."""
+    """Slide a ball joint above its friction at the default tolerances of a model with joint friction.
+
+    ``joint_friction`` 0.1 N m and a ``joint_f`` of 1.5 times it act about z of the joint frame, along a coordinate axis
+    of the world and along its diagonal: with the Newton tolerances a model with joint friction takes by default,
+    0.4 ``eps_velocity`` (``features.joint_terms``), the joint slides, turning faster by ``h (tau - F) / I`` at every
+    step to 1%. At SolverIPC's defaults for a model without friction the loop would end inside the friction's smoothing
+    band and the joint would creep.
+    """
     d = np.array([1.0, 1.0, 1.0]) / np.sqrt(3.0)
     axis = np.cross([0.0, 0.0, 1.0], d)
     half = 0.5 * np.arccos(d[2])
@@ -269,9 +286,12 @@ def _held_out(device):
 
 
 def test_parent_force_holds_the_drive_torque(test, device):
-    """BODY_PARENT_F of the box a ball joint's drive holds out: at every step of 20 its momentum balance, the force
+    """Include a ball joint's drive torque in the BODY_PARENT_F of the box it holds out.
+
+    BODY_PARENT_F of the box a ball joint's drive holds out is its momentum balance at every step of 20, the force
     within 1e-6 of the weight and the torque within 1e-5 N m. About the box's centre the anchor's force alone turns it
-    by 0.5 m times its weight, 39 N m, which the drive's torque, part of the joint's wrench, holds."""
+    by 0.5 m times its weight, 39 N m, which the drive's torque, part of the joint's wrench, holds.
+    """
     model = _held_out(device)
     solver = newton.solvers.SolverIPC(model, **_TIGHTER)
     observables = solver.observables(kinds={_KIND.BODY_PARENT_F})
@@ -284,8 +304,10 @@ def test_parent_force_holds_the_drive_torque(test, device):
 
 
 def test_captured_steps_equal_eager_steps(test, device):
-    """Steps of a sphere with every term, captured in a graph with targets written between replays, as eager steps,
-    to 1e-6."""
+    """Step a sphere with every ball term in a captured graph as eager steps do.
+
+    Targets are written between replays, and the captured steps equal the eager ones to 1e-6.
+    """
 
     def run(capture):
         model, state, _ = _sphere(device, omega=1.0, armature=0.01, friction=0.02)
@@ -318,9 +340,12 @@ def test_captured_steps_equal_eager_steps(test, device):
 
 
 def test_grown_lists_keep_the_step_terms(test, device):
-    """A sphere turns on a driven ball joint while a box drops onto a static box; when it lands the contact lists, made
+    """Keep the step's ball terms when an eager step grows overflowing contact lists.
+
+    A sphere turns on a driven ball joint while a box drops onto a static box; when it lands the contact lists, made
     short, overflow, and the eager step grows them and solves the step again with the step's ball terms: the sphere's
-    joint goes on as in a solver with room, to 1e-6 rad, and so does every body."""
+    joint goes on as in a solver with room, to 1e-6 rad, and so does every body.
+    """
 
     def run(tiny):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
@@ -361,9 +386,12 @@ def test_grown_lists_keep_the_step_terms(test, device):
 
 
 def test_gains_given_after_the_solver_was_built(test, device):
-    """A ball joint without terms when the solver was built gets its drive after ``notify_model_changed`` with
+    """Drive a ball joint by gains given after the solver was built, once ``notify_model_changed`` is called.
+
+    A ball joint without terms when the solver was built gets its drive after ``notify_model_changed`` with
     ``JOINT_DOF_PROPERTIES``, which builds the solve again: the joint then reaches its target, a quarter turn about z,
-    to 1e-4 rad."""
+    to 1e-4 rad.
+    """
     model, state, _ = _sphere(device)
     solver = newton.solvers.SolverIPC(model, **_TIGHTER)
     control = model.control()
@@ -377,8 +405,11 @@ def test_gains_given_after_the_solver_was_built(test, device):
 
 
 def test_a_disabled_joint_has_no_terms(test, device):
-    """A ball joint with a drive toward a quarter turn and ``joint_enabled`` False: neither its anchor nor its terms act,
-    so the sphere stays as it was; enabled again, the drive turns it toward the target."""
+    """Apply neither the anchor nor the terms of a disabled ball joint.
+
+    A ball joint with a drive toward a quarter turn and ``joint_enabled`` False leaves the sphere as it was, since
+    neither its anchor nor its terms act; enabled again, the drive turns it toward the target.
+    """
     model, state, _ = _sphere(device)
     _set(model, target_ke=5.0, target_kd=0.5)
     model.joint_enabled.assign(np.array([False]))
@@ -396,8 +427,11 @@ def test_a_disabled_joint_has_no_terms(test, device):
 
 
 def test_independent_worlds(test, device):
-    """Two worlds of a sphere on a driven ball joint, the second's drive twice as stiff, solved as independent worlds:
-    each world's joint angles as those of the same model alone, to 1e-9 rad."""
+    """Step two independent worlds of driven ball joints as each world alone.
+
+    Two worlds of a sphere on a driven ball joint, the second's drive twice as stiff, are solved as independent worlds:
+    each world's joint angles are those of the same model alone, to 1e-9 rad.
+    """
 
     def model_of(stiffness: list):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
@@ -437,9 +471,12 @@ def test_independent_worlds(test, device):
 
 
 def test_refusals(test, device):
-    """A ball joint's limits are refused (Newton defines none); the terms of a D6 joint of three angular axes, which
+    """Refuse a ball joint's limits, a D6 ball joint's terms, and a free joint's armature and drives.
+
+    A ball joint's limits are refused (Newton defines none); the terms of a D6 joint of three angular axes, which
     becomes a ball joint, are refused (its coordinates are angles about its axes); a free joint's armature and drives
-    stay refused."""
+    stay refused.
+    """
     D = newton.ModelBuilder.JointDofConfig
 
     def one(add, **dof):

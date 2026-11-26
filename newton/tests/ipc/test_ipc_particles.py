@@ -16,13 +16,16 @@ _G = 9.81
 
 
 def test_particle_friction_is_particle_mu(test, device):
-    """A particle of radius 1 cm on top of a kinematic particle of radius 2 m slides under gravity tilted by
-    atan(0.8) from the vertical, past the friction angle of particle_mu = 0.5 (Model.soft_contact_mu, 0.1, and the mean
-    of the two are not taken). At the angle phi from the top of the big particle and the distance rho from its centre,
-    its motion along the surface is that of a particle sliding on a sphere: rho phi'' = g sin(alpha + phi) - mu (g
-    cos(alpha + phi) - rho phi'^2), from the second differences of 0.4 s of steps of 0.01 s after the first 0.1 s, to 2%
-    of g sin(alpha) in every step and 1% on average (the friction lags by a step); with particle_mu = 0.1 it slides
-    faster, as that law has it too. The mean of the coefficients, 0.3, would be 1.5 m/s^2 off."""
+    """Take particle_mu, not soft_contact_mu or the mean of the two, as the friction of particle contact.
+
+    A particle of radius 1 cm on top of a kinematic particle of radius 2 m slides under gravity tilted by atan(0.8) from
+    the vertical, past the friction angle of particle_mu = 0.5 (Model.soft_contact_mu, 0.1, and the mean of the two are
+    not taken). At the angle phi from the top of the big particle and the distance rho from its centre, its motion along
+    the surface is that of a particle sliding on a sphere: rho phi'' = g sin(alpha + phi) - mu (g cos(alpha + phi) - rho
+    phi'^2), from the second differences of 0.4 s of steps of 0.01 s after the first 0.1 s, to 2% of g sin(alpha) in
+    every step and 1% on average (the friction lags by a step); with particle_mu = 0.1 it slides faster, as that law has
+    it too. The mean of the coefficients, 0.3, would be 1.5 m/s^2 off.
+    """
     R, r, dt, steps = 2.0, 0.01, 0.01, 50
     alpha = np.arctan(0.8)
 
@@ -60,9 +63,12 @@ def test_particle_friction_is_particle_mu(test, device):
 
 
 def test_inactive_particle_with_mass_stays_put(test, device):
-    """A particle of 1 kg that is not ACTIVE is kinematic, as one of mass 0: under gravity and a particle_f of 50 N it
-    stays where state_in puts it, step after step, also when state_in moves it, while the same particle ACTIVE beside
-    it falls as implicit Euler has it under gravity and that force."""
+    """Keep a particle with mass that is not ACTIVE where state_in puts it, as a kinematic particle.
+
+    A particle of 1 kg that is not ACTIVE is kinematic, as one of mass 0: under gravity and a particle_f of 50 N it
+    stays where state_in puts it, step after step, also when state_in moves it, while the same particle ACTIVE beside it
+    falls as implicit Euler has it under gravity and that force.
+    """
     dt = 0.01
     builder = newton.ModelBuilder()
     inactive = builder.add_particle(wp.vec3(0.0, 0.0, 1.0), wp.vec3(0.0), 1.0, radius=0.01, flags=0)

@@ -31,9 +31,12 @@ def _free_fall(model, body, k, dt=0.01, g=9.81):
 
 
 def test_friction_of_each_pair(test, device):
-    """Two boxes of friction 0.1 and 0.3 and a particle (soft_contact_mu 0.2) slide over a ground of friction 0.5
-    under gravity tilted to tan 0.8: each accelerates with g_t - mu g_n, mu the arithmetic mean of the pair's two
-    coefficients (0.3, 0.4 and 0.35), and a box of friction 1.3 (pair 0.9) sticks."""
+    """Slide each body with the arithmetic mean of its pair's two friction coefficients.
+
+    Two boxes of friction 0.1 and 0.3 and a particle (soft_contact_mu 0.2) slide over a ground of friction 0.5 under
+    gravity tilted to tan 0.8: each accelerates with g_t - mu g_n, mu the arithmetic mean of the pair's two coefficients
+    (0.3, 0.4 and 0.35), and a box of friction 1.3 (pair 0.9) sticks.
+    """
     g, tan_theta, dt = 9.81, 0.8, 0.01
     th = np.arctan(tan_theta)
     g_t, g_n = g * np.sin(th), g * np.cos(th)
@@ -65,11 +68,15 @@ def test_friction_of_each_pair(test, device):
 
 
 def test_rest_heights_follow_radius_and_margin(test, device):
-    """Contact thickness: a free particle of radius r comes to rest between r and r + d_hat above the ground, and one
-    of radius 0.02 on a kinematic particle of radius 0.01 between 0.03 and 0.03 + d_hat above it; a box of margin
-    0.002 rests between the sum of its margin and the ground's (0.003) and that plus d_hat above the ground, and as
-    far above a static box of margin 0.004 beside it; a cloth of particle radius 0.2 rests within d_hat of the
-    ground, its thickness (the solver's, 0) being independent of the radius."""
+    """Rest particles, boxes and cloth at their contact thickness above their supports, within d_hat.
+
+    Contact thickness: a free particle of radius r comes to rest between r plus the ground's margin (0.003) and that
+    plus d_hat above the ground, and one of radius 0.02 on a kinematic particle of radius 0.01 between 0.03 and 0.03 +
+    d_hat above it. A box of margin 0.002 rests between the sum of its margin and the ground's and that plus d_hat above
+    the ground, and between the sum of its margin and the static box's (0.004) and that plus d_hat above a static box
+    beside it. A cloth of particle radius 0.2 rests between the ground's margin and that plus d_hat above the ground, its
+    thickness (the solver's, 0) being independent of the radius.
+    """
     d_hat, dt = 1.0e-3, 0.01
     builder = newton.ModelBuilder()
     builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(margin=0.003))
@@ -119,9 +126,12 @@ def test_rest_heights_follow_radius_and_margin(test, device):
 
 
 def test_springs_oscillate_as_implicit_euler(test, device):
-    """Without gravity, two free particles of mass m joined by a spring of stiffness k along x, started 1 cm short of
-    its rest length, and a free particle joined to a kinematic one, 1 cm beyond it: the stretch of each follows the
-    implicit-Euler oscillator of omega^2 = 2 k / m and k / m frame by frame, and the free pair's centre stays put."""
+    """Oscillate particles joined by springs as the implicit-Euler oscillator, frame by frame.
+
+    Without gravity, two free particles of mass m are joined by a spring of stiffness k along x, started 1 cm short of
+    its rest length, and a free particle is joined to a kinematic one, 1 cm beyond it. The stretch of each follows the
+    implicit-Euler oscillator of omega^2 = 2 k / m and k / m frame by frame, and the free pair's centre stays put.
+    """
     m, k, L0, dt, steps = 0.01, 4.0, 0.1, 0.01, 60  # a period and a half of the pair: 2 pi / omega = 0.22 s
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     for x in (0.0, L0 - 0.01):
@@ -166,12 +176,14 @@ def _box_on_ramp(builder, center, angle, mu, half=0.05, gap=0.002):
 
 
 def test_ramp_sticks_and_slips(test, device):
-    """Boxes on a static ramp of 20 degrees (friction 0.3): one of friction 0.2 (pair 0.25, below tan 20 = 0.364)
+    """Slide a box down a 20 degree ramp when its pair friction is below tan 20, and stick one above it.
+
+    Boxes sit on a static ramp of 20 degrees (friction 0.3): one of friction 0.2 (pair 0.25, below tan 20 = 0.364)
     slides down with g (sin - 0.25 cos), one of friction 0.6 (pair 0.45) sticks.
 
-    The sliding box moves away from the diagonal that splits the ramp's top face (along x = y in the ramp's frame).
-    A box that crosses it meets edge-edge pairs besides its point-triangle pairs there, which change its acceleration
-    over a few steps (by 2% to 4% over ten steps at this ``d_hat``).
+    The sliding box moves away from the diagonal that splits the ramp's top face (along x = y in the ramp's frame). A
+    box that crosses it meets edge-edge pairs besides its point-triangle pairs there, which change its acceleration over
+    a few steps (by 2% to 4% over ten steps at this ``d_hat``).
     """
     g, angle, dt = 9.81, np.radians(20.0), 0.01
     q = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), float(angle))
@@ -204,9 +216,12 @@ def test_ramp_sticks_and_slips(test, device):
 
 
 def test_excluded_pairs_never_collide(test, device):
-    """A box over a static table falls through it as in free fall, without a contact candidate in any step, where
-    Newton's rules exclude the pair: collision groups 2 and 3, one negative group (-1 and -1), or a filter pair. In
-    groups 2 and 2, or -1 and -2, the box comes to rest on the table."""
+    """Let a box fall through a table as in free fall when Newton's rules exclude the pair.
+
+    A box over a static table falls through it as in free fall, without a contact candidate in any step, where Newton's
+    rules exclude the pair: collision groups 2 and 3, one negative group (-1 and -1), or a filter pair. In groups 2 and
+    2, or -1 and -2, the box comes to rest on the table.
+    """
     dt, half, table_top = 0.01, 0.05, 0.1
     z0 = table_top + half + 0.002
     for box_group, table_group, filtered, falls in (
@@ -253,10 +268,12 @@ def test_excluded_pairs_never_collide(test, device):
 
 
 def test_particle_only_shapes(test, device):
-    """A shape that collides with particles only (``has_shape_collision=False``, which keeps COLLIDE_PARTICLES):
-    a static box of that kind holds a particle on its top and lets a box fall through it as in free fall. Two such
-    boxes on bodies, which start inside each other, fall freely through each other and through the ground, whether
-    the model has particles or not (without particles they are not even triangulated)."""
+    """Collide shapes with ``has_shape_collision=False`` with particles only.
+
+    Such a shape keeps COLLIDE_PARTICLES. A static box of that kind holds a particle on its top and lets a box fall
+    through it as in free fall. Two such boxes on bodies, which start inside each other, fall freely through each other
+    and through the ground, whether the model has particles or not (without particles they are not even triangulated).
+    """
     dt = 0.01
     particle_only = newton.ModelBuilder.ShapeConfig(has_shape_collision=False)
     builder = newton.ModelBuilder()
@@ -297,8 +314,11 @@ def test_particle_only_shapes(test, device):
 
 
 def test_inactive_particles_do_not_collide(test, device):
-    """A box falls onto a particle: through it as in free fall when the particle is not ACTIVE (Newton gives an
-    inactive particle no contact), onto it when the particle is active and kinematic (zero mass)."""
+    """Let a box fall through an inactive particle and rest on an active kinematic one.
+
+    A box falls onto a particle: through it as in free fall when the particle is not ACTIVE (Newton gives an inactive
+    particle no contact), onto it when the particle is active and kinematic (zero mass).
+    """
     dt, z0 = 0.01, 0.054
     for active in (False, True):
         with test.subTest(active=active):
@@ -320,10 +340,13 @@ def test_inactive_particles_do_not_collide(test, device):
 
 
 def test_particle_contact_follows_the_particle_grid(test, device):
-    """Two free particles of radius 2 cm closing at 2 m/s without gravity stop apart, as Newton's particle solvers
-    collide particles while the model has its particle grid; with Model.particle_grid set to None, Newton's switch of
-    particle contact, they pass through each other, given so at construction or after notify_model_changed with
-    MODEL_PROPERTIES."""
+    """Collide particles with each other only while the model has its particle grid.
+
+    Two free particles of radius 2 cm closing at 2 m/s without gravity stop apart, as Newton's particle solvers collide
+    particles while the model has its particle grid. With Model.particle_grid set to None, Newton's switch of particle
+    contact, they pass through each other, whether it is set so at construction or after notify_model_changed with
+    MODEL_PROPERTIES.
+    """
 
     def two_particles():
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -348,10 +371,12 @@ def test_particle_contact_follows_the_particle_grid(test, device):
 
 
 def test_warns_of_unread_contact_coefficients(test, device):
-    """The solver warns once, when it is built, of the contact coefficients it does not read that a colliding shape or
-    the particles set to other than Newton's defaults: restitution, a static friction other than the dynamic one, and
-    torsional and rolling friction, each named with its first shape. Newton's defaults, which MJCF's default friction
-    "1 0.005 0.0001" holds, draw no warning."""
+    """Warn once at construction of the contact coefficients the solver does not read.
+
+    The warning names the coefficients that a colliding shape or the particles set to other than Newton's defaults:
+    restitution, a static friction other than the dynamic one, and torsional and rolling friction, each named with its
+    first shape. Newton's defaults, which MJCF's default friction "1 0.005 0.0001" holds, draw no warning.
+    """
 
     def model(cfg=None, mjcf=False, particle_restitution=0.0):
         builder = newton.ModelBuilder()
@@ -409,9 +434,12 @@ def _newton_heightfield_triangles(
 
 
 def test_heightfield_triangles_and_rest(test, device):
-    """A height field is the triangle mesh Newton's narrow phase collides with: its triangles in the solver are those
-    of get_triangle_shape_from_heightfield, in the field's scaled and moved frame. Spheres dropped on its two
-    plateaus (heights 0 and 0.2 of a scaled field, moved up by 0.1) rest there, within d_hat of touching."""
+    """Collide with a height field as the triangle mesh Newton's narrow phase uses, and rest spheres on it.
+
+    The height field's triangles in the solver are those of get_triangle_shape_from_heightfield, in the field's scaled
+    and moved frame. Spheres dropped on its two plateaus (heights 0 and 0.2 of a scaled field, moved up by 0.1) rest
+    there, within d_hat of touching.
+    """
     d_hat, radius = 1.0e-3, 0.08
     data = np.zeros((9, 9), np.float32)
     data[:, 4] = 0.5
@@ -500,11 +528,14 @@ def _shell_inputs(model, **options):
 
 
 def test_rest_shapes_from_tri_poses_and_edge_rest_angle(test, device):
-    """Newton's rest shapes, without gravity. A flat hinge whose edge_rest_angle is 0.6 folds until Newton's angle of
-    its row is 0.6, and the same with the row given in another order (o0's triangle running v2 -> v1) and the rest
-    angle that order measures (-0.6). A triangle whose tri_poses are scaled by 1 / 1.2 grows until its edges are 1.2
-    times as long. A curved sheet gets the same rest angles from its builder's rows as from the rows given by hand in
-    the other order. A hinge whose triangles run their edge the same way is refused."""
+    """Take Newton's rest shapes from tri_poses and edge_rest_angle.
+
+    The scenes run without gravity. A flat hinge whose edge_rest_angle is 0.6 folds until Newton's angle of its row is
+    0.6, and the same with the row given in another order (o0's triangle running v2 -> v1) and the rest angle that order
+    measures (-0.6). A triangle whose tri_poses are scaled by 1 / 1.2 grows until its edges are 1.2 times as long. A
+    curved sheet gets the same rest angles from its builder's rows as from the rows given by hand in the other order. A
+    hinge whose triangles run their edge the same way is refused.
+    """
     dt, flat = 0.01, np.array([[0.5, -1.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 1.0, 0.0]])
     tris = [[0, 1, 2], [3, 2, 1]]  # (0, 1, 2) runs the edge 1 -> 2, (3, 2, 1) runs it 2 -> 1
     folded = {}
@@ -617,13 +648,15 @@ def _flat_sheet(device, rot=None):
 
 
 def test_cloth_at_rest_starts_without_bending_force(test, device):
-    """A cloth built at rest starts at its rest angles as the engine measures them, so that no hinge pushes it out of
-    its plane. Newton measures the angle of every hinge of this flat sheet as 0; libuipc's dihedral angle, the
-    arccosine of the normals' cosine, reads 1.5e-8 rad on some of them, and it is the angle the engine's bending
-    energy takes. The solver gives the engine no rest angles, so that the engine takes its own of the start positions
-    (as libuipc takes them from its rest geometry; libuipc-warp's tests/test_arrays_rest_shapes.py holds them to
-    libuipc's bit for bit, with no bending force at the start). A rest angle other than the start's is Newton's
-    (test_rest_shapes_from_tri_poses_and_edge_rest_angle)."""
+    """Start a cloth built at rest at the engine's own rest angles, without bending force.
+
+    No hinge then pushes the cloth out of its plane. Newton measures the angle of every hinge of this flat sheet as 0;
+    libuipc's dihedral angle, the arccosine of the normals' cosine, reads 1.5e-8 rad on some of them, and it is the
+    angle the engine's bending energy takes. The solver gives the engine no rest angles, so that the engine takes its
+    own of the start positions (as libuipc takes them from its rest geometry; libuipc-warp's
+    tests/test_arrays_rest_shapes.py holds them to libuipc's bit for bit, with no bending force at the start). A rest
+    angle other than the start's is Newton's (test_rest_shapes_from_tri_poses_and_edge_rest_angle).
+    """
     model = _flat_sheet(device)
     test.assertFalse(np.any(model.edge_rest_angle.numpy()))
     shell = _shell_inputs(model)
@@ -632,12 +665,15 @@ def test_cloth_at_rest_starts_without_bending_force(test, device):
 
 
 def test_cloth_at_rest_takes_its_rest_triangles_from_particle_q(test, device):
-    """Newton's builders compute a cloth triangle's rest shape in float64 from particle_q and keep its inverse in float32
+    """Take the rest triangles of a cloth built at rest from particle_q, not from the float32 tri_poses.
+
+    Newton's builders compute a cloth triangle's rest shape in float64 from particle_q and keep its inverse in float32
     (tri_poses). For a cloth built at rest the solver gives the engine no rest edges, so that the engine takes the rest
     shapes of particle_q, as libuipc computes them from its rest geometry (libuipc-warp's
     tests/test_arrays_rest_shapes.py holds them to libuipc's, bit for bit), not those of the float32 tri_poses, which
     are off by their rounding, a strain the sheet would start with. A triangle whose tri_poses were changed keeps them;
-    the others then take the rest edges of particle_q in float64."""
+    the others then take the rest edges of particle_q in float64.
+    """
     from newton._src.solvers.ipc.scene import _triangle_rest_geometry  # noqa: PLC0415
 
     model = _flat_sheet(device, rot=wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.3))
@@ -674,8 +710,10 @@ def _libuipc_corridor(model, dt, d_hat):
 
 
 def test_kappa_is_taken_as_given(test, device):
-    """By default every pair takes kappa as given, at every step size, also outside libuipc's range, without a
-    warning; kappa=None, libuipc's default, needs adaptive_kappa."""
+    """Take kappa as given by default, at every step size and also outside libuipc's range.
+
+    Every pair takes it, without a warning. kappa=None, libuipc's default, needs adaptive_kappa.
+    """
     model = _soft_cube(device, height=0.05)
     lo = _libuipc_corridor(model, 0.01, D_HAT)[0]
     for kappa in (1.0e9, 0.1 * lo):
@@ -692,9 +730,12 @@ def test_kappa_is_taken_as_given(test, device):
 
 
 def test_adaptive_kappa_is_libuipcs(test, device):
-    """adaptive_kappa=True: kappa=None takes the lower bound of libuipc's range for the model and the step, which
-    scales with 1/dt^2; a kappa inside the range is used as given and one outside it is clamped, with one
-    NewtonWarning that names both values, at the first step that clamps it."""
+    """Take libuipc's stiffness range under adaptive_kappa=True, clamping a kappa outside it.
+
+    kappa=None takes the lower bound of libuipc's range for the model and the step, which scales with 1/dt^2. A kappa
+    inside the range is used as given, and one outside it is clamped, with one NewtonWarning that names both values, at
+    the first step that clamps it.
+    """
     model = _soft_cube(device, height=0.05)
     adaptive = {"d_hat": D_HAT, "adaptive_kappa": True}
     for dt in (0.01, 1.0 / 600.0):
@@ -724,10 +765,13 @@ def test_adaptive_kappa_is_libuipcs(test, device):
 
 
 def test_adaptive_kappa_follows_dt_in_captured_steps(test, device):
-    """adaptive_kappa=True: every pair takes the stiffness of its step's dt: steps captured at two step sizes, replayed
-    in turn and between eager steps of a third, each run with their own, as eager steps of those sizes do (to rounding:
-    the solver adds with float atomics). That a graph captured at a dt writes the engine's table of that dt is
-    libuipc-warp's (its tests/test_arrays_contact_stiffness.py, test_graphs_of_different_dt)."""
+    """Give every pair the stiffness of its step's dt in captured steps under adaptive_kappa=True.
+
+    Steps captured at two step sizes, replayed in turn and between eager steps of a third, each run with their own
+    stiffness, as eager steps of those sizes do (to rounding: the solver adds with float atomics). That a graph captured
+    at a dt writes the engine's table of that dt is libuipc-warp's (its tests/test_arrays_contact_stiffness.py,
+    test_graphs_of_different_dt).
+    """
     tight = {"newton_velocity_tol": 1e-7, "linear_tol_rate": 1e-12, "semi_implicit": False}
     model = _soft_cube(device, height=0.012)
     captured, eager = (

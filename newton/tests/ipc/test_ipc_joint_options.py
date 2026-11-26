@@ -96,11 +96,14 @@ def _d6_twins(device, d6):
 
 
 def test_d6_joints_take_libuipcs_joints(test, device):
-    """A D6 joint of one angular axis is libuipc's revolute joint about it, of one linear axis its prismatic joint along
+    """Map D6 joints onto libuipc's revolute, prismatic, fixed and ball joints with their drives and limits.
+
+    A D6 joint of one angular axis is libuipc's revolute joint about it, of one linear axis its prismatic joint along
     it, of no axis its fixed joint and of three orthonormal angular axes its ball joint, with their drives, limits and
     joint_f: a chain of the four built with D6 joints gives the engine the joints of the same chain built with Newton's
     revolute, fixed, ball and prismatic joints (libuipc-warp's ArrayScene calls, argument by argument, bit for bit), and
-    steps as it does, the revolute and prismatic coordinates included."""
+    steps as it does, the revolute and prismatic coordinates included.
+    """
     runs = []
     for d6 in (False, True):
         model, state = _d6_twins(device, d6)
@@ -146,10 +149,13 @@ def _d6_body(device, lin, axes, q, qd, gravity=0.0, offset=0.2):
 
 
 def test_d6_coordinates_are_newtons(test, device):
-    """A body on a D6 joint of three angular axes, a ball joint for libuipc (in Newton's (X, Z, Y) order of the
-    nv_humanoid hips, a left-handed triple, and in (X, Y, Z)), and one of three linear and three angular axes, no joint
-    for libuipc, swings and tumbles under gravity from a turned pose: after every step joint_q and joint_qd hold the
-    coordinates newton.eval_ik computes from the bodies' state."""
+    """Write a D6 joint's joint_q and joint_qd after every step as newton.eval_ik computes them.
+
+    A body on a D6 joint of three angular axes, a ball joint for libuipc (in Newton's (X, Z, Y) order of the nv_humanoid
+    hips, a left-handed triple, and in (X, Y, Z)), and one of three linear and three angular axes, no joint for libuipc,
+    swings and tumbles under gravity from a turned pose: after every step joint_q and joint_qd hold the coordinates
+    newton.eval_ik computes from the bodies' state.
+    """
     for lin, axes in ((False, "XZY"), (False, "XYZ"), (True, "XZY")):
         with test.subTest(lin=lin, axes=axes):
             q = ([0.1, -0.2, 0.05] if lin else []) + [0.5, -0.4, 0.7]
@@ -170,12 +176,15 @@ def test_d6_coordinates_are_newtons(test, device):
 
 
 def test_d6_joint_f_is_featherstones(test, device):
-    """joint_f on a D6 joint is Featherstone's generalized force: on the third coordinate of three angular axes in the
-    (X, Z, Y) order, from the pose (0.5, -0.4, 0.7), the joint rates after ten steps of 1 ms are SolverFeatherstone's
-    to 2e-3 (Newton's own test of this), and so are those of three linear and three angular axes pushed along one
-    linear and turned about one angular coordinate, whose joint frame is 0.2 m off the centre of mass; with the joint
-    frame at the centre of mass, from the zero pose, the body moves along and turns about the axes of the forces as
-    implicit Euler integrates F = m a and tau = I alpha, and the other coordinates stay at rest."""
+    """Apply joint_f on a D6 joint as Featherstone's generalized force.
+
+    On the third coordinate of three angular axes in the (X, Z, Y) order, from the pose (0.5, -0.4, 0.7), the joint
+    rates after ten steps of 1 ms are SolverFeatherstone's to 2e-3 (Newton's own test of this), and so are those of
+    three linear and three angular axes pushed along one linear and turned about one angular coordinate, whose joint
+    frame is 0.2 m off the centre of mass; with the joint frame at the centre of mass, from the zero pose, the body
+    moves along and turns about the axes of the forces as implicit Euler integrates F = m a and tau = I alpha, and the
+    other coordinates stay at rest.
+    """
     cases = (
         (False, "XZY", [0.5, -0.4, 0.7], [0.0, 0.0, 1.0]),
         (True, "XYZ", [0.1, 0.0, -0.1, 0.3, -0.2, 0.4], [0.0, 2.0, 0.0, 0.0, 0.0, 0.05]),
@@ -229,11 +238,14 @@ def _distance_pendulum(device, length, theta, lower, upper, gravity=10.0):
 
 
 def test_distance_joint_swings_as_a_pendulum(test, device):
-    """A distance joint of one length L is libuipc's soft vertex stitch of rest length L between its joint frames'
-    origins: a sphere hanging 1 m from the world on it at its centre swings 0.02 rad as implicit Euler integrates the
-    linearized point-mass pendulum, step by step to 1e-3 of its amplitude, and stays at L within the ball joint's
-    penalty. A distance joint with a range or a single bound is no stitch: the universal module takes it
-    (test_ipc_universal_range), and refuses one whose lower bound is above its upper."""
+    """Swing a sphere on a distance joint of one length as a linearized point-mass pendulum.
+
+    A distance joint of one length L is libuipc's soft vertex stitch of rest length L between its joint frames' origins:
+    a sphere hanging 1 m from the world on it at its centre swings 0.02 rad as implicit Euler integrates the linearized
+    point-mass pendulum, step by step to 1e-3 of its amplitude, and stays at L within the ball joint's penalty. A
+    distance joint with a range or a single bound is no stitch: the universal module takes it
+    (test_ipc_universal_range), and refuses one whose lower bound is above its upper.
+    """
     L, theta0, g, h = 1.0, 0.02, 10.0, 1.0e-3
     model = _distance_pendulum(device, L, theta0, L, L, gravity=g)
     solver = newton.solvers.SolverIPC(model, **_CONVERGED)
@@ -258,10 +270,13 @@ def test_distance_joint_swings_as_a_pendulum(test, device):
 
 
 def test_distance_joint_between_bodies(test, device):
-    """A distance joint of 0.5 m between two free spheres thrown apart sideways at 1 m/s, without gravity: they turn
-    about each other at 0.5 m, within the penalty, the pair keeps its momentum to 1e-6 and its joint coordinates are a
-    free joint's (eval_ik's). A distance joint with both bounds negative holds nothing: the spheres fly apart as two
-    free bodies, and a disabled one too."""
+    """Keep two free spheres thrown apart at the length of the distance joint between them.
+
+    A distance joint of 0.5 m joins two free spheres thrown apart sideways at 1 m/s, without gravity: they turn about
+    each other at 0.5 m, within the penalty, the pair keeps its momentum to 1e-6 and its joint coordinates are a free
+    joint's (eval_ik's). A distance joint with both bounds negative holds nothing: the spheres fly apart as two free
+    bodies, and a disabled one too.
+    """
 
     def pair(lower, upper, enabled=True):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -333,12 +348,15 @@ def _limit_recurrence(m, h, steps, g, lower, limit_ke, damping=0.0, at_start=Tru
 
 
 def test_limit_damping_is_implicit_euler(test, device):
-    """By default (enable_joint_limit_damping=True) a slider that falls under gravity onto its lower limit takes the
+    """Damp a slider at its limit in the steps that start past it, along implicit Euler's recurrence.
+
+    By default (enable_joint_limit_damping=True) a slider that falls under gravity onto its lower limit takes the
     damping -joint_limit_kd qd of Featherstone and SemiImplicit in the steps that start past the limit, at the step's
-    end velocity: it follows the implicit-Euler recurrence of the cubic limit with that damping step by step to 1e-4
-    m, and stays at the limit where the undamped slider (enable_joint_limit_damping=False, kd not read) bounces 5 cm
-    off it, which follows the recurrence without damping. A recurrence that switches the damping on in the steps that
-    end past the limit is farther off."""
+    end velocity: it follows the implicit-Euler recurrence of the cubic limit with that damping step by step to 1e-4 m,
+    and stays at the limit where the undamped slider (enable_joint_limit_damping=False, kd not read) bounces 5 cm off
+    it, which follows the recurrence without damping. A recurrence that switches the damping on in the steps that end
+    past the limit is farther off.
+    """
     g, lower, limit_ke, kd, h, steps = 10.0, -0.1, 1.0e3, 200.0, 2.0e-3, 300
     runs = {}
     for option in (False, True):
@@ -361,11 +379,14 @@ def test_limit_damping_is_implicit_euler(test, device):
 
 
 def test_armature_is_implicit_euler(test, device):
-    """A revolute and a prismatic joint driven from rest by target gains, a passive spring, passive damping and joint_f
+    """Add joint_armature to the inertia of a revolute or prismatic joint's coordinate.
+
+    A revolute and a prismatic joint driven from rest by target gains, a passive spring, passive damping and joint_f
     take their joint_armature as the inertia of their coordinate: they follow the recurrence of
     (I + a) q'' = ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd + f step by step to 1e-4 of their motion, under
     implicit Euler and, from an implicit Euler step, under BDF2, where the recurrence of I alone is farther off. A free
-    joint's armature is refused (a ball joint's is test_ipc_ball's)."""
+    joint's armature is refused (a ball joint's is test_ipc_ball's).
+    """
     for integrator, recurrence in (("bdf1", _drive_recurrence), ("bdf2", _drive_recurrence_bdf2)):
         for kind, length, scale, armature in (("revolute", 0.1, 1.0, 20.0), ("prismatic", 1.0, 10.0, 200.0)):
             with test.subTest(integrator=integrator, kind=kind):
@@ -419,12 +440,15 @@ def _bounded_drive_recurrence(inertia, h, steps, ke, kd, q_target, bound, forces
 
 
 def test_effort_limit_bounds_the_drive(test, device):
-    """By default (enable_joint_effort_limit=True) a hinge driven through a step of its target by gains whose force
-    exceeds its joint_effort_limit takes the bound as a constant torque in the steps that start above it, and the drive
-    in the others: it follows that recurrence step by step to 1e-4 of its motion (through the bound, the drive, and the
-    bound again as it brakes), where the unbounded drive's recurrence is far off; under BDF2 its saturated steps from
-    rest follow BDF2's recurrence of the constant torque. With enable_joint_effort_limit=False the limit is refused,
-    and a negative one always."""
+    """Bound a hinge's drive by joint_effort_limit as decided at the start of every step.
+
+    By default (enable_joint_effort_limit=True) a hinge driven through a step of its target by gains whose force exceeds
+    its joint_effort_limit takes the bound as a constant torque in the steps that start above it, and the drive in the
+    others: it follows that recurrence step by step to 1e-4 of its motion (through the bound, the drive, and the bound
+    again as it brakes), where the unbounded drive's recurrence is far off; under BDF2 its saturated steps from rest
+    follow BDF2's recurrence of the constant torque. With enable_joint_effort_limit=False the limit is refused, and a
+    negative one always.
+    """
     ke, kd, q_target, bound, h, steps = 400.0, 100.0, 0.05, 2.0, 0.01, 300
     model, state, _ = _hinged(
         device, axis=newton.Axis.X, radius=0.5, target_ke=ke, target_kd=kd, target_q=q_target, effort_limit=bound
@@ -459,10 +483,12 @@ def test_effort_limit_bounds_the_drive(test, device):
 
 
 def test_joint_options_change_nothing_unused(test, device):
-    """The terms beyond libuipc's driving term leave a joint that does not use them as it is: a revolute and a
-    prismatic joint driven within their limits, with joint_limit_kd that never acts, no armature and Newton's default
-    effort limit, step bit for bit with enable_joint_limit_damping and enable_joint_effort_limit on (the default) and
-    off."""
+    """Step joints that do not use the extra joint terms bit for bit with the joint options on and off.
+
+    The terms beyond libuipc's driving term leave a joint that does not use them as it is: a revolute and a prismatic
+    joint driven within their limits, with joint_limit_kd that never acts, no armature and Newton's default effort
+    limit, step bit for bit with enable_joint_limit_damping and enable_joint_effort_limit on (the default) and off.
+    """
     runs = []
     for option in (False, True):
         steps = []
@@ -486,10 +512,13 @@ def test_joint_options_change_nothing_unused(test, device):
 
 
 def test_rejects_d6_joints_libuipc_lacks(test, device):
-    """The D6 joints that lock what no joint of SolverIPC locks are refused, naming what they lock: three linear axes,
-    one linear and one angular; and two or three angular axes that are not orthonormal, and drives and limits on the D6
+    """Refuse D6 joints that SolverIPC cannot map onto its joints, each with its message.
+
+    The D6 joints that lock what no joint of SolverIPC locks are refused, naming what they lock: three linear axes, one
+    linear and one angular. So are two or three angular axes that are not orthonormal, and drives and limits on the D6
     joints that become a ball joint or no joint. (Two orthonormal angular axes are a universal joint, which the
-    universal module takes: test_ipc_universal_range.)"""
+    universal module takes: test_ipc_universal_range.)
+    """
     D = newton.ModelBuilder.JointDofConfig
 
     def model(linear=(), angular=(), **dof):

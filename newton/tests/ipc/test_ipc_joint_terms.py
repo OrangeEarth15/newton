@@ -71,9 +71,12 @@ def _hinged_box(device, kind="revolute", friction=0.0, half=0.1, axis=None):
 
 
 def test_mimic_scalar_case(test, device):
-    """Newton's scalar mimic case of test_solver_mimic: a prismatic follower of a revolute reference with offset 0.1 and
-    multiplier -1.5, which starts 1.2 off the relation; after a second of steps of 1/60 s the relation holds within
-    Newton's 2e-3, here within 1e-6, and the reference has taken its share of the correction."""
+    """Hold Newton's scalar mimic relation of a prismatic follower on a revolute reference.
+
+    This is Newton's scalar mimic case of test_solver_mimic: a prismatic follower of a revolute reference with offset
+    0.1 and multiplier -1.5, which starts 1.2 off the relation; after a second of steps of 1/60 s the relation holds
+    within Newton's 2e-3, here within 1e-6, and the reference has taken its share of the correction.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     reference_body, follower_body = builder.add_link(), builder.add_link()
     for body in (reference_body, follower_body):
@@ -118,10 +121,13 @@ def _two_hinges(device, **mimic):
 
 
 def test_mimic_penalty_and_enabled_flags(test, device):
-    """A follower held to -1.5 times its reference under the torques 2 N m on it and 3 N m on the reference (whose
-    resultant along the relation is 0): off by the penalty's ``tau dt^2 / K``, ``K = joint_strength_ratio`` times the
+    """Hold a mimic follower within the penalty's give, and free it when its row or joint is disabled.
+
+    A follower held to -1.5 times its reference under the torques 2 N m on it and 3 N m on the reference (whose
+    resultant along the relation is 0) is off by the penalty's ``tau dt^2 / K``, ``K = joint_strength_ratio`` times the
     two boxes' masses, by set_joint_mimic and by a deprecated row. A row disabled, or a joint disabled, lets the
-    follower turn alone."""
+    follower turn alone.
+    """
     dt = 0.01
     for row in (False, True):
         with test.subTest(row=row):
@@ -144,8 +150,11 @@ def test_mimic_penalty_and_enabled_flags(test, device):
 
 
 def test_mimic_coefficients_change_in_place(test, device):
-    """New coefficients of a mimic relation (CONSTRAINT_PROPERTIES) take effect at the next steps without building the
-    solve again, also in a graph captured before."""
+    """Apply new mimic coefficients at the next steps without building the solve again.
+
+    New coefficients of a mimic relation (CONSTRAINT_PROPERTIES) take effect at the next steps, also in a graph captured
+    before.
+    """
     model = _two_hinges(device, multiplier=0.5)
     control = model.control()
     control.joint_f.assign(np.array([1.0, 0.0], np.float32))
@@ -179,10 +188,13 @@ _FRICTION = {"revolute": 2.0, "prismatic": 200.0}
 
 
 def test_joint_friction(test, device):
-    """A box on a revolute or prismatic joint with a friction ``F`` (``_FRICTION``): under a joint_f of 0.25 and 0.95
-    times it the joint settles to the smoothed friction's steady creep, ``eps_v (1 - sqrt(1 - f / F))``; under 1.5
-    times it the joint accelerates at ``(f - F) / I`` from the first step (to 1e-3 over three steps for the hinge, whose
-    affine box loses a little speed in implicit Euler's rotation)."""
+    """Creep under a joint_f below a joint's friction and accelerate at ``(f - F) / I`` above it.
+
+    A box sits on a revolute or prismatic joint with a friction ``F`` (``_FRICTION``). Under a joint_f of 0.25 and 0.95
+    times it the joint settles to the smoothed friction's steady creep, ``eps_v (1 - sqrt(1 - f / F))``; under 1.5 times
+    it the joint accelerates at ``(f - F) / I`` from the first step (to 1e-3 over three steps for the hinge, whose
+    affine box loses a little speed in implicit Euler's rotation).
+    """
     dt = 0.01
     for kind, F in _FRICTION.items():
         for load in (0.25, 0.95, 1.5):
@@ -199,13 +211,16 @@ def test_joint_friction(test, device):
 
 
 def test_friction_takes_tight_default_tolerances(test, device):
-    """A model with joint friction takes Newton tolerances of 0.4 eps_velocity where they are left at their default,
+    """Lower default Newton tolerances to 0.4 eps_velocity for a model with joint friction.
+
+    A model with joint friction takes Newton tolerances of 0.4 eps_velocity where they are left at their default,
     silently, and its hinge and its slider under 1.5 times their friction then slide at ``(f - F) / I`` to 1% (at the
     defaults they would creep), with the axis along a coordinate axis and along the diagonal, where Newton's test, which
     takes a step's largest component, sees the least of it; tolerances given are kept, with a NewtonWarning where they
     are above that bound (and the joint creeps); a model without friction keeps the defaults, and so does a model whose
     friction a notification has removed. The rule reads the ``joint_friction`` of every degree of freedom, whatever its
-    joint (a ball joint's here), and a fixed tendon's friction loss."""
+    joint (a ball joint's here), and a fixed tendon's friction loss.
+    """
     eps = _EPS_V
     for kind, F in _FRICTION.items():
         for axis in (None, (1.0 / math.sqrt(3.0),) * 3):
@@ -255,9 +270,12 @@ def test_friction_takes_tight_default_tolerances(test, device):
 
 
 def test_tolerances_given_at_their_default_values_are_kept(test, device):
-    """A model with joint friction keeps a Newton tolerance the caller gives, also one equal to SolverIPC's default
+    """Keep the Newton tolerances given for a model with joint friction, also at SolverIPC's default values.
+
+    A model with joint friction keeps a Newton tolerance the caller gives, also one equal to SolverIPC's default
     (0.05 m/s and 0.1 1/s), with a NewtonWarning as for any tolerance above 0.4 eps_velocity, and lowers only the one
-    left unset to 0.4 eps_velocity."""
+    left unset to 0.4 eps_velocity.
+    """
     model, _ = _hinged_box(device, friction=2.0)
     bound = 0.4 * _EPS_V
     for given, expected in (
@@ -292,9 +310,12 @@ def _joint_equality(device, polycoef):
 
 
 def test_joint_equality_rows_repeating_a_mimic(test, device):
-    """A JOINT equality row that repeats the mimic row the importer made of it (the same two joints, the same linear
-    coefficients) is held by the mimic relation, which holds; a row with a term of higher order, one whose mimic row
-    has other coefficients and one whose mimic row is disabled stay refused as rows that no joint holds."""
+    """Hold a JOINT equality row that repeats its mimic row, and refuse the rows that do not.
+
+    A JOINT equality row that repeats the mimic row the importer made of it (the same two joints, the same linear
+    coefficients) is held by the mimic relation, which holds; a row with a term of higher order, one whose mimic row has
+    other coefficients and one whose mimic row is disabled stay refused as rows that no joint holds.
+    """
     model = _joint_equality(device, "0.1 -1.5 0 0 0")
     test.assertEqual((model.constraint_mimic_count, model.mujoco.equality_constraint_count), (1, 1))
     control = model.control()
@@ -315,8 +336,11 @@ def test_joint_equality_rows_repeating_a_mimic(test, device):
 
 
 def test_parent_force_holds_the_friction(test, device):
-    """BODY_PARENT_F of a box whose hinge's friction holds it against a joint_f below the friction: the joint's wrench
-    on the box is the torque of joint_f and of the friction, which cancel once the box creeps steadily."""
+    """Include a hinge's friction in the BODY_PARENT_F of the box it holds.
+
+    A hinge's friction holds a box against a joint_f below the friction: the joint's wrench on the box in BODY_PARENT_F
+    is the torque of joint_f and of the friction, which cancel once the box creeps steadily.
+    """
     model, _ = _hinged_box(device, friction=2.0)
     control = model.control()
     control.joint_f.assign(np.array([1.0], np.float32))
@@ -327,9 +351,12 @@ def test_parent_force_holds_the_friction(test, device):
 
 
 def test_grown_lists_keep_the_terms_inputs(test, device):
-    """A wheel spins down on a hinge with a friction of 0.5 N m while a box drops onto the ground; when it lands the
+    """Keep the terms' friction and flags when an eager step grows overflowing contact lists.
+
+    A wheel spins down on a hinge with a friction of 0.5 N m while a box drops onto the ground; when it lands the
     contact lists overflow, and the eager step grows them and solves the step again on a new engine, whose terms take
-    the step's friction and flags from the old: the wheel's angle goes on as in a solver with room."""
+    the step's friction and flags from the old: the wheel's angle goes on as in a solver with room.
+    """
 
     def model():
         builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=(0.0, -9.81, 0.0))
@@ -397,9 +424,12 @@ def _sliders(device, worlds=1, tendon='stiffness="2" damping="1" springlength="0
 
 
 def test_unread_tendon_friction_warns(test, device):
-    """A fixed tendon with a friction loss whose solreffriction or solimpfriction differs from Newton's default gets a
+    """Warn once of a fixed tendon's solreffriction or solimpfriction, which SolverIPC does not read.
+
+    A fixed tendon with a friction loss whose solreffriction or solimpfriction differs from Newton's default gets a
     NewtonWarning naming the value and the tendon, once, when the solver is built, as the contact coefficients it does
-    not read do; Newton's defaults, and a tendon without a friction loss, get none."""
+    not read do; Newton's defaults, and a tendon without a friction loss, get none.
+    """
     for tendon, named in (
         ('frictionloss="0.5" solreffriction="0.05 1"', "the solreffriction (0.05, 1) of MuJoCo's fixed tendon 0"),
         ('frictionloss="0.5" solimpfriction="0.8 0.9 0.001 0.5 2"', "the solimpfriction (0.8, 0.9, 0.001, 0.5, 2)"),
@@ -434,12 +464,15 @@ def _recurrence(q0, m, k, c, h, steps):
 
 
 def test_fixed_tendon_scene(test, device):
-    """The scene of Newton's test_fixed_tendon: the tendon (stiffness 2, damping 1, spring length 0) pulls the sliders
-    from (0.5, 0) along implicit Euler's recurrence of the coupled oscillator, 200 steps of 0.02 s, every step to
-    1e-4 m (the root, welded to the world by a fixed joint, is held by that joint's penalty and gives a little; the
-    terms alone hold the recurrence to 1e-6 m in libuipc-warp's tests). Newton's test asks SolverMuJoCo for the length
-    0 after the 200 steps; implicit Euler's oscillator is at 0.0098 then. With two worlds, the second world's joints
-    follow the first's."""
+    """Pull the sliders of Newton's fixed-tendon scene along implicit Euler's recurrence.
+
+    The scene is that of Newton's test_fixed_tendon: the tendon (stiffness 2, damping 1, spring length 0) pulls the
+    sliders from (0.5, 0) along implicit Euler's recurrence of the coupled oscillator, 200 steps of 0.02 s, every step
+    to 1e-4 m (the root, welded to the world by a fixed joint, is held by that joint's penalty and gives a little; the
+    terms alone hold the recurrence to 1e-6 m in libuipc-warp's tests). Newton's test asks SolverMuJoCo for the length 0
+    after the 200 steps; implicit Euler's oscillator is at 0.0098 then. With two worlds, the second world's joints
+    follow the first's.
+    """
     for worlds in (1, 2):
         with test.subTest(worlds=worlds):
             model = _sliders(device, worlds)
@@ -456,10 +489,13 @@ def test_fixed_tendon_scene(test, device):
 
 
 def test_tendon_limit(test, device):
-    """A tendon limited to [-0.1, 0.1] (MuJoCo's solreflimit 0.02 1 and solimplimit 0.9 0.95 0.001) holds a joint_f of
-    1 N on each slider at the overshoot of SolverIPC's cubic limit, ``sqrt(f delta_r / ke)`` (``delta_r`` 1 mm), with
+    """Hold a limited tendon at the cubic limit's closed-form overshoot with MuJoCo's stiffness.
+
+    A tendon limited to [-0.1, 0.1] (MuJoCo's solreflimit 0.02 1 and solimplimit 0.9 0.95 0.001) holds a joint_f of 1 N
+    on each slider at the overshoot of SolverIPC's cubic limit, ``sqrt(f delta_r / ke)`` (``delta_r`` 1 mm), with
     MuJoCo's stiffness ``ke = 1 / (T^2 zeta^2 w)``, ``w = (1 / m_1 + 1 / m_2) (1 - 0.95)``, the tendon's inverse weight
-    over the width of its impedance."""
+    over the width of its impedance.
+    """
     model = _sliders(device, tendon='range="-0.1 0.1" solreflimit="0.02 1" solimplimit="0.9 0.95 0.001"')
     control = model.control()
     control.joint_f.assign(np.array([1.0, 1.0], np.float32))
@@ -477,7 +513,11 @@ def _refusal(test, model, **options):
 
 
 def test_refusals(test, device):
-    """What SolverIPC still refuses of joint coordinate terms, each with its message."""
+    """Refuse the joint coordinate terms SolverIPC still lacks, each with its message.
+
+    The cases are Newton's own tendons, a fixed tendon's limit margin, a mimic of D6 joints of two coordinates, and the
+    friction of a free joint.
+    """
     builder = newton.ModelBuilder()
     a, b = builder.add_link(), builder.add_link()
     for body in (a, b):

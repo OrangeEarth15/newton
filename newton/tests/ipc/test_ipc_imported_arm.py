@@ -143,9 +143,11 @@ def _hinge_balance(model, state, joints, name, bodies):
 
 
 def test_imported_inputs(test, device):
-    """The importer gives the arm the inputs the other tests hold SolverIPC to: the hinges' drives (target mode
-    POSITION), armature, damping, friction and force ranges, and the ball joint's armature, damping and friction on
-    each of its three degrees of freedom; SolverIPC takes the model."""
+    """Give the imported arm the joint inputs that the other tests hold SolverIPC to.
+
+    The importer gives the hinges' drives (target mode POSITION), armature, damping, friction and force ranges, and the
+    ball joint's armature, damping and friction on each of its three degrees of freedom; SolverIPC takes the model.
+    """
     model, joints = _arm(device)
     dof = model.joint_qd_start.numpy()
     shoulder, elbow, wrist = (int(dof[joints[n]]) for n in ("shoulder", "elbow", "wrist"))
@@ -165,10 +167,13 @@ def test_imported_inputs(test, device):
 
 
 def test_arm_rests_in_balance(test, device):
-    """Driven toward its targets under gravity for 3 s, the arm rests where each hinge's drive torque and the gravity
-    torque of the links beyond it cancel to within the hinge's friction, and the hand hangs with the gravity torque about
-    its ball joint within the ball's friction about each of the joint's axes, creeping within that band slower than the
-    friction's smoothing velocity. Every step ends without a status bit."""
+    """Rest the driven arm where drive, gravity and friction torques balance at every joint.
+
+    Driven toward its targets under gravity for 3 s, the arm rests where each hinge's drive torque and the gravity
+    torque of the links beyond it cancel to within the hinge's friction, and the hand hangs with the gravity torque
+    about its ball joint within the ball's friction about each of the joint's axes, creeping within that band slower
+    than the friction's smoothing velocity. Every step ends without a status bit.
+    """
     model, joints = _arm(device)
     state, bits = _rest(model, joints, seconds=3.0)
     test.assertEqual(bits, 0)
@@ -198,9 +203,12 @@ def test_arm_rests_in_balance(test, device):
 
 
 def test_force_range_bounds_the_shoulder(test, device):
-    """With the shoulder's force range 2 N m, half the gravity torque of the level arm, the shoulder's drive pushes with
-    2 N m alone and the arm sags, after 6 s at rest, until the gravity torque about the shoulder is 2 N m, within the
-    friction; the elbow still rests in balance."""
+    """Bound the shoulder's drive torque by its force range and let the arm sag until gravity matches it.
+
+    With the shoulder's force range 2 N m, half the gravity torque of the level arm, the shoulder's drive pushes with 2
+    N m alone and the arm sags, after 6 s at rest, until the gravity torque about the shoulder is 2 N m, within the
+    friction; the elbow still rests in balance.
+    """
     model, joints = _arm(device, shoulder_force=2.0)
     state, bits = _rest(model, joints, seconds=6.0)  # the saturated drive does not damp: the arm swings down longer
     test.assertEqual(bits, 0)

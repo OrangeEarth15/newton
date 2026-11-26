@@ -132,13 +132,16 @@ def _rest_gaps(model, solver, segments, steps=25):
 
 
 def test_primitives_rest_at_their_triangulated_extents(test, device):
-    """Capsules upright and lying, cylinders upright and lying, an upright cone (base at -half_height), ellipsoids
-    with local z and local x vertical, a convex hull scaled (1, 1.5, 0.75) and a box mesh scaled (1.5, 1, 0.5), each
-    started 0.5 mm above the ground with its triangulation along local Z of 24 segments around: each comes to rest with
-    the lowest point of that triangulation, at the body's pose, inside the barrier's reach of the ground (between 0 and
-    d_hat), its pose unturned. A shape triangulated along another axis, unscaled or with other segments would rest
-    millimetres off. With shape_segments=8 the lying cylinder rests on a face of 8 segments, r cos(pi/8) under its
-    axis instead of r cos(pi/24)."""
+    """Rest each primitive shape on the ground at the extent of its triangulation.
+
+    Capsules upright and lying, cylinders upright and lying, an upright cone (base at -half_height), ellipsoids with
+    local z and local x vertical, a convex hull scaled (1, 1.5, 0.75) and a box mesh scaled (1.5, 1, 0.5) each start 0.5
+    mm above the ground with its triangulation along local Z of 24 segments around. Each comes to rest with the lowest
+    point of that triangulation, at the body's pose, inside the barrier's reach of the ground (between 0 and d_hat), its
+    pose unturned. A shape triangulated along another axis, unscaled or with other segments would rest millimetres off.
+    With shape_segments=8 the lying cylinder rests on a face of 8 segments, r cos(pi/8) under its axis instead of r
+    cos(pi/24).
+    """
     model, rotations = _scene(device, 0.5 * _D_HAT)
     test.assertTrue(np.all(model.body_mass.numpy() > 0.0))  # every body falls onto the ground
     solver = newton.solvers.SolverIPC(model, d_hat=_D_HAT, **_SETTLED)
@@ -163,8 +166,10 @@ def test_primitives_rest_at_their_triangulated_extents(test, device):
 
 
 def test_rejects_a_plane_on_a_body(test, device):
-    """A plane shape attached to a body is refused by name when the solver is built: libuipc's half planes do not
-    move. A plane on the world is taken."""
+    """Refuse a plane shape attached to a body by name when the solver is built.
+
+    libuipc's half planes do not move. A plane on the world is taken.
+    """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
     body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()))

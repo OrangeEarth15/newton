@@ -15,12 +15,15 @@ from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 
 def test_unplaced_links_start_at_forward_kinematics(test, device):
-    """A double pendulum built as Newton's basic_pendulum example builds it: links added without a pose, so that the
+    """Build the solve at the forward-kinematics poses of links added without a pose.
+
+    A double pendulum is built as Newton's basic_pendulum example builds it: links added without a pose, so that the
     model holds both at the origin, through the ground plane, and the forward kinematics written into the state only
     after the solver is built. The solver is built at the poses newton.eval_fk computes from the model's joint
-    coordinates, and steps captured from that state run as those of a solver built from a model that holds the poses.
-    A link that the joint coordinates put into the ground is refused by name: by the first step from that state, and
-    when the first step is captured, by the capture, from the model's state."""
+    coordinates, and steps captured from that state run as those of a solver built from a model that holds the poses. A
+    link that the joint coordinates put into the ground is refused by name: by the first step from that state, and when
+    the first step is captured, by the capture, from the model's state.
+    """
 
     def pendulum(height=5.0, angle=0.0, posed=False):
         builder = newton.ModelBuilder()
@@ -84,8 +87,11 @@ def test_unplaced_links_start_at_forward_kinematics(test, device):
 
 
 def test_pendulum_is_implicit_euler(test, device):
-    """A pendulum of 2 cm per metre swings as implicit Euler integrates the linearized pendulum, step by step to
-    1e-3 of its amplitude, with the period of the closed form 2 pi sqrt(I / (m g L)) to 0.1%."""
+    """Swing a pendulum as implicit Euler integrates the linearized pendulum.
+
+    A pendulum of 2 cm per metre follows that recurrence step by step to 1e-3 of its amplitude, with the period of the
+    closed form 2 pi sqrt(I / (m g L)) to 0.1%.
+    """
     L, theta0, g, h = 1.0, 0.02, 10.0, 1e-3
     model, state, _ = _hinged(device, gravity=g, offset=(0.0, L, 0.0), radius=0.05)
     q = model.joint_q.numpy()
@@ -106,9 +112,12 @@ def test_pendulum_is_implicit_euler(test, device):
 
 
 def test_joint_forces_match_closed_form(test, device):
-    """joint_f from rest without gravity: a revolute and a prismatic joint follow q_n = a h^2 n (n + 1) / 2 of
-    implicit Euler, a = tau / I or F / m, and a ball joint whose parent frame is turned spins its child about the
-    torque turned with it."""
+    """Move revolute, prismatic and ball joints under joint_f as implicit Euler's closed forms say.
+
+    Each joint_f acts from rest without gravity: a revolute and a prismatic joint follow q_n = a h^2 n (n + 1) / 2 of
+    implicit Euler, a = tau / I or F / m, and a ball joint whose parent frame is turned spins its child about the torque
+    turned with it.
+    """
     # small enough that the bodies turn slowly: an affine body turning under implicit Euler moves along a straight
     # line in its 12 coordinates and back onto the rotations, which loses about (omega dt)^2 of its angular velocity
     # per step
@@ -140,9 +149,12 @@ def test_joint_forces_match_closed_form(test, device):
 
 
 def test_fixed_and_ball_joints_hold(test, device):
-    """A box welded to a swinging pendulum keeps its pose relative to it, and a bob on a ball joint keeps its anchor
-    on the pendulum's, within the joints' penalty (a load F stretches a joint by about F dt^2 / K, a few 1e-5 m here),
-    while the pendulum swings through 1.2 rad."""
+    """Hold a welded box and a ball-jointed bob on a swinging pendulum within the joints' penalty.
+
+    A box welded to a swinging pendulum keeps its pose relative to it, and a bob on a ball joint keeps its anchor on the
+    pendulum's, within the joints' penalty (a load F stretches a joint by about F dt^2 / K, a few 1e-5 m here), while
+    the pendulum swings through 1.2 rad.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, -10.0, 0.0), up_axis=newton.Axis.Y)
     arm = builder.add_link(xform=wp.transform((0.0, -0.5, 0.0), wp.quat_identity()))
     builder.add_shape_box(arm, hx=0.05, hy=0.5, hz=0.05)
@@ -196,9 +208,12 @@ def test_fixed_and_ball_joints_hold(test, device):
 
 
 def test_joint_penalty_follows_the_masses(test, device):
-    """A joint's penalty is joint_strength_ratio times the mass of the dynamic bodies it joins, a kinematic body
-    counting 0, for every kind of joint, and it follows the masses that notify_model_changed gives the bodies (libuipc's
-    revolute and prismatic joints keep the masses they were built with and scale their ratio by them)."""
+    """Scale every joint's penalty with the masses of the dynamic bodies it joins, also after new masses.
+
+    A joint's penalty is joint_strength_ratio times the mass of the dynamic bodies it joins, a kinematic body counting
+    0, for every kind of joint, and it follows the masses that notify_model_changed gives the bodies (libuipc's revolute
+    and prismatic joints keep the masses they were built with and scale their ratio by them).
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Y)
     arm = builder.add_link(xform=wp.transform((0.0, -0.5, 0.0), wp.quat_identity()))
     builder.add_shape_box(arm, hx=0.05, hy=0.5, hz=0.05)
@@ -254,9 +269,11 @@ def test_joint_penalty_follows_the_masses(test, device):
 
 
 def test_joint_coordinates_are_written(test, device):
-    """After every step joint_q and joint_qd hold the coordinates eval_ik computes from the bodies' state, for a
-    revolute, a prismatic, a ball and a free joint, but the revolute angle, which goes on past pi; an angle written into
-    state_in picks the turn the joint goes on from."""
+    """Write joint_q and joint_qd after every step as eval_ik computes them from the bodies' state.
+
+    This holds for a revolute, a prismatic, a ball and a free joint, except the revolute angle, which goes on past pi;
+    an angle written into state_in picks the turn the joint goes on from.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Y)
     links = []
     for x in (0.0, 1.0, 2.0):
@@ -305,9 +322,12 @@ def test_joint_coordinates_are_written(test, device):
 
 
 def test_grown_lists_keep_joint_angles(test, device):
-    """A wheel spins on its hinge while a box drops onto the ground; when it lands, past half a turn of the wheel, the
-    contact lists overflow, and the eager step grows them and solves again from the step's start: the wheel's angle
-    goes on as in a solver with room, and so does every body."""
+    """Keep a spinning wheel's angle when an eager step grows overflowing contact lists.
+
+    A wheel spins on its hinge while a box drops onto the ground; when it lands, past half a turn of the wheel, the
+    contact lists overflow, and the eager step grows them and solves again from the step's start: the wheel's angle goes
+    on as in a solver with room, and so does every body.
+    """
 
     def model():
         builder = newton.ModelBuilder(up_axis=newton.Axis.Y, gravity=(0.0, -9.81, 0.0))
@@ -345,12 +365,15 @@ def test_grown_lists_keep_joint_angles(test, device):
 
 
 def test_drives_are_implicit_euler(test, device):
-    """A revolute and a prismatic joint driven from rest by target gains, a passive spring and passive damping,
-    towards a moving target, follow implicit Euler's recurrence of I q'' = ke (q* - q) + kd (qd* - qd) - ks (q - q_rest)
-    - c qd step by step to 1e-4 of their motion (SolverIPC folds the four terms into libuipc's driving term of every
-    step). The hinge turns a large sphere through small angles: an affine body turned under implicit Euler moves
-    along a straight line in its 12 coordinates and back onto the rotations, which adds a term of order
-    (omega dt)^3 to every step, 1e-4 of the motion at 0.5 rad and 1e-6 at 0.05 rad here."""
+    """Follow implicit Euler's recurrence for driven, sprung and damped revolute and prismatic joints.
+
+    A revolute and a prismatic joint driven from rest by target gains, a passive spring and passive damping, towards a
+    moving target, follow implicit Euler's recurrence of I q'' = ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd
+    step by step to 1e-4 of their motion (SolverIPC folds the four terms into libuipc's driving term of every step). The
+    hinge turns a large sphere through small angles: an affine body turned under implicit Euler moves along a straight
+    line in its 12 coordinates and back onto the rotations, which adds a term of order (omega dt)^3 to every step, 1e-4
+    of the motion at 0.5 rad and 1e-6 at 0.05 rad here.
+    """
     for kind, length, scale in (("revolute", 0.1, 1.0), ("prismatic", 1.0, 10.0)):
         with test.subTest(kind):
             gains = {"target_ke": 40.0, "target_kd": 2.0, "stiffness": 10.0, "damping": 1.0}
@@ -372,10 +395,13 @@ def test_drives_are_implicit_euler(test, device):
 
 
 def test_joint_limits_hold(test, device):
-    """A revolute joint turned by a torque into its upper limit, and a slider pulled down by gravity onto its lower
-    limit, come to rest past the limit by sqrt(F delta_r / limit_ke), where libuipc's cubic limit balances the load
-    (SolverIPC sets its strength so that it pushes back with limit_ke delta_r at the overshoot delta_r = 1e-3); four
-    times the stiffness halves the overshoot. Without the limit they run on."""
+    """Hold a joint pushed into its limit at the overshoot where libuipc's cubic limit balances the load.
+
+    A revolute joint turned by a torque into its upper limit, and a slider pulled down by gravity onto its lower limit,
+    come to rest past the limit by sqrt(F delta_r / limit_ke), where libuipc's cubic limit balances the load (SolverIPC
+    sets its strength so that it pushes back with limit_ke delta_r at the overshoot delta_r = 1e-3); four times the
+    stiffness halves the overshoot. Without the limit they run on.
+    """
     tau, upper = 4.0, 0.3
     for limit_ke in (1.0e4, 4.0e4):
         with test.subTest(limit_ke=limit_ke):
@@ -402,8 +428,11 @@ def test_joint_limits_hold(test, device):
 
 
 def test_drive_targets_change_inside_a_captured_graph(test, device):
-    """Targets written into control.joint_target_q between replays of a captured step drive a revolute joint as they
-    do in eager steps, to 1e-6: the drive is computed on the device from the control at every step."""
+    """Drive a revolute joint by targets written between replays of a captured step as eager steps do.
+
+    Targets written into control.joint_target_q between replays drive the joint as they do in eager steps, to 1e-6: the
+    drive is computed on the device from the control at every step.
+    """
 
     def run(capture):
         model, state, _ = _hinged(device, axis=newton.Axis.X, target_ke=50.0, target_kd=5.0)
@@ -461,15 +490,16 @@ def _jointed_spheres(device):
 
 
 def test_joint_enabled_is_read_at_every_replay(test, device):
-    """joint_enabled of revolute, prismatic, fixed and ball joints is read at every step, also by a captured one.
+    """Read joint_enabled of revolute, prismatic, fixed and ball joints at every step, also in a captured one.
 
-    Four spheres hang at their centres from joints to the world, the revolute and ball joints turned by a joint_f
-    torque of 5e-3 N m about z and the prismatic one pushed along x by 0.5 N. Over six replays of a captured pair of
-    steps every sphere stays put but for its joint's motion, and the driven ones speed up as implicit Euler has them
-    (tau dt / I and f dt / m per step). Clearing joint_enabled of the revolute and fixed joints in place between
-    replays drops those two spheres into implicit Euler's free fall from where they are, the revolute one spinning on
-    at its speed (its joint_f no longer acts), while the prismatic and ball spheres stay held and driven; clearing the
-    other two then drops them likewise, the prismatic one sliding on at its speed."""
+    Four spheres hang at their centres from joints to the world, the revolute and ball joints turned by a joint_f torque
+    of 5e-3 N m about z and the prismatic one pushed along x by 0.5 N. Over six replays of a captured pair of steps
+    every sphere stays put but for its joint's motion, and the driven ones speed up as implicit Euler has them
+    (tau dt / I and f dt / m per step). Clearing joint_enabled of the revolute and fixed joints in place between replays
+    drops those two spheres into implicit Euler's free fall from where they are, the revolute one spinning on at its
+    speed (its joint_f no longer acts), while the prismatic and ball spheres stay held and driven; clearing the other
+    two then drops them likewise, the prismatic one sliding on at its speed.
+    """
     dt = 0.01
     model = _jointed_spheres(device)
     solver = newton.solvers.SolverIPC(model, **_TIGHT)
@@ -605,14 +635,17 @@ def _four_bar(device, placed):
 
 
 def test_four_bar_linkage_closes_its_loop(test, device):
-    """A four-bar linkage whose loop is closed by a revolute joint outside the articulation (joint_articulation -1)
-    falls from crank-up under gravity as a mechanism of one degree of freedom: over 40 steps of 0.01 s the crank turns
-    by more than 0.3 rad, the loop joint holds the rocker's end at its world pivot within 0.5 mm, and the rocker's
-    angle is the closed form of Freudenstein's equation at the crank's angle within 2e-3 rad, both angles from the
-    links' rotations. joint_q of the crank's joint and of the loop joint are the links' rotations from the start, as
-    newton.eval_ik has them. Built without poses, the links sit at the model's origin, and the solve is built at the
-    poses newton.eval_fk computes from the joint coordinates, the loop joint placing no body; the steps from the state
-    eval_fk writes are those of the linkage built at its pose."""
+    """Close a four-bar linkage's loop with a revolute joint outside the articulation.
+
+    A four-bar linkage whose loop is closed by a revolute joint outside the articulation (joint_articulation -1) falls
+    from crank-up under gravity as a mechanism of one degree of freedom: over 40 steps of 0.01 s the crank turns by more
+    than 0.3 rad, the loop joint holds the rocker's end at its world pivot within 0.5 mm, and the rocker's angle is the
+    closed form of Freudenstein's equation at the crank's angle within 2e-3 rad, both angles from the links' rotations.
+    joint_q of the crank's joint and of the loop joint are the links' rotations from the start, as newton.eval_ik has
+    them. Built without poses, the links sit at the model's origin, and the solve is built at the poses newton.eval_fk
+    computes from the joint coordinates, the loop joint placing no body; the steps from the state eval_fk writes are
+    those of the linkage built at its pose.
+    """
     model, links, centers, loop, theta2_0, theta4_0 = _four_bar(device, placed=True)
     test.assertEqual(int(model.joint_articulation.numpy()[loop]), -1)
     solver = newton.solvers.SolverIPC(model, **_TIGHT)

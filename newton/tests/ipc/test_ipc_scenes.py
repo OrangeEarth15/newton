@@ -14,8 +14,11 @@ from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 
 def test_drop_on_ground(test, device):
-    """A soft cube dropped from 5 cm onto the ground plane: the barrier keeps every vertex above the plane, the cube
-    comes to rest inside the activation distance d_hat, and the last step converges."""
+    """Drop a soft cube onto the ground and rest it inside d_hat with every vertex above the plane.
+
+    The cube is dropped from 5 cm onto the ground plane. The barrier keeps every vertex above the plane, the cube comes
+    to rest inside the activation distance d_hat, and the last step converges.
+    """
     model = _soft_cube(device)
     solver = newton.solvers.SolverIPC(model)
     traj = _run(model, solver, 80)
@@ -30,8 +33,11 @@ def test_drop_on_ground(test, device):
 
 
 def test_free_fall_matches_implicit_euler(test, device):
-    """A soft cube falling freely, without contact, follows implicit Euler's heights ``z_0 - g dt^2 k (k + 1) / 2`` to
-    1e-5 m (the float32 output) over ten steps."""
+    """Match implicit Euler's heights for a soft cube in free fall, to 1e-5 m over ten steps.
+
+    A soft cube falling freely, without contact, follows implicit Euler's heights ``z_0 - g dt^2 k (k + 1) / 2`` to 1e-5
+    m (the float32 output) over ten steps.
+    """
     model = _soft_cube(device, height=1.0, ground=False)
     solver = newton.solvers.SolverIPC(model, newton_velocity_tol=1e-5, linear_tol_rate=1e-12)
     x0 = model.particle_q.numpy().astype(np.float64)
@@ -42,8 +48,10 @@ def test_free_fall_matches_implicit_euler(test, device):
 
 
 def test_kinematic_particles_stay(test, device):
-    """The particles of zero mass, a soft cube's fixed left face, stay where they are, bit for bit, while the rest of
-    the cube falls."""
+    """Keep particles of zero mass where they are, bit for bit, while the rest of the cube falls.
+
+    The particles of zero mass are a soft cube's fixed left face.
+    """
     model = _soft_cube(device, height=0.5, ground=False, fix_left=True)
     fixed = model.particle_mass.numpy() == 0.0
     test.assertTrue(fixed.any())
@@ -55,8 +63,11 @@ def test_kinematic_particles_stay(test, device):
 
 
 def test_soft_bodies_stack_without_intersection(test, device):
-    """A small soft cube falls onto a larger one on the ground: in no step does an edge cross a triangle or two
-    surfaces touch, and the small cube comes to rest on top of the large one."""
+    """Stack a small soft cube on a larger one without intersection.
+
+    A small soft cube falls onto a larger one on the ground: in no step does an edge cross a triangle or two surfaces
+    touch, and the small cube comes to rest on top of the large one.
+    """
     from uipc_warp.validation import SurfaceChecker  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
@@ -97,8 +108,11 @@ def test_soft_bodies_stack_without_intersection(test, device):
 
 
 def test_friction_on_tilted_gravity(test, device):
-    """A box on the ground sticks below the friction angle and slides with g (sin - mu cos) above it; mu is the mean
-    of the ground's 0.5 and the particles' soft_contact_mu, 0.5."""
+    """Stick a box below the friction angle and slide it with g (sin - mu cos) above it.
+
+    The box rests on the ground under tilted gravity; mu is the mean of the ground's 0.5 and the particles'
+    soft_contact_mu, 0.5.
+    """
     g = 9.81
     for tan_theta, sticks in ((0.3, True), (0.8, False)):
         th = np.arctan(tan_theta)
@@ -137,9 +151,12 @@ def test_friction_on_tilted_gravity(test, device):
 
 
 def test_graph_capture_matches_eager(test, device):
-    """Steps of a soft cube dropping onto the ground, captured in a CUDA graph and replayed, follow eager steps to
-    1e-6 m over 21 steps. The solver adds with float atomics (SpMV, triplet reduction), as libuipc does, so converged
-    tightly the captured and eager runs agree to rounding rather than bit for bit."""
+    """Match eager steps with a soft cube's steps replayed from a CUDA graph, to 1e-6 m.
+
+    Steps of a soft cube dropping onto the ground, captured in a CUDA graph and replayed, follow eager steps to 1e-6 m
+    over 21 steps. The solver adds with float atomics (SpMV, triplet reduction), as libuipc does, so converged tightly
+    the captured and eager runs agree to rounding rather than bit for bit.
+    """
     tight = {"newton_velocity_tol": 1e-7, "linear_tol_rate": 1e-12, "semi_implicit": False}
     model = _soft_cube(device)
     eager = _run(model, newton.solvers.SolverIPC(model, **tight), 21)
@@ -164,9 +181,12 @@ def _run_checked(model, solver, frames, dt=0.01):
 
 
 def test_cloth_drapes_over_sphere(test, device):
-    """A cloth grid falls onto a fixed sphere above the ground: in no step does an edge cross a triangle or two
-    surfaces touch, the cloth stays outside the sphere up to the sag of its triangulation, its middle rests on the
-    sphere's top, within d_hat + 1 mm, while the sheet hangs down around it, and no contact list overflows."""
+    """Drape a cloth over a fixed sphere without intersection or contact list overflow.
+
+    A cloth grid falls onto a fixed sphere above the ground: in no step does an edge cross a triangle or two surfaces
+    touch, the cloth stays outside the sphere up to the sag of its triangulation, its middle rests on the sphere's top,
+    within d_hat + 1 mm, while the sheet hangs down around it, and no contact list overflows.
+    """
     builder = newton.ModelBuilder()
     _cloth(builder, 20, 0.03, 0.40)
     center, radius = np.array([0.0, 0.0, 0.2]), 0.15
@@ -189,7 +209,7 @@ def test_cloth_drapes_over_sphere(test, device):
 
 
 def test_cloth_self_contact_folded_sheet(test, device):
-    """A sheet folded over itself: the top layer falls onto the bottom one and never passes through it."""
+    """Drop the top layer of a sheet folded over itself onto the bottom one without passing through it."""
     nx, ny, ds, r, z0 = 28, 10, 0.025, 0.03, 0.02
     builder = newton.ModelBuilder()
     builder.add_cloth_grid(
@@ -243,9 +263,12 @@ def test_cloth_self_contact_folded_sheet(test, device):
 
 
 def test_rigid_box_free_fall_matches_implicit_euler(test, device):
-    """A rigid box whose shape, and with it the centre of mass, is off the body origin, turned about z and thrown
-    sideways, falls as implicit Euler does: over ten steps it moves by ``v_0 k dt - g dt^2 k (k + 1) / 2`` and its
-    velocity is ``v_0 - g k dt``, to 1e-5 (the float32 output), and it does not turn."""
+    """Match implicit Euler's flight for a thrown rigid box whose centre of mass is off its origin.
+
+    The box's shape, and with it the centre of mass, is off the body origin; the box is turned about z and thrown
+    sideways. Over ten steps it moves by ``v_0 k dt - g dt^2 k (k + 1) / 2`` and its velocity is ``v_0 - g k dt``, to
+    1e-5 (the float32 output), and it does not turn.
+    """
     builder = newton.ModelBuilder()
     rot = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 0.5)
     b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), rot))
@@ -270,11 +293,14 @@ def test_rigid_box_free_fall_matches_implicit_euler(test, device):
 
 
 def test_rigid_spin_slows_as_implicit_euler_turns_an_affine_body(test, device):
-    """A box spinning freely about its axis of symmetry, without gravity, in libuipc's step (body_rotation="linear"):
-    within a step the affine body moves along a straight line in its 12 coordinates and back onto the rotations, so its
-    angular velocity drops by about (omega dt)^2 per step, as a rotation projected back after every step gives it: the
+    """Slow a freely spinning box by about (omega dt)^2 per step under body_rotation="linear".
+
+    A box spins freely about its axis of symmetry, without gravity, in libuipc's step (body_rotation="linear"). Within a
+    step the affine body moves along a straight line in its 12 coordinates and back onto the rotations, so its angular
+    velocity drops by about (omega dt)^2 per step, as a rotation projected back after every step gives it: the
     increments alpha_1 = atan(omega dt) and alpha_(n+1) = atan(sin alpha_n / (2 - cos alpha_n)), the angular velocity
-    sin(alpha_n) / dt."""
+    sin(alpha_n) / dt.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     b = _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.05))
     model = builder.finalize(device=device)
@@ -296,9 +322,12 @@ def test_rigid_spin_slows_as_implicit_euler_turns_an_affine_body(test, device):
 
 
 def test_rigid_stack_rests_without_intersection(test, device):
-    """Three rigid boxes stacked with 4 mm gaps fall onto the ground and onto each other: in no step does an edge cross
-    a triangle or two surfaces touch, and after 100 steps every box rests upright on the one below, the bottom one on
-    the ground, within d_hat + 1 mm."""
+    """Rest three stacked rigid boxes upright on each other without intersection.
+
+    Three rigid boxes stacked with 4 mm gaps fall onto the ground and onto each other: in no step does an edge cross a
+    triangle or two surfaces touch, and after 100 steps every box rests upright on the one below, the bottom one on the
+    ground, within d_hat + 1 mm.
+    """
     builder = newton.ModelBuilder()
     half, gap = 0.1, 0.004
     for i in range(3):
@@ -321,9 +350,12 @@ def test_rigid_stack_rests_without_intersection(test, device):
 
 
 def test_cloth_on_rigid_box(test, device):
-    """A cloth falls onto a rigid box standing on the ground: in no step does an edge cross a triangle or two surfaces
-    touch, the box stays upright where it stood on the ground, and the cloth's middle rests on its top, within
-    d_hat + 1 mm, while the edges hang over the sides."""
+    """Rest a cloth on a rigid box standing on the ground without intersection.
+
+    A cloth falls onto a rigid box standing on the ground: in no step does an edge cross a triangle or two surfaces
+    touch, the box stays upright where it stood on the ground, and the cloth's middle rests on its top, within d_hat + 1
+    mm, while the edges hang over the sides.
+    """
     builder = newton.ModelBuilder()
     _cloth(builder, 12, 0.025, 0.25, mass=1.0e-3, tri_k=1.0e3, edge_ke=1.0e-3)
     _box_body(builder, (0.0, 0.0, 0.1005), (0.1, 0.1, 0.1))
@@ -347,8 +379,10 @@ def test_cloth_on_rigid_box(test, device):
 
 
 def test_kinematic_body_lifts_cloth(test, device):
-    """A kinematic box that jumps (``kinematic_motion="jump"``) follows the poses written to ``state_in`` and carries
-    the cloth lying on it."""
+    """Carry the cloth lying on a kinematic box that jumps to the poses written to ``state_in``.
+
+    The box moves with ``kinematic_motion="jump"`` and follows those poses.
+    """
     from uipc_warp.validation import SurfaceChecker  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
@@ -378,8 +412,11 @@ def test_kinematic_body_lifts_cloth(test, device):
 
 
 def test_graph_capture_matches_eager_cloth_and_rigid(test, device):
-    """As test_graph_capture_matches_eager, with a cloth falling onto a rigid box: the particles and the body of steps
-    replayed from a CUDA graph follow eager steps to 1e-6 over 21 steps."""
+    """Match eager steps with CUDA graph replays of a cloth falling onto a rigid box, to 1e-6.
+
+    As test_graph_capture_matches_eager, with a cloth falling onto a rigid box: the particles and the body of steps
+    replayed from a CUDA graph follow eager steps to 1e-6 over 21 steps.
+    """
     tight = {"newton_velocity_tol": 1e-6, "linear_tol_rate": 1e-12, "semi_implicit": False}
 
     def scene():
@@ -398,14 +435,17 @@ def test_graph_capture_matches_eager_cloth_and_rigid(test, device):
 
 
 def test_body_stiffness_takes_a_turn_in_one_iteration(test, device):
-    """By default a body's orthogonality stiffness is libuipc's 1e8 Pa, lowered in a step of length dt to
-    25 I_max / (V dt^2), I_max the body's largest principal moment of inertia, so that the first Newton iteration takes
-    a turn of up to 0.1 rad about that moment's axis in full: a 1 m cube that a torque turns by 0.06 rad in one 0.1 s
-    step (Newton's body-force test) and a 10 cm cube spinning at 0.6 rad/s over six steps of 1/60 s end where the
-    converged solve does, as a rotation projected back after every step ends. At libuipc's stiffness, given as
-    body_kappa, the line search cuts the turn short and the next directions pass the displacement test long before it
-    is done (31% and 33% of the angular velocity). Eager and captured steps of two sizes take the stiffness of their own
-    dt; a given body_kappa is taken at every step."""
+    """Take a turn of up to 0.1 rad in the first Newton iteration with the default body stiffness.
+
+    By default a body's orthogonality stiffness is libuipc's 1e8 Pa, lowered in a step of length dt to 25 I_max / (V
+    dt^2), I_max the body's largest principal moment of inertia, so that the first Newton iteration takes a turn of up
+    to 0.1 rad about that moment's axis in full. A 1 m cube that a torque turns by 0.06 rad in one 0.1 s step (Newton's
+    body-force test) and a 10 cm cube spinning at 0.6 rad/s over six steps of 1/60 s end where the converged solve does,
+    as a rotation projected back after every step ends. At libuipc's stiffness, given as body_kappa, the line search
+    cuts the turn short and the next directions pass the displacement test long before it is done (31% and 33% of the
+    angular velocity). Eager and captured steps of two sizes take the stiffness of their own dt; a given body_kappa is
+    taken at every step.
+    """
 
     def cube(half, torque=0.0, spin=0.0, **kwargs):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -474,7 +514,9 @@ def test_body_stiffness_takes_a_turn_in_one_iteration(test, device):
 
 
 def test_rigid_body_rotation(test, device):
-    """With body_rotation="rigid" (libuipc-warp's affine_rotation="rigid") a rigid body's prediction is a rigid body's
+    """Keep a rigid body's angular momentum in its predicted flight under body_rotation="rigid".
+
+    With body_rotation="rigid" (libuipc-warp's affine_rotation="rigid") a rigid body's prediction is a rigid body's
     flight that keeps its angular momentum, and its twist holds the angular velocity that carries that momentum.
 
     At converged Newton tolerances a cube spinning about any axis keeps its angular velocity over 200 steps of 0.01 s,
@@ -482,10 +524,11 @@ def test_rigid_body_rotation(test, device):
     a box tumbling about no principal axis keeps the angular momentum Newton computes from its state. At the solver's
     default tolerances the Newton loop's displacement test leaves a little of each turn behind, which the twist reports:
     the cube loses less than a tenth of what libuipc's step loses. Newton's cases at the default tolerances: a torque
-    and a force on a cube whose centre of mass is off its frame (the combined force-and-torque test) give tau / I and
-    f / m per second, also captured; a 0.5 x 1 x 2 m box that a torque starts turning in one 0.1 s step reports the
-    rigid 0.24 rad/s (the skew part of A_dot A^-1 counts the shear of its soft default stiffness); the undamped hinge of
-    test_joint_damping keeps its spin."""
+    and a force on a cube whose centre of mass is off its frame (the combined force-and-torque test) give tau / I and f
+    / m per second, also captured; a 0.5 x 1 x 2 m box that a torque starts turning in one 0.1 s step reports the rigid
+    0.24 rad/s (the skew part of A_dot A^-1 counts the shear of its soft default stiffness); the undamped hinge of
+    test_joint_damping keeps its spin.
+    """
     tight = {"newton_velocity_tol": 1e-9, "newton_transrate_tol": 1e-9, "linear_tol_rate": 1e-14, "semi_implicit": False,
              "newton_max_iter": 256}  # fmt: skip
 
@@ -593,10 +636,13 @@ def test_rigid_body_rotation(test, device):
 
 
 def test_body_rotation_defaults_to_rigid(test, device):
-    """body_rotation defaults to "rigid" under implicit Euler and to "linear", libuipc's step, under BDF2, which the
-    rigid flight does not take. By default a cube keeps its spin over 50 steps of 0.01 s at converged tolerances, as with
-    body_rotation="rigid", where libuipc's step keeps 0.976 of it; under BDF2 the default steps as body_rotation="linear"
-    does; and body_rotation="rigid" with BDF2 is refused, naming what to pass instead."""
+    """Default body_rotation to "rigid" under implicit Euler and to "linear" under BDF2.
+
+    "linear" is libuipc's step; BDF2 does not take the rigid flight. By default a cube keeps its spin over 50 steps of
+    0.01 s at converged tolerances, as with body_rotation="rigid", where libuipc's step keeps 0.976 of it; under BDF2
+    the default steps as body_rotation="linear" does; and body_rotation="rigid" with BDF2 is refused, naming what to
+    pass instead.
+    """
     tight = {"newton_velocity_tol": 1e-9, "newton_transrate_tol": 1e-9, "linear_tol_rate": 1e-14, "semi_implicit": False,
              "newton_max_iter": 256}  # fmt: skip
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))

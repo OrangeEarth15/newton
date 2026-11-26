@@ -58,9 +58,12 @@ def _steps(model, solver, steps, field="particle_q"):
 
 
 def test_spring_damping_as_implicit_euler(test, device):
-    """Two particles of 0.1 kg on a spring of 50 N/m and rest length 10 cm with ``spring_damping`` 0.8 N s/m, let go 2
-    cm stretched and moving apart at 0.3 m/s, without gravity: the spring's length follows the recurrence of ``(m / 2)
-    u'' = -k u - c u'`` under implicit Euler and BDF2, step by step to the Newton tolerance."""
+    """Match a damped spring's length to the implicit Euler and BDF2 recurrence of a damped oscillator.
+
+    Two particles of 0.1 kg on a spring of 50 N/m and rest length 10 cm with ``spring_damping`` 0.8 N s/m are let go 2
+    cm stretched and moving apart at 0.3 m/s, without gravity. The spring's length follows the recurrence of ``(m / 2)
+    u'' = -k u - c u'`` under implicit Euler and BDF2, step by step to the Newton tolerance.
+    """
     for integrator in ("bdf1", "bdf2"):
         with test.subTest(integrator=integrator):
             builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -77,12 +80,14 @@ def test_spring_damping_as_implicit_euler(test, device):
 
 
 def test_stitch_damping_as_implicit_euler(test, device):
-    """A particle of 10 g on an attachment of 4 N/m with damping 0.05 N s/m to a point of a static body, and two
-    particles of 10 g on a spring of rest length 0 with the same stiffness and damping, from offsets and velocities
-    in every direction, without gravity: the offset follows ``m u'' = -k u - c u'`` (the spring's pair with ``m / 2``)
-    under implicit Euler, step by step to the Newton tolerance. The particle of a disabled attachment flies free. The
-    particles do not collide with each other (``particle_grid`` None): the zero-length spring brings its two
-    together."""
+    """Match damped attachments and zero-length springs to the implicit Euler recurrence of a damped oscillator.
+
+    A particle of 10 g on an attachment of 4 N/m with damping 0.05 N s/m to a point of a static body, and two particles
+    of 10 g on a spring of rest length 0 with the same stiffness and damping, start from offsets and velocities in every
+    direction, without gravity. The offset follows ``m u'' = -k u - c u'`` (the spring's pair with ``m / 2``) under
+    implicit Euler, step by step to the Newton tolerance. The particle of a disabled attachment flies free. The
+    particles do not collide with each other (``particle_grid`` None): the zero-length spring brings its two together.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()), mass=0.0)
     u0, v0 = np.array([0.01, -0.02, 0.005]), np.array([0.05, 0.1, -0.2])
@@ -135,11 +140,14 @@ def _every_kind(device, tri_kd=0.5, edge_kd=1e-3, k_damp=2.0, spring_kd=0.3):
 
 
 def test_what_the_engine_takes(test, device):
-    """Of a model with every kind, the solver gives its engine one damping group per kind: the springs of positive rest
-    length with ``spring_damping``; the tetrahedra with ``tet_poses``, their rest volumes and ``k_damp``; the cloth
-    triangles that have elasticity, with ``tri_poses``, ``tri_areas`` and ``tri_kd``; the cloth hinges with stiffness,
-    as libuipc's ``(o0, v1, v2, o1)`` of Newton's ``(o0, o1, v1, v2)``, with ``edge_rest_length`` and ``edge_kd``. A
-    model without damping gives it none, and a default cloth (``tri_kd`` 10) its triangles' damping."""
+    """Give the engine one damping group per element kind, with its coefficients and rest data.
+
+    Of a model with every kind, the solver gives its engine the springs of positive rest length with ``spring_damping``;
+    the tetrahedra with ``tet_poses``, their rest volumes and ``k_damp``; the cloth triangles that have elasticity, with
+    ``tri_poses``, ``tri_areas`` and ``tri_kd``; the cloth hinges with stiffness, as libuipc's ``(o0, v1, v2, o1)`` of
+    Newton's ``(o0, o1, v1, v2)``, with ``edge_rest_length`` and ``edge_kd``. A model without damping gives it none, and
+    a default cloth (``tri_kd`` 10) its triangles' damping.
+    """
     from uipc_warp.ext import damping as ext  # noqa: PLC0415
 
     model = _every_kind(device)
@@ -185,9 +193,12 @@ def test_what_the_engine_takes(test, device):
 
 
 def test_coefficients_read_at_every_step(test, device):
-    """Two steps captured once, the triangles' ``tri_kd`` written into the model between the replays (0 for the replays
-    3 to 5): a cloth of 4 x 4 squares held at one edge and swinging under gravity follows eager steps given the same
-    coefficients, to 1e-9 m, and swings otherwise while its damping is off (by more than 1e-7 m)."""
+    """Read the triangles' damping coefficients from the model at every replay of a captured step.
+
+    Two steps are captured once, and the triangles' ``tri_kd`` is written into the model between the replays (0 for the
+    replays 3 to 5). A cloth of 4 x 4 squares held at one edge and swinging under gravity follows eager steps given the
+    same coefficients, to 1e-9 m, and swings otherwise while its damping is off (by more than 1e-7 m).
+    """
 
     def run(capture, zero=range(3, 6)):
         builder = newton.ModelBuilder()
@@ -233,8 +244,11 @@ def test_coefficients_read_at_every_step(test, device):
 
 
 def test_refusals(test, device):
-    """A damping, drag or lift that is not finite, and a negative damping or drag, raise NotImplementedError when the
-    solver is built, naming the item; so does a damped bending edge whose ``edge_rest_length`` is not positive."""
+    """Raise NotImplementedError at construction for damping, drag and lift values that SolverIPC refuses.
+
+    A damping, drag or lift that is not finite, and a negative damping or drag, raise NotImplementedError when the
+    solver is built, naming the item; so does a damped bending edge whose ``edge_rest_length`` is not positive.
+    """
 
     def refused(edit, message):
         model = _every_kind(device)
@@ -282,9 +296,12 @@ def test_refusals(test, device):
 
 
 def test_drag_and_lift_as_semi_implicit(test, device):
-    """A free triangle of three particles with ``tri_drag`` 0.8 and ``tri_lift`` 0.6, moving at three velocities: the
+    """Apply triangle drag and lift as SemiImplicit's external accelerations at the step's start.
+
+    A free triangle of three particles with ``tri_drag`` 0.8 and ``tri_lift`` 0.6 moves at three velocities: the
     external accelerations a step adds to its particles are SemiImplicit's ``-(f_drag + f_lift) / m`` at the step's
-    start, its ``eval_triangle`` with no elasticity; a fixed particle takes none."""
+    start, its ``eval_triangle`` with no elasticity. A fixed particle takes none.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     x = [(0.0, 0.0, 1.0), (0.1, 0.0, 1.0), (0.0, 0.1, 1.05)]
     v = [(0.3, -0.2, -1.0), (0.1, 0.0, -1.2), (-0.2, 0.4, -0.8)]

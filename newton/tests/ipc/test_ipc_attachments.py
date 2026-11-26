@@ -25,10 +25,13 @@ def _attached_pair(device, stiffness=2.0e4, damping=0.0):
 
 
 def test_attachment_moves_a_free_body(test, device):
-    """A particle attached to a free body that it starts moving: the pair moves together, its momentum stays the
-    particle's 1 kg m/s to rounding, and the stretch follows the implicit-Euler recurrence of the two-mass oscillator,
-    omega^2 = k (1 / m_p + 1 / m_b), from no stretch at a relative speed of 1 m/s, step by step to the Newton
-    tolerance. The body only translates: the anchor is at its centre of mass."""
+    """Move a free body and an attached particle together as an implicit-Euler two-mass oscillator.
+
+    The particle starts the free body moving: the pair moves together, its momentum stays the particle's 1 kg m/s to
+    rounding, and the stretch follows the implicit-Euler recurrence of the two-mass oscillator, omega^2 = k (1 / m_p + 1
+    / m_b), from no stretch at a relative speed of 1 m/s, step by step to the Newton tolerance. The body only
+    translates: the anchor is at its centre of mass.
+    """
     model, body, particle = _attached_pair(device)
     solver = newton.solvers.SolverIPC(model, **_TIGHT)
     base = solver._scene.layout().body_base[body]
@@ -69,10 +72,12 @@ def _hung_cloth(device, height=0.3, stiffness=1.0e4, shared=False):
 
 
 def test_cloth_hangs_from_a_static_body(test, device):
-    """A cloth hung by two corners from a static body: the corners stay within 1e-4 m of their points on the body
-    (their share of the cloth's weight over the stiffness is 1.2e-5 m), the rest of the cloth hangs below them, clear
-    of the ground, and no step fails. The anchors are no contact primitives; attachments at one point of one body
-    share an anchor."""
+    """Hang a cloth by two corners from a static body with the corners held at their points.
+
+    The corners stay within 1e-4 m of their points on the body (their share of the cloth's weight over the stiffness is
+    1.2e-5 m), the rest of the cloth hangs below them, clear of the ground, and no step fails. The anchors are no
+    contact primitives; attachments at one point of one body share an anchor.
+    """
     model, body, corners = _hung_cloth(device)
     solver = newton.solvers.SolverIPC(model)
     layout = solver._scene.layout()
@@ -94,9 +99,12 @@ def test_cloth_hangs_from_a_static_body(test, device):
 
 
 def test_attachment_enabled_inside_a_captured_graph(test, device):
-    """A particle attached to a static body under gravity, ``attachment_particle_body_enabled`` switched off for ten
-    steps and on again between the replays of a captured step: the steps follow eager ones given the same flags to
-    1e-6 m, the particle falls while the attachment is off and is pulled back once it is on."""
+    """Follow ``attachment_particle_body_enabled`` switched between the replays of a captured step.
+
+    A particle is attached to a static body under gravity, and ``attachment_particle_body_enabled`` is switched off for
+    ten steps and on again between the replays of a captured step. The steps follow eager ones given the same flags to
+    1e-6 m; the particle falls while the attachment is off and is pulled back once it is on.
+    """
 
     def run(capture):
         builder = newton.ModelBuilder()
@@ -133,9 +141,12 @@ def test_attachment_enabled_inside_a_captured_graph(test, device):
 
 
 def test_hard_attachment_holds_as_a_ball_joint(test, device):
-    """A hard attachment (infinite stiffness) of a particle of mass m hanging from a static body takes the penalty of
-    a ball joint, joint_strength_ratio gamma times the dynamic mass over dt^2: under gravity it rests g dt^2 / gamma
-    below its point (9.8e-6 m at dt 0.01 s), to 1%, and twice as far with half the ratio."""
+    """Hold a hard attachment with the penalty of a ball joint.
+
+    A particle of mass m hangs from a static body by an attachment of infinite stiffness. Its penalty is that of a ball
+    joint, joint_strength_ratio gamma times the dynamic mass over dt^2: under gravity the particle rests g dt^2 / gamma
+    below its point (9.8e-6 m at dt 0.01 s), to 1%, and twice as far with half the ratio.
+    """
     for gamma in (100.0, 50.0):
         builder = newton.ModelBuilder()
         body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()), mass=0.0)
@@ -152,10 +163,13 @@ def test_hard_attachment_holds_as_a_ball_joint(test, device):
 
 
 def test_zero_length_springs_oscillate_as_implicit_euler(test, device):
-    """Springs of rest length 0, libuipc's soft vertex stitch: without gravity two free particles of mass m 1 cm
-    apart, and a free particle 1 cm from a kinematic one, follow the implicit-Euler oscillator of omega^2 = 2 k / m and
-    k / m step by step to the Newton tolerance, and the free pair's centre stays put. The particles have no radius,
-    so that they do not collide with each other (a spring changes no contact pair)."""
+    """Oscillate particles joined by springs of rest length 0 as the implicit-Euler oscillator.
+
+    Springs of rest length 0 are libuipc's soft vertex stitch. Without gravity, two free particles of mass m 1 cm apart,
+    and a free particle 1 cm from a kinematic one, follow the implicit-Euler oscillator of omega^2 = 2 k / m and k / m
+    step by step to the Newton tolerance, and the free pair's centre stays put. The particles have no radius, so that
+    they do not collide with each other (a spring changes no contact pair).
+    """
     m, k, dt, steps = 0.01, 4.0, 0.01, 60
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     for x, y, mass in ((0.0, 0.0, m), (0.01, 0.0, m), (0.0, 1.0, 0.0), (0.01, 1.0, m)):
@@ -191,10 +205,13 @@ def test_zero_length_springs_oscillate_as_implicit_euler(test, device):
 
 
 def test_attachment_changes(test, device):
-    """notify_model_changed(CONSTRAINT_PROPERTIES): a new stiffness is taken at the next step without building the
+    """Take attachment changes notified with CONSTRAINT_PROPERTIES, building the solve again only where needed.
+
+    After notify_model_changed(CONSTRAINT_PROPERTIES), a new stiffness is taken at the next step without building the
     solve again; a damping where the solve has none builds it again, with the damping of the attachment's stitch, and a
     damping changed after that is taken at the next step without building it again; a new body point builds the solve
-    again."""
+    again.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     b = _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
     builder.add_particle(pos=wp.vec3(0.0, 0.0, 0.8), vel=wp.vec3(0.0, 0.0, 0.0), mass=0.01, radius=0.001)
@@ -224,8 +241,11 @@ def test_attachment_changes(test, device):
 
 
 def test_no_stitches_without_attachments(test, device):
-    """A model without attachments and springs of rest length 0 gives the engine no stitch and no anchor, and a model
-    without springs no contact surface of its own: the inputs of a model that uses neither are those of before."""
+    """Give the engine no stitch, anchor or contact surface of its own for a model that needs none.
+
+    A model without attachments and springs of rest length 0 gives the engine no stitch and no anchor, and a model
+    without springs no contact surface of its own.
+    """
     model = _soft_cube(device, height=0.3)
     builder = newton.ModelBuilder()
     _box_body(builder, (0.0, 0.0, 0.5), (0.1, 0.1, 0.1))
@@ -276,12 +296,14 @@ def _particles_on_a_box(device, worlds=1):
 
 
 def test_attached_particle_skips_its_body(test, device):
-    """A particle attached to a body does not collide with it: one attached at a point of the body's surface starts
-    in contact with it, which the barrier refuses. Particle 0, attached at the centre of a box's top face, takes a
-    contact element that collides with what a free particle's does but with that box; the free particle 1 still
-    collides with the box and lands on it, and particle 0 holds its point through 100 steps of 0.01 s (within 1e-4 m;
-    its weight over the stiffness is 1e-5 m) with no failed step. In two replicated worlds the attached particles share
-    one element, which the free ones do not."""
+    """Keep a particle attached to a body from colliding with that body.
+
+    A particle attached at a point of the body's surface starts in contact with it, which the barrier refuses. Particle
+    0, attached at the centre of a box's top face, takes a contact element that collides with what a free particle's
+    does but with that box; the free particle 1 still collides with the box and lands on it, and particle 0 holds its
+    point through 100 steps of 0.01 s (within 1e-4 m; its weight over the stiffness is 1e-5 m) with no failed step. In
+    two replicated worlds the attached particles share one element, which the free ones do not.
+    """
     model = _particles_on_a_box(device)
     solver = newton.solvers.SolverIPC(model)
     e = solver._enabled

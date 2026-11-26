@@ -106,11 +106,14 @@ def _sliding_box(device):
 
 
 def test_notify_rebuilds_for_new_shapes(test, device):
-    """SHAPE_PROPERTIES with a new shape transform (the static box 5 mm lower), scale (the sliding box 5 mm thinner),
+    """Rebuild the solve when SHAPE_PROPERTIES or SHAPE_TYPE_AND_SOURCE report changed shapes.
+
+    SHAPE_PROPERTIES with a new shape transform (the static box 5 mm lower), scale (the sliding box 5 mm thinner),
     friction coefficient (the sliding box's 0.1, the pair's mean 0.55 instead of 1) or margin (the static box's 3 mm),
     and SHAPE_TYPE_AND_SOURCE with a new type (the sliding box a sphere of its half width, which rolls), build the solve
     again after two steps: the box lands and slides as a new solver on the changed model has it. SHAPE_PROPERTIES with
-    nothing changed keeps the solve."""
+    nothing changed keeps the solve.
+    """
     model = _sliding_box(device)
     solver = newton.solvers.SolverIPC(model, **_OPTIONS)
     engine = solver._engine
@@ -155,10 +158,13 @@ def _particle_scene(device):
 
 
 def test_notify_rebuilds_for_new_particles_and_springs(test, device):
-    """MODEL_PROPERTIES with a new soft_contact_mu (0.1), particle_mu (0.1), particle radius (1.5 cm), spring rest
-    length (12 cm), spring stiffness (4 N/m) or spring damping (0.5 N s/m) builds the solve again after two steps: the
-    particles land, slide and oscillate as a new solver on the changed model has them. A spring given a negative
-    damping in place is refused at the notification, as at construction."""
+    """Rebuild the solve when MODEL_PROPERTIES reports new contact, particle or spring coefficients.
+
+    MODEL_PROPERTIES with a new soft_contact_mu (0.1), particle_mu (0.1), particle radius (1.5 cm), spring rest length
+    (12 cm), spring stiffness (4 N/m) or spring damping (0.5 N s/m) builds the solve again after two steps: the
+    particles land, slide and oscillate as a new solver on the changed model has them. A spring given a negative damping
+    in place is refused at the notification, as at construction.
+    """
 
     def setter(name, value):
         def apply(model):
@@ -219,10 +225,13 @@ def _pendulum(device):
 
 
 def test_notify_rebuilds_for_new_joints(test, device):
-    """JOINT_PROPERTIES with a new joint frame (the hinge's pivot 2 mm higher) builds the solve again after two steps,
-    and so does a JOINT_DOF_PROPERTIES that gives the free-falling distance joint one length, 0.3 m (its two bounds
-    equal): from then on it holds its sphere as a pendulum. In both the next steps equal those of a new solver on the
-    changed model. JOINT_PROPERTIES with nothing changed keeps the solve."""
+    """Rebuild the solve when a joint's frame or a distance joint's bounds change.
+
+    JOINT_PROPERTIES with a new joint frame (the hinge's pivot 2 mm higher) builds the solve again after two steps, and
+    so does a JOINT_DOF_PROPERTIES that gives the free-falling distance joint one length, 0.3 m (its two bounds equal):
+    from then on it holds its sphere as a pendulum. In both the next steps equal those of a new solver on the changed
+    model. JOINT_PROPERTIES with nothing changed keeps the solve.
+    """
     model = _pendulum(device)
     solver = newton.solvers.SolverIPC(model, **_OPTIONS)
     engine = solver._engine
@@ -248,10 +257,13 @@ def test_notify_rebuilds_for_new_joints(test, device):
 
 
 def test_notify_checks_the_joints_again(test, device):
-    """Each of the four flags of the joints' degrees of freedom (JOINT_DOF_PROPERTIES, JOINT_DOF_FORCE_PROPERTIES,
+    """Check the joints again against SolverIPC's refusals at each notification of their degrees of freedom.
+
+    Each of the four flags of the joints' degrees of freedom (JOINT_DOF_PROPERTIES, JOINT_DOF_FORCE_PROPERTIES,
     JOINT_DOF_INERTIAL_PROPERTIES, JOINT_REFERENCE_POSE_PROPERTIES) checks the joints again against what SolverIPC
     rejects: a negative armature given to the hinge in place is refused by name, and once it is 0 again the same
-    notification is taken and keeps the solve. The other flags do not check the joints."""
+    notification is taken and keeps the solve. The other flags do not check the joints.
+    """
     model = _pendulum(device)
     solver = newton.solvers.SolverIPC(model, **_OPTIONS)
     engine = solver._engine
@@ -337,9 +349,12 @@ def _falling_box(device):
 
 
 def test_notify_rebuilds_for_another_kinematic_set(test, device):
-    """BODY_PROPERTIES with new body flags builds the solve again: a falling box made KINEMATIC in place after three
-    steps keeps the pose that state_in gives it (kinematic_motion="jump"), and made DYNAMIC again three steps later
-    falls on; each time the next steps equal those of a new solver on the changed model from the same state."""
+    """Rebuild the solve when BODY_PROPERTIES makes a body kinematic or dynamic in place.
+
+    BODY_PROPERTIES with new body flags builds the solve again: a falling box made KINEMATIC in place after three steps
+    keeps the pose that state_in gives it (kinematic_motion="jump"), and made DYNAMIC again three steps later falls on.
+    Each time the next steps equal those of a new solver on the changed model from the same state.
+    """
     model = _falling_box(device)
     options = {**_OPTIONS, "kinematic_motion": "jump"}
     solver = newton.solvers.SolverIPC(model, **options)
@@ -385,10 +400,13 @@ def _lift(device):
 
 
 def test_notify_rebuilds_for_new_masses_of_aim_bodies(test, device):
-    """With kinematic_motion="aim" a kinematic body moves toward its aim with the mass the solve was built with: the
-    rising sphere made ten times lighter in place (BODY_INERTIAL_PROPERTIES) lags its aim further under the sphere
-    hanging from it, and the solve is built again, the next steps equal to those of a new solver on the changed model.
-    A new mass of the hanging sphere alone is taken in place, without building the solve again."""
+    """Rebuild the solve for a new mass of an aimed kinematic body, and take other new masses in place.
+
+    With kinematic_motion="aim" a kinematic body moves toward its aim with the mass the solve was built with: the rising
+    sphere made ten times lighter in place (BODY_INERTIAL_PROPERTIES) lags its aim further under the sphere hanging from
+    it, and the solve is built again, the next steps equal to those of a new solver on the changed model. A new mass of
+    the hanging sphere alone is taken in place, without building the solve again.
+    """
     options = {**_OPTIONS, "kinematic_motion": "aim"}
 
     def lighter(model):

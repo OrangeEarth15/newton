@@ -39,10 +39,13 @@ def _set_inertia(model, body, moments):
 
 
 def test_inertia_checks(test, device):
-    """A dynamic body needs a positive-definite inertia: one with a zero principal moment, given in place, is refused
-    by name when the solver is built, and when notify_model_changed(BODY_INERTIAL_PROPERTIES) reports it. A kinematic
-    body may have none (forces do not move it), and the default kinematic_motion then takes the jump, but not under an
-    explicit kinematic_motion="aim", which moves it with its mass."""
+    """Refuse a body without a positive-definite inertia when it is dynamic or moved by kinematic_motion="aim".
+
+    A dynamic body needs a positive-definite inertia: one with a zero principal moment, given in place, is refused by
+    name when the solver is built, and when notify_model_changed(BODY_INERTIAL_PROPERTIES) reports it. A kinematic body
+    may have none (forces do not move it), and the default kinematic_motion then takes the jump, but not under an
+    explicit kinematic_motion="aim", which moves it with its mass.
+    """
     flat = (1.0e-3, 1.0e-3, 0.0)
     model = _bodies(device, 2, kinematic=(1,))
     _set_inertia(model, 1, flat)
@@ -58,14 +61,19 @@ def test_inertia_checks(test, device):
 
 
 def test_inertia_that_violates_the_triangle_inequality_is_corrected(test, device):
-    """An inertia diag(1, 1, 3) g m^2, whose largest moment exceeds the sum of the others, has no mass distribution: its
+    """Correct, with a warning, an inertia that violates the triangle inequality as Newton's builder does.
+
+    An inertia diag(1, 1, 3) g m^2, whose largest moment exceeds the sum of the others, has no mass distribution: its
     second moment about the centre of mass, tr(I)/2 - I = diag(1.5, 1.5, -0.5) g m^2, is not positive definite. Set in
     place, it takes, with a warning, the correction Newton's builder makes when it is given that inertia
     (ModelBuilder.balance_inertia): every moment raised by the deficit, 1 g m^2, and 1e-6 kg m^2, to diag(2.001, 2.001,
-    4.001) g m^2. Over ten steps of 0.01 s without gravity a torque of 1e-4 N m about x spins one body at tau t / 2.001
-    g m^2, and one about z another at tau t / 4.001 g m^2, as implicit Euler has a rigid body spin up; the bodies of the
-    model that Newton's builder corrected (with its own warning) take the same mass moments, without a warning of
-    SolverIPC, and spin the same."""
+    4.001) g m^2.
+
+    Over ten steps of 0.01 s without gravity a torque of 1e-4 N m about x spins one body at tau t / 2.001 g m^2, and one
+    about z another at tau t / 4.001 g m^2, as implicit Euler has a rigid body spin up; the bodies of the model that
+    Newton's builder corrected (with its own warning) take the same mass moments, without a warning of SolverIPC, and
+    spin the same.
+    """
     dt, tau, violating = 0.01, 1.0e-4, (1.0e-3, 1.0e-3, 3.0e-3)
 
     def spin(model):
@@ -102,11 +110,14 @@ def test_inertia_that_violates_the_triangle_inequality_is_corrected(test, device
 
 
 def test_body_without_a_closed_mesh_takes_the_volume_of_water(test, device):
-    """libuipc's affine body needs a volume, the weight of its orthogonality potential, which SolverIPC takes from the
+    """Give a body without a closed collision mesh the volume of water of its mass.
+
+    libuipc's affine body needs a volume, the weight of its orthogonality potential, which SolverIPC takes from the
     body's closed collision meshes. A body of 2 kg whose only collision mesh is an open sheet (two triangles) takes the
     volume of 2 kg of water, 2e-3 m^3: its orthogonality stiffness for a step of dt is libuipc's 1e8 Pa lowered to its
-    largest moment of inertia over V (4 * 0.1^2 dt^2), with that V, where a 20 cm box of the same mass and inertia
-    takes its own 8e-3 m^3. Both fall as implicit Euler has a free body fall."""
+    largest moment of inertia over V (4 * 0.1^2 dt^2), with that V, where a 20 cm box of the same mass and inertia takes
+    its own 8e-3 m^3. Both fall as implicit Euler has a free body fall.
+    """
     import uipc_warp.arrays  # noqa: PLC0415
 
     dt, mass, inertia = 0.01, 2.0, (2.0e-2, 3.0e-2, 4.0e-2)
@@ -137,11 +148,13 @@ def test_body_without_a_closed_mesh_takes_the_volume_of_water(test, device):
 
 
 def test_line_search_limit_warns(test, device):
-    """A line search that runs out of its trials does not fail the step. With line_search_max_iter=1, a plank of 80 x 20
-    x 4 cm spun at 30 rad/s in libuipc's step (body_rotation="linear", libuipc's body stiffness 1e8 Pa), whose
-    quartic orthogonality potential the first trial of a Newton step overshoots, sets LINE_SEARCH_LIMIT in every step,
-    and check_status warns of it, naming line_search_max_iter, and returns False; with the default eight trials no
-    step sets it."""
+    """Warn of a line search that runs out of its trials without failing the step.
+
+    With line_search_max_iter=1, a plank of 80 x 20 x 4 cm spun at 30 rad/s in libuipc's step (body_rotation="linear",
+    libuipc's body stiffness 1e8 Pa), whose quartic orthogonality potential the first trial of a Newton step overshoots,
+    sets LINE_SEARCH_LIMIT in every step, and check_status warns of it, naming line_search_max_iter, and returns False;
+    with the default eight trials no step sets it.
+    """
 
     def spin(trials):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -169,11 +182,13 @@ def test_line_search_limit_warns(test, device):
 
 
 def test_traversal_exhausted_fails_the_step(test, device):
-    """An exhausted BVH traversal leaves contact candidates out: the step fails. A captured step sets
-    TRAVERSAL_EXHAUSTED in its status, and check_status raises naming it and the BVH's node budget. An eager step whose
-    frame ends so (libuipc-warp's frame_status reporting it) raises the same, leaves state_out unwritten, and the next
-    step takes state_in, as a new solver would. With independent worlds the traversal is shared: the whole step fails,
-    not the worlds one by one."""
+    """Fail the step when an exhausted BVH traversal leaves contact candidates out.
+
+    A captured step sets TRAVERSAL_EXHAUSTED in its status, and check_status raises naming it and the BVH's node budget.
+    An eager step whose frame ends so (libuipc-warp's frame_status reporting it) raises the same, leaves state_out
+    unwritten, and the next step takes state_in, as a new solver would. With independent worlds the traversal is shared:
+    the whole step fails, not the worlds one by one.
+    """
     import uipc_warp.arrays  # noqa: PLC0415
 
     dt = 0.01

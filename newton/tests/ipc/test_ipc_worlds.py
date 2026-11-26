@@ -60,10 +60,13 @@ def _pairs_across_worlds(sub):
 
 
 def test_coupled_worlds_follow_the_single_world(test, device):
-    """Four copies of a world at the origin, each a world of its own, with coupled_worlds: no contact term joins two
-    worlds at any step, every world meets the global static box, and every world follows the run of the one world
+    """Step each of four coupled copies of a world as the world alone, with no contact between worlds.
+
+    Four copies of a world at the origin, each a world of its own, are built with coupled_worlds. No contact term joins
+    two worlds at any step, every world meets the global static box, and every world follows the run of the one world
     alone, with the same Newton iterations at every step (the copies' shares of every sum of the solve are equal) and
-    positions within the rounding of those sums."""
+    positions within the rounding of those sums.
+    """
     import uipc_warp.arrays  # noqa: PLC0415
 
     copies, steps, dt = 4, 60, 0.01
@@ -108,8 +111,10 @@ def test_coupled_worlds_follow_the_single_world(test, device):
 
 
 def test_coupled_worlds_are_built_as_one_world(test, device):
-    """A model with content in one local world is built as without coupled_worlds: no subscenes, the same contact
-    elements and ids, and the same steps."""
+    """Build a model with content in one local world as without coupled_worlds.
+
+    The model gets no subscenes, the same contact elements and ids, and the same steps.
+    """
     model = _worlds(device, 1)
     trajectories = []
     for coupled in (False, True):
@@ -124,9 +129,12 @@ def test_coupled_worlds_are_built_as_one_world(test, device):
 
 
 def test_coupled_worlds_share_filter_classes(test, device):
-    """A box filtered against a second box that starts inside it, replicated over six worlds: the worlds take the
-    contact elements of one world, the pairs the elements enable are Model.shape_contact_pairs, and in every world the
-    smaller box falls through the larger and both come to rest on the ground."""
+    """Take one world's contact elements for a filtered pair of boxes replicated over six coupled worlds.
+
+    A box is filtered against a second box that starts inside it, and the world is replicated over six worlds: the
+    worlds take the contact elements of one world, and in every world the smaller box falls through the larger and both
+    come to rest on the ground, within d_hat of it.
+    """
 
     def content():
         world = newton.ModelBuilder()
@@ -154,8 +162,11 @@ def test_coupled_worlds_share_filter_classes(test, device):
 
 
 def test_coupled_worlds_status_in_every_world(test, device):
-    """The status and the residual of the one solve reach every world entry, also from a captured step, and a step that
-    fails in one world is reported in every world."""
+    """Report the status and residual of the one coupled solve in every world entry.
+
+    The status and the residual reach every world entry, also from a captured step, and a step that fails in one world
+    is reported in every world.
+    """
     copies = 3
     model = _worlds(device, copies)
     solver = newton.solvers.SolverIPC(model, coupled_worlds=True)
@@ -182,7 +193,7 @@ def test_coupled_worlds_status_in_every_world(test, device):
 
 
 def test_coupled_worlds_fall_with_their_gravity(test, device):
-    """A particle in each of three worlds of different gravity falls as implicit Euler with its world's gravity."""
+    """Drop particles in three worlds of different gravity as implicit Euler with each world's gravity."""
     dt, steps = 0.01, 10
     gravities = ((0.0, 0.0, -9.81), (0.0, 0.0, -2.0), (1.0, 0.0, -5.0))
     builder = newton.ModelBuilder()
@@ -199,10 +210,13 @@ def test_coupled_worlds_fall_with_their_gravity(test, device):
 
 
 def test_coupled_worlds_beyond_the_old_element_limit(test, device):
-    """1100 worlds at one place, each a box and a particle dropped onto the global ground: five contact elements times
+    """Build and step coupled worlds whose contact elements times subscenes exceed the old limit of 2048.
+
+    1100 worlds at one place, each a box and a particle dropped onto the global ground, give five contact elements times
     1101 subscenes, beyond the 2048 that the engine took before it tested the two tables apart. The solver builds, its
     start check keeps the two tables (no table of their product), and in 20 steps every box and particle lands on the
-    ground in its own world: no contact term joins two worlds."""
+    ground in its own world: no contact term joins two worlds.
+    """
     import uipc_warp.arrays  # noqa: PLC0415
 
     worlds = 1100
@@ -235,10 +249,13 @@ def test_coupled_worlds_beyond_the_old_element_limit(test, device):
 
 
 def test_start_check_of_many_worlds(test, device):
-    """5000 worlds of a particle at one place over the global ground: the start check keeps the contact elements' table
-    and the subscenes' apart (their product would hold 6.3e8 entries) and forms no pair of two worlds, whose particles
-    all overlap; the model is accepted. With world 3172's particle placed through the ground it is refused, naming
-    that particle."""
+    """Accept 5000 overlapping worlds at the start check and refuse one particle placed through the ground.
+
+    5000 worlds of a particle at one place over the global ground: the start check keeps the contact elements' table and
+    the subscenes' apart (their product would hold 6.3e8 entries) and forms no pair of two worlds, whose particles all
+    overlap; the model is accepted. With world 3172's particle placed through the ground it is refused, naming that
+    particle.
+    """
     worlds = 5000
     for inside in (False, True):
         world = newton.ModelBuilder()
@@ -262,11 +279,14 @@ def test_start_check_of_many_worlds(test, device):
 
 
 def test_near_parts_forms_no_pair_of_two_worlds(test, device):
-    """The sweep of the start check against a brute-force test of every pair of boxes, on random boxes in 40 worlds
-    at one place and a few global ones, with subscene tables of the form of separate worlds (some worlds meeting
-    themselves, some not, the global subscene meeting all) and one of another form: every near pair the table lets
-    meet, each once, and with the form of separate worlds no pair of two worlds (the caller tests the pairs within a
-    world against the table)."""
+    """Match the start check's sweep to a brute-force pair test and form no pair of two separate worlds.
+
+    The sweep is held against a brute-force test of every pair of boxes, on random boxes in 40 worlds at one place and a
+    few global ones, with subscene tables of the form of separate worlds (some worlds meeting themselves, some not, the
+    global subscene meeting all) and one of another form. It finds every near pair the table lets meet, each once, and
+    with the form of separate worlds no pair of two worlds (the caller tests the pairs within a world against the
+    table).
+    """
     from newton._src.solvers.ipc.start_check import _near_parts  # noqa: PLC0415
 
     del device
@@ -315,9 +335,12 @@ def _attached_world():
 
 
 def test_coupled_worlds_with_attachments(test, device):
-    """Three copies of a world whose particle is attached to a falling box, each a world of its own at the origin with
+    """Step coupled copies of a world with an attachment as the world alone.
+
+    Three copies of a world whose particle is attached to a falling box, each a world of its own at the origin with
     coupled_worlds: every world follows the run of the one world alone, with the same Newton iterations at every step,
-    and the anchors are in their worlds' subscenes."""
+    and the anchors are in their worlds' subscenes.
+    """
     runs = []
     for n in (1, 3):
         scene = newton.ModelBuilder()
@@ -355,11 +378,14 @@ def _pushed_world():
 
 
 def test_coupled_worlds_with_kinematic_aims(test, device):
-    """Three copies of a world whose kinematic box pushes a box across the ground with kinematic_motion="aim", each a
-    world of its own at the origin with coupled_worlds, every pusher moved by state_in: every world follows the run of
-    the one world alone, with the same Newton iterations at every step, and the boxes are pushed. The solves are
-    converged, so that the worlds' runs differ by the rounding of the shared sums only: at the default tolerances
-    the rounding moves where the linear and Newton solves stop, by up to 2e-6 m in 20 steps."""
+    """Step coupled copies of a world with an aimed kinematic pusher as the world alone.
+
+    Three copies of a world whose kinematic box pushes a box across the ground with kinematic_motion="aim", each a world
+    of its own at the origin with coupled_worlds, every pusher moved by state_in: every world follows the run of the one
+    world alone, with the same Newton iterations at every step, and the boxes are pushed. The solves are converged, so
+    that the worlds' runs differ by the rounding of the shared sums only: at the default tolerances the rounding moves
+    where the linear and Newton solves stop, by up to 2e-6 m in 20 steps.
+    """
     runs = []
     for n in (1, 3):
         scene = newton.ModelBuilder()
@@ -476,17 +502,20 @@ def _branch_steps(solver, model, snapshot, state, cases, dt=0.01, control=None, 
 
 
 def test_reset_of_one_world_keeps_the_others(test, device):
-    """Three worlds at one place, independent and with coupled_worlds, each a box sliding on the global static box, a
+    """Discard the friction and history of the reset world alone and keep the other worlds' terms.
+
+    Three worlds at one place, independent and with coupled_worlds, each hold a box sliding on the global static box, a
     particle sliding on the ground and a sphere driven about a hinge, under implicit Euler and BDF2. From one state of
-    the solver, a step after no reset, after a reset of world 1, after a reset of every world, and after a new velocity
-    written for world 1's particle. The reset of world 1 and the new state discard the friction of world 1's subscene
-    alone, and the step has the friction candidates of the step without a reset but those with a vertex in world 1; the
-    reset of every world discards all of them, and a step without a reset none. Under BDF2 the frame restarts world 1's
-    rows and no other, and world 1's drive takes the terms of the reset of every world, the other worlds' those of no
-    reset, bit for bit; under implicit Euler there is no history, and the resets leave the terms as they are. With
-    independent worlds a reset of the mask's global entry alone is the step without a reset: the global entities are
-    no unknowns. What the engine keeps of the others (their lagged friction, prediction and masses) libuipc-warp's own
-    tests hold. The branches begin at the first step with contact in every world."""
+    the solver the test takes a step after no reset, after a reset of world 1, after a reset of every world, and after a
+    new velocity written for world 1's particle. The reset of world 1 and the new state discard the friction of world
+    1's subscene alone, and the step has the friction candidates of the step without a reset but those with a vertex in
+    world 1; the reset of every world discards all of them, and a step without a reset none. Under BDF2 the frame
+    restarts world 1's rows and no other, and world 1's drive takes the terms of the reset of every world, the other
+    worlds' those of no reset, bit for bit; under implicit Euler there is no history, and the resets leave the terms as
+    they are. With independent worlds a reset of the mask's global entry alone is the step without a reset: the global
+    entities are no unknowns. What the engine keeps of the others (their lagged friction, prediction and masses)
+    libuipc-warp's own tests hold. The branches begin at the first step with contact in every world.
+    """
     import uipc_warp.arrays  # noqa: PLC0415
 
     for coupled, integrator in ((True, "bdf1"), (True, "bdf2"), (False, "bdf1"), (False, "bdf2")):
@@ -549,11 +578,14 @@ def test_reset_of_one_world_keeps_the_others(test, device):
 
 
 def test_reset_of_one_world_keeps_the_other_worlds_aims(test, device):
-    """Three copies of the pushed box's world with kinematic_motion="aim" under BDF2, independent and with
-    coupled_worlds, whose aim kernel writes the history of every pusher at every step; each pusher moved by state_in.
-    From one state, a step after no reset, after a reset of world 1 and after a reset of every world: the reset of
-    world 1 releases world 1's pusher alone (it takes state_in), and the frame restarts world 1's rows alone (the
-    prediction and masses of a restarted row are those libuipc-warp's own tests hold)."""
+    """Release the aimed pusher and restart the BDF2 rows of the reset world alone.
+
+    Three copies of the pushed box's world with kinematic_motion="aim" under BDF2, independent and with coupled_worlds,
+    whose aim kernel writes the history of every pusher at every step; each pusher is moved by state_in. From one state,
+    the test takes a step after no reset, after a reset of world 1 and after a reset of every world: the reset of world
+    1 releases world 1's pusher alone (it takes state_in), and the frame restarts world 1's rows alone (the prediction
+    and masses of a restarted row are those libuipc-warp's own tests hold).
+    """
     for coupled in (True, False):
         with test.subTest(coupled_worlds=coupled):
             _reset_one_world_with_aims(test, device, coupled)
@@ -646,13 +678,16 @@ def _record_worlds(model, solver, steps, dt=0.01, capture=False):
 
 
 def test_independent_worlds_step_as_alone(test, device):
-    """Three worlds of a soft cube, a rigid box and a particle (``_world_content``) dropped from heights 3 cm apart
-    onto the global static box and ground, independent worlds by default: in every step each world takes the Newton
-    iterations of the same world built alone, the step's loop those of its slowest world, and its positions stay
-    within 1e-6 m of the run alone (measured: 1e-12 m in float64, so the float32 outputs differ by at most an ulp);
-    its STATUS entry is that of the run alone and its SOLVER_RESIDUAL entry that of the run alone to 1e-6, and the
-    global entry holds 0. The same from captured steps, replayed two at a time. The worlds differ: their Newton
-    iterations part in some steps."""
+    """Step each independent world as the same world built alone, eager and captured.
+
+    Three worlds of a soft cube, a rigid box and a particle (``_world_content``) are dropped from heights 3 cm apart
+    onto the global static box and ground, independent worlds by default. In every step each world takes the Newton
+    iterations of the same world built alone, the step's loop those of its slowest world, and its positions stay within
+    1e-6 m of the run alone (measured: 1e-12 m in float64, so the float32 outputs differ by at most an ulp); its STATUS
+    entry is that of the run alone and its SOLVER_RESIDUAL entry that of the run alone to 1e-6, and the global entry
+    holds 0. The same from captured steps, replayed two at a time. The worlds differ: their Newton iterations part in
+    some steps.
+    """
     shifts, steps = (0.0, 0.03, 0.06), 41
     for capture in (False, True):
         with test.subTest(captured=capture):
@@ -704,14 +739,17 @@ def _worlds_of(device, contents):
 
 
 def test_independent_worlds_take_their_own_stiffness_range(test, device):
-    """adaptive_kappa=True with independent worlds of different densities and sizes (``_weighted_world``): every world
+    """Give each independent world libuipc's contact stiffness range of the same world alone.
+
+    adaptive_kappa=True with independent worlds of different densities and sizes (``_weighted_world``): every world
     takes libuipc's stiffness range of the same world alone. ``contact_stiffness(dt)`` gives one value per world, that
     of the model of the world alone at two step sizes bit for bit: with kappa=None every world's own lower bound, which
     differ between the worlds, and with a kappa that lies above some worlds' lower bounds and below the others', the
     kappa in the first and their lower bounds in the others, the first step warning once and naming the worlds it
     clamps. In every step, eager and captured, each world takes the Newton iterations of its model alone and its
     positions stay within 1e-6 m of that run. d_hat is given: its default follows the smallest features of the whole
-    model, which differ from those of a world alone."""
+    model, which differ from those of a world alone.
+    """
     specs = ((1000.0, 0.05), (5000.0, 0.04), (300.0, 0.07))
     model = _worlds_of(device, [_weighted_world(*spec) for spec in specs])
     singles = [_worlds_of(device, [_weighted_world(*spec)]) for spec in specs]
@@ -759,13 +797,16 @@ def test_independent_worlds_take_their_own_stiffness_range(test, device):
 
 
 def test_independent_world_fails_alone(test, device):
-    """Three worlds of ``_world_content`` at heights 3 cm apart, two solvers stepping them in lockstep, one of them
-    clean. After ten steps world 1's particle is written 1 cm through the ground, inside its contact thickness, into the
+    """Fail only the world whose input is invalid and step the other independent worlds on.
+
+    Three worlds of ``_world_content`` at heights 3 cm apart, two solvers stepping them in lockstep, one of them clean.
+    After ten steps world 1's particle is written 1 cm through the ground, inside its contact thickness, into the
     other's input: its eager step raises naming world 1 alone and writes state_out, world 1 at the state it started
     from, bit for bit, and worlds 0 and 2 at the clean solver's step within 1e-6 m; STATUS has the failure in world 1's
     entry alone. With the particle written back the next step takes every world on, and a NaN velocity of world 1's
-    particle fails world 1 alone the same way. Captured, the step that fails in world 1 sets world 1's entry alone,
-    the other worlds take their step, and check_status names world 1."""
+    particle fails world 1 alone the same way. Captured, the step that fails in world 1 sets world 1's entry alone, the
+    other worlds take their step, and check_status names world 1.
+    """
     failed = int(newton.solvers.SolverIPC.StatusBits.FAILED)
     shifts = (0.0, 0.03, 0.06)
     model = _worlds_at(device, shifts)
@@ -838,13 +879,16 @@ def test_independent_world_fails_alone(test, device):
 
 
 def test_independent_worlds_overflow_alone(test, device):
-    """Three worlds of ``_world_content`` at heights 3 cm apart, world 1 with a quota of one pair of every active
-    contact list (libuipc-warp's capacity per world, a count per world, 0 keeping a world's own; the worlds share the
-    lists). Eager steps grow world 1's quota and solve the step again, every world then taking the Newton iterations of
-    its run alone, with its positions within 1e-6 m. Captured beside a solver without the quota, a step in which world
-    1 asks for more sets OVERFLOW in world 1's entry alone and leaves world 1 at the state it started from, bit for
-    bit, while worlds 0 and 2 take the other solver's step within 1e-6 m; check_status(grow=True) grows the lists, and
-    the step repeated from the same state reports nothing and takes every world to the other solver's step."""
+    """Overflow and grow the contact lists of the one independent world that runs out of its quota.
+
+    Three worlds of ``_world_content`` at heights 3 cm apart, world 1 with a quota of one pair of every active contact
+    list (libuipc-warp's capacity per world, a count per world, 0 keeping a world's own; the worlds share the lists).
+    Eager steps grow world 1's quota and solve the step again, every world then taking the Newton iterations of its run
+    alone, with its positions within 1e-6 m. Captured beside a solver without the quota, a step in which world 1 asks
+    for more sets OVERFLOW in world 1's entry alone and leaves world 1 at the state it started from, bit for bit, while
+    worlds 0 and 2 take the other solver's step within 1e-6 m; check_status(grow=True) grows the lists, and the step
+    repeated from the same state reports nothing and takes every world to the other solver's step.
+    """
     overflow = int(newton.solvers.SolverIPC.StatusBits.OVERFLOW)
     shifts, steps = (0.0, 0.03, 0.06), 30
     one_pair = {"active": {kind: [0, 1, 0] for kind in ("PP", "PE", "PT", "EE")}}
@@ -920,15 +964,18 @@ def _two_worlds(device, content, extra=None):
 
 
 def test_rejects_what_independent_worlds_do_not_take(test, device):
-    """Content in several worlds is independent worlds by default: a model of two worlds builds without
-    coupled_worlds, and one of a single world builds as before. Independent worlds refuse, naming coupled_worlds=True as
-    an alternative: a free particle and a dynamic body of the global world, which every world would push; a global
-    kinematic body with kinematic_motion="aim", an unknown too (with the jump it is fixed and builds); and a spring
-    between two worlds. With coupled_worlds=True every one of them builds. adaptive_kappa=True builds with independent
-    worlds, every world in a stiffness range of its own (test_independent_worlds_take_their_own_stiffness_range), and so
-    do fem_preconditioner="mas", every world preconditioned as alone (TestSolverIPCWorldsMAS), and
-    contact_constitution="al-ipc", every world's augmented-Lagrangian loop its own (TestSolverIPCWorldsALIPC). Of two worlds,
-    one of which holds a static shape alone, one world moves, and the options are taken as for one world."""
+    """Refuse content that independent worlds cannot take, naming coupled_worlds=True as the alternative.
+
+    Content in several worlds is independent worlds by default: a model of two worlds builds without coupled_worlds, and
+    one of a single world builds as one world. Independent worlds refuse a free particle and a dynamic body of the global
+    world, which every world would push; a global kinematic body with kinematic_motion="aim", an unknown too (with the
+    jump it is fixed and builds); and a spring between two worlds. With coupled_worlds=True every one of them builds.
+    adaptive_kappa=True builds with independent worlds, every world in a stiffness range of its own
+    (test_independent_worlds_take_their_own_stiffness_range), and so do fem_preconditioner="mas", every world
+    preconditioned as alone (TestSolverIPCWorldsMAS), and contact_constitution="al-ipc", every world's
+    augmented-Lagrangian loop its own (TestSolverIPCWorldsALIPC). Of two worlds, one of which holds a static shape
+    alone, one world moves, and the options are taken as for one world.
+    """
 
     def box(builder):
         _box_body(builder, (0.0, 0.0, 0.3), (0.05, 0.05, 0.05))
@@ -995,12 +1042,15 @@ def test_rejects_what_independent_worlds_do_not_take(test, device):
 
 
 def test_independent_worlds_with_attachments(test, device):
-    """Three worlds of a particle attached to a box that falls onto the global ground (``_attached_world``), from
-    heights 5 cm apart, independent: at every step each world takes the Newton iterations of the same world alone, its
-    positions within 1e-6 m of the run alone, and the anchors are in their worlds' subscenes. The solves are
-    converged: at the default tolerances the particle's landing, which the barrier makes a stiff system, carries the
-    rounding of sums that the scene adds in another order than the world alone to where the PCG and Newton loops stop,
-    and the worlds land on the same iterations up to 4e-5 m apart over 40 steps (runs alone repeat bit for bit)."""
+    """Step independent worlds with an attached particle as each world alone.
+
+    Three worlds of a particle attached to a box that falls onto the global ground (``_attached_world``), from heights 5
+    cm apart, independent: at every step each world takes the Newton iterations of the same world alone, its positions
+    within 1e-6 m of the run alone, and the anchors are in their worlds' subscenes. The solves are converged: at the
+    default tolerances the particle's landing, which the barrier makes a stiff system, carries the rounding of sums that
+    the scene adds in another order than the world alone to where the PCG and Newton loops stop, and the worlds land on
+    the same iterations up to 4e-5 m apart over 40 steps (runs alone repeat bit for bit).
+    """
     shifts, steps = (0.0, 0.05, 0.1), 40
     converged = {"newton_velocity_tol": 1e-6, "linear_tol_rate": 1e-12, "semi_implicit": False}
 
@@ -1022,10 +1072,13 @@ def test_independent_worlds_with_attachments(test, device):
 
 
 def test_independent_worlds_with_kinematic_aims(test, device):
-    """Three worlds of a box on the global ground and a kinematic box behind it (``_pushed_world``) with
+    """Step independent worlds with aimed kinematic pushers as each world alone with its pusher's speed.
+
+    Three worlds of a box on the global ground and a kinematic box behind it (``_pushed_world``) with
     kinematic_motion="aim", the pushers moved by state_in at 1, 0.5 and 0 m/s: at every step each world takes the Newton
     iterations of the same world alone with its pusher's speed, its positions within 1e-6 m of the run alone, and the
-    boxes are pushed as far as their pushers go. The solves are converged, as in the coupled worlds' test."""
+    boxes are pushed as far as their pushers go. The solves are converged, as in the coupled worlds' test.
+    """
     speeds, steps = (1.0, 0.5, 0.0), 20
     converged = {"newton_velocity_tol": 1e-6, "newton_transrate_tol": 1e-6, "linear_tol_rate": 1e-12}
 
@@ -1063,9 +1116,13 @@ def test_independent_worlds_with_kinematic_aims(test, device):
 
 
 def test_many_independent_worlds(test, device):
-    """1100 independent worlds at one place, each a box and a particle dropped onto the global ground from heights that
-    differ from world to world: five contact elements times 1101 subscenes. In 20 steps every box and particle lands on
-    the ground in its own world, no contact term joins two worlds, and every world's STATUS entry holds no failure."""
+    """Land every box and particle of 1100 independent worlds in its own world without a failure.
+
+    1100 independent worlds at one place, each a box and a particle dropped onto the global ground from heights that
+    differ from world to world, give five contact elements times 1101 subscenes. In 20 steps every box and particle
+    lands on the ground in its own world, no contact term joins two worlds, and every world's STATUS entry holds no
+    failure.
+    """
     import uipc_warp.arrays  # noqa: PLC0415
 
     worlds = 1100
@@ -1167,11 +1224,14 @@ def _record_al(model, solver, steps, dt=0.01, capture=False, resets=None):
 
 
 def test_independent_worlds_under_al_ipc_step_as_alone(test, device):
-    """Three worlds of a soft cube, a turned rigid box and a particle (``_al_world``) dropped from heights 3 cm apart
-    onto the global ground, independent worlds under AL-IPC: in every step each world takes the Newton iterations of the
+    """Step each independent world under AL-IPC as the same world built alone, eager and captured.
+
+    Three worlds of a soft cube, a turned rigid box and a particle (``_al_world``) are dropped from heights 3 cm apart
+    onto the global ground, independent worlds under AL-IPC. In every step each world takes the Newton iterations of the
     same world built alone under AL-IPC, its positions stay within 1e-6 m of the run alone and its STATUS entry is the
     run alone's; the global entry holds 0. The same from captured steps, replayed two at a time. The worlds differ:
-    their Newton iterations part in the step where a box strikes the ground."""
+    their Newton iterations part in the step where a box strikes the ground.
+    """
     shifts, steps = (0.0, 0.03, 0.06), 31
     for capture in (False, True):
         with test.subTest(captured=capture):
@@ -1194,14 +1254,18 @@ def test_independent_worlds_under_al_ipc_step_as_alone(test, device):
 
 
 def test_coupled_worlds_under_al_ipc_step_as_one_world(test, device):
-    """With coupled_worlds=True the worlds are one AL-IPC solve, and the solver discards friction per world: at every
-    step for the worlds whose state it did not write, and at a reset by mask (libuipc-warp's ``discard_friction(where=)``
+    """Solve coupled worlds as one AL-IPC solve that discards friction per world.
+
+    With coupled_worlds=True the worlds are one AL-IPC solve, and the solver discards friction per world: at every step
+    for the worlds whose state it did not write, and at a reset by mask (libuipc-warp's ``discard_friction(where=)``
     with one flag per subscene, which its AL-IPC pipeline refused unless the worlds were independent: the first step
     raised).
+
     Two copies of ``_al_world`` at one height take the Newton iterations of the world built alone at every step, stay
     within 1e-6 m of its run and take its STATUS entry, eager and captured; eager across a reset of both worlds by mask
     after 10 steps, as the world alone across its reset. A reset of one of two worlds by mask steps on, every STATUS
-    entry 0."""
+    entry 0.
+    """
     steps = 21
     both = wp.array([True, True, False], dtype=wp.bool, device=device)
     for capture in (False, True):
@@ -1281,13 +1345,16 @@ def _record_mas(model, solver, steps, dt=0.01, capture=False):
 
 
 def test_independent_worlds_with_mas_step_as_alone(test, device):
-    """Three worlds of a soft cube, a cloth, a rigid box and a particle (``_mas_world``) dropped from heights 3 cm apart
-    onto the global static box and ground, independent worlds under MAS: in every step each world takes the Newton
+    """Step each independent world under MAS as the same world built alone, eager and captured.
+
+    Three worlds of a soft cube, a cloth, a rigid box and a particle (``_mas_world``) are dropped from heights 3 cm
+    apart onto the global static box and ground, independent worlds under MAS. In every step each world takes the Newton
     iterations of the same world built alone under MAS, its positions stay within 1e-6 m of the run alone, its STATUS
     entry is the run alone's and its SOLVER_RESIDUAL entry the run alone's to 1e-4 (MAS adds its coarse residuals in
     float32 with atomics, in another order in the scene than alone, which moves the last Newton step's displacement:
     3.6e-6 relative measured); the global entry holds 0. The same from captured steps, replayed two at a time. The
-    worlds differ: their Newton iterations part in some steps."""
+    worlds differ: their Newton iterations part in some steps.
+    """
     shifts, steps = (0.0, 0.03, 0.06), 31
     for capture in (False, True):
         with test.subTest(captured=capture):

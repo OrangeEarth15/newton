@@ -153,9 +153,12 @@ def _model_rebound(v0, gap, m, dt, d_hat, kappa, c, pairs):
 
 
 def test_the_values_it_takes(test, device):
-    """``None`` makes no damping and gives an engine no extension; a number gives every pair that coefficient (a table
-    of one entry); ``"material"`` a table of the means of the model's coefficients, every engine vertex and plane the
-    row of its own. Any other value raises ``ValueError`` naming the choices."""
+    """Take ``None``, a number or ``"material"`` for ``contact_damping`` and raise ``ValueError`` otherwise.
+
+    ``None`` makes no damping and gives an engine no extension; a number gives every pair that coefficient (a table of
+    one entry); ``"material"`` a table of the means of the model's coefficients, every engine vertex and plane the row
+    of its own. Any other value raises ``ValueError`` naming the choices.
+    """
     model = _drop(device)
     solver = _solver(model)
     test.assertIsNone(solver._features.contact_damping)
@@ -185,9 +188,12 @@ def test_the_values_it_takes(test, device):
 
 
 def test_material_takes_vbds_means(test, device):
-    """``"material"``: a pair of two shapes takes the mean of their ``shape_material_kd``, a particle and a shape the
-    mean of ``soft_contact_kd`` and the shape's, two particles ``soft_contact_kd``, a vertex and the ground plane the
-    mean with the ground's: the entries of the table at the rows of the engine vertices."""
+    """Give each pair the mean of its two damping coefficients under ``"material"``.
+
+    A pair of two shapes takes the mean of their ``shape_material_kd``, a particle and a shape the mean of
+    ``soft_contact_kd`` and the shape's, two particles ``soft_contact_kd``, a vertex and the ground plane the mean with
+    the ground's: the entries of the table at the rows of the engine vertices.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(kd=50.0))
     for k, kd in enumerate((30.0, 70.0)):
@@ -212,10 +218,13 @@ def test_material_takes_vbds_means(test, device):
 
 
 def test_a_rebound_as_the_model(test, device):
-    """A box dropped flat at 1 m/s onto the ground plane under BDF2 in steps of 1/600 s rebounds at 0.6 of its speed;
-    with 40 N s/m on each of its four corner pairs its rebound over the undamped one is the model's to 1e-3 (the
+    """Rebound a damped box dropped onto the ground as the one-dimensional model predicts.
+
+    A box dropped flat at 1 m/s onto the ground plane under BDF2 in steps of 1/600 s rebounds at more than half its
+    speed. With 40 N s/m on each of its four corner pairs its rebound over the undamped one is the model's to 1e-3 (the
     model's mass is rigid, the affine body deforms a little in the impact; 10 N s/m more per pair lowers the ratio by
-    9e-3), and ``"material"`` with the box's 30 N s/m and the ground's 50 takes the same steps bit for bit."""
+    9e-3), and ``"material"`` with the box's 30 N s/m and the ground's 50 takes the same steps bit for bit.
+    """
     dt, v0 = 1.0 / 600.0, 1.0
     model = _drop(device)
     e0 = _rebound(model, _solver(model), v0, dt)
@@ -233,8 +242,11 @@ def test_a_rebound_as_the_model(test, device):
 
 
 def test_a_box_at_rest_rests_where_it_rests_without(test, device):
-    """A box set on the ground under gravity, implicit Euler in steps of 10 ms: with Newton's default coefficients
-    (``"material"``, 100 N s/m on every shape) it settles at the height of the undamped box, to 1e-6 m, and at rest."""
+    """Rest a box on the ground with contact damping at the height of the undamped box.
+
+    The box is set on the ground under gravity, implicit Euler in steps of 10 ms. With Newton's default coefficients
+    (``"material"``, 100 N s/m on every shape) it settles at the height of the undamped box, to 1e-6 m, and at rest.
+    """
     heights = []
     for damping in (None, "material"):
         model = _drop(device, kd_box=100.0, kd_ground=100.0, v0=0.0, dt=0.01, gravity=-9.81, mu=0.5)
@@ -245,7 +257,7 @@ def test_a_box_at_rest_rests_where_it_rests_without(test, device):
 
 
 def test_captured_steps_equal_eager_ones(test, device):
-    """The drop with ``"material"``, captured or eager: the same states."""
+    """Reach the same states in captured and in eager steps of the drop with ``"material"``."""
     runs = []
     for capture in (False, True):
         model = _drop(device)
@@ -255,8 +267,11 @@ def test_captured_steps_equal_eager_ones(test, device):
 
 
 def test_independent_worlds_as_alone(test, device):
-    """Two worlds, a box of 30 N s/m and one of 90 N s/m dropped on the shared ground: each takes the steps of its world
-    alone (float32), and the more damped box rebounds slower."""
+    """Step each independent world of a damped box as that world alone.
+
+    Two worlds, a box of 30 N s/m and one of 90 N s/m, are dropped on the shared ground: each takes the steps of its
+    world alone (float32), and the more damped box rebounds slower.
+    """
     dt = 1.0 / 600.0
     model = _drop(device, worlds=[30.0, 90.0])
     solver = _solver(model, contact_damping="material")
@@ -271,8 +286,11 @@ def test_independent_worlds_as_alone(test, device):
 
 
 def test_contact_rows_carry_the_damping(test, device):
-    """``CONTACT_F`` with friction off and 200 N s/m: at every step of the landing the rows' forces on the box sum to
-    its momentum change and its weight, ``m (v - v_prev) / dt - m g``, the damping in the rows of the friction pairs."""
+    """Carry the damping in ``CONTACT_F``'s rows so that they sum to the box's momentum change and weight.
+
+    With friction off and 200 N s/m, at every step of the landing the rows' forces on the box sum to its momentum change
+    and its weight, ``m (v - v_prev) / dt - m g``, the damping in the rows of the friction pairs.
+    """
     dt = 0.002
     model = _drop(device, kd_box=200.0, kd_ground=200.0, v0=0.5, dt=dt, gravity=-9.81)
     solver = _solver(model, integrator="bdf1", contact_damping="material")
@@ -296,8 +314,11 @@ def test_contact_rows_carry_the_damping(test, device):
 
 
 def test_notify_builds_the_solve_again_for_new_coefficients(test, device):
-    """With ``"material"``, a new ``shape_material_kd`` notified with ``SHAPE_PROPERTIES`` builds the solve again with
-    the new means; the same coefficients, or other flags, keep the solve; a number reads no coefficient."""
+    """Build the solve again when ``SHAPE_PROPERTIES`` notifies new coefficients under ``"material"``.
+
+    With ``"material"``, a new ``shape_material_kd`` notified with ``SHAPE_PROPERTIES`` builds the solve again with the
+    new means. The same coefficients, or other flags, keep the solve; a number reads no coefficient.
+    """
     model = _drop(device)
     solver = _solver(model, contact_damping="material")
     engine = solver._engine
@@ -322,8 +343,11 @@ def test_notify_builds_the_solve_again_for_new_coefficients(test, device):
 
 
 def test_al_ipc_refuses_it(test, device):
-    """Under ``contact_constitution="al-ipc"`` any value but None raises ``NotImplementedError``: AL-IPC's contact terms
-    are an active set with multipliers, which the damping does not act on."""
+    """Refuse any contact damping but None under ``contact_constitution="al-ipc"``.
+
+    Any value but None raises ``NotImplementedError``: AL-IPC's contact terms are an active set with multipliers, which
+    the damping does not act on.
+    """
     model = _drop(device)
     with test.assertRaises(NotImplementedError) as raised:
         newton.solvers.SolverIPC(model, contact_constitution="al-ipc", contact_damping="material")
@@ -336,8 +360,11 @@ def test_al_ipc_refuses_it(test, device):
 
 
 def test_a_libuipc_warp_without_the_extension_is_named(test, device):
-    """With a libuipc-warp that has no ``uipc_warp.ext.contact_damping`` (one before it), a contact damping raises
-    ``ImportError`` naming the module when the solver is built."""
+    """Raise ``ImportError`` naming ``uipc_warp.ext.contact_damping`` when libuipc-warp lacks it.
+
+    With a libuipc-warp that has no ``uipc_warp.ext.contact_damping`` (one before it), a contact damping raises
+    ``ImportError`` naming the module when the solver is built.
+    """
     model = _drop(device)
     with patch_sys_module("uipc_warp.ext.contact_damping", None), test.assertRaises(ImportError) as raised:
         newton.solvers.SolverIPC(model, contact_damping=1.0)

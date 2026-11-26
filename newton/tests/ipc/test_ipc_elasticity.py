@@ -16,17 +16,20 @@ from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 
 def test_membrane_and_hinge_follow_newtons_moduli(test, device):
-    """Newton's membrane, linear elasticity mu eps:eps + lambda / 2 (tr eps)^2 per rest area with mu = tri_ke and
-    lambda = tri_ka, and its hinge energy 1/2 k_e L0 (theta - theta_bar)^2, as libuipc's Baraff-Witkin membrane and
+    """Map Newton's membrane and hinge moduli onto libuipc's Baraff-Witkin membrane and discrete-shell hinge.
+
+    Newton's membrane is linear elasticity mu eps:eps + lambda / 2 (tr eps)^2 per rest area with mu = tri_ke and lambda
+    = tri_ka, and its hinge energy is 1/2 k_e L0 (theta - theta_bar)^2. They become libuipc's Baraff-Witkin membrane and
     discrete-shell hinge with K_a = K_b = mu + lambda / 2, K_g = mu / 2 and kappa = k_e h_bar / 2.
 
     A right triangle of legs L = 0.1 m with two vertices held (mass 0) and the third free (8 g), released 1 mm off its
-    rest place, oscillates as implicit Euler's oscillator of omega^2 = k / m: k = mu + lambda / 2 when the free
-    vertex moves along its edge from the held corner (a stretch of a material axis, the other held fixed; the first
-    axis runs along the first edge, the second at right angles to it) and k = mu / 2 when it moves across it (simple
-    shear), for either free vertex. A hinge of two triangles whose free vertex, H = 5 cm from the hinge, is released
-    1 mm out of the plane oscillates with k = k_e L0 / H^2. With mu = 10 N/m and lambda = 20 N/m, a mapping of K_a to mu
-    alone or K_g to mu would change omega by 29% or 41%. cloth_strain_rate=0 keeps the membrane quadratic."""
+    rest place, oscillates as implicit Euler's oscillator of omega^2 = k / m: k = mu + lambda / 2 when the free vertex
+    moves along its edge from the held corner (a stretch of a material axis, the other held fixed; the first axis runs
+    along the first edge, the second at right angles to it) and k = mu / 2 when it moves across it (simple shear), for
+    either free vertex. A hinge of two triangles whose free vertex, H = 5 cm from the hinge, is released 1 mm out of the
+    plane oscillates with k = k_e L0 / H^2. With mu = 10 N/m and lambda = 20 N/m, a mapping of K_a to mu alone or K_g to
+    mu would change omega by 29% or 41%. cloth_strain_rate=0 keeps the membrane quadratic.
+    """
     mu, lam, ke, L, H, dt, steps = 10.0, 20.0, 0.1, 0.1, 0.05, 0.01, 20
     m, delta = 0.008, 1.0e-3
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -79,12 +82,15 @@ def _boundary_faces(tets):
 
 
 def test_tetrahedra_contract_by_poissons_ratio(test, device):
-    """k_mu and k_lambda are Lame parameters: a block of 4 x 2 x 2 cells stretched along x by a uniform traction on
-    its end faces (the consistent loads of linear tetrahedra, a third of each boundary triangle's share on each of its
-    corners) settles into homogeneous uniaxial stress, its axial strain sigma / E with E = mu (3 lambda + 2 mu) /
-    (lambda + mu) and its lateral strains -nu times that with nu = lambda / (2 (lambda + mu)), each within 1%: with
-    k_mu = k_lambda Poisson's ratio is 0.25, not 0 (libuipc's StableNeoHookean stores mu and lambda + mu, which
-    linearize to Hooke's law with these Lame parameters). Gravity off, the block free, its strain 1e-3."""
+    """Contract a stretched tetrahedral block by the Poisson's ratio of the Lame parameters k_mu and k_lambda.
+
+    k_mu and k_lambda are Lame parameters: a block of 4 x 2 x 2 cells stretched along x by a uniform traction on its end
+    faces (the consistent loads of linear tetrahedra, a third of each boundary triangle's share on each of its corners)
+    settles into homogeneous uniaxial stress, its axial strain sigma / E with E = mu (3 lambda + 2 mu) / (lambda + mu)
+    and its lateral strains -nu times that with nu = lambda / (2 (lambda + mu)), each within 1%: with k_mu = k_lambda
+    Poisson's ratio is 0.25, not 0 (libuipc's StableNeoHookean stores mu and lambda + mu, which linearize to Hooke's law
+    with these Lame parameters). Gravity off, the block free, its strain 1e-3.
+    """
     mu = lam = 1.0e4
     E, nu = mu * (3.0 * lam + 2.0 * mu) / (lam + mu), lam / (2.0 * (lam + mu))
     sigma = 1.0e-3 * E

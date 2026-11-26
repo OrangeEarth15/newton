@@ -120,10 +120,13 @@ def _over_the_wheel():
 
 
 def test_a_box_hangs_over_a_cylinder(test, device):
-    """The box hangs from the tendon (500 N/m, spring length 0.6 m, critically damped) over the wheel, which the path
-    wraps over its top on the side site's side: it settles where the spring holds its weight, the tendon's length ``0.6 +
-    m g / k`` (the fixed part over the wheel and the hanging branch), its top straight under the wheel's rightmost
-    point."""
+    """Settle a box hanging from a spring tendon wrapped over a cylinder where the spring holds its weight.
+
+    The box hangs from the tendon (500 N/m, spring length 0.6 m, critically damped) over the wheel, which the path wraps
+    over its top on the side site's side. It settles where the spring holds its weight: the tendon's length is ``0.6 + m
+    g / k`` (the fixed part over the wheel and the hanging branch), and the box's top is straight under the wheel's
+    rightmost point.
+    """
     k, m, g = 500.0, 1.0, 9.81
     model = _model(device, _HANGING, stiffness=k, springlength=0.6, damping=2.0 * math.sqrt(k * m))
     test.assertAlmostEqual(float(model.body_mass.numpy()[0]), m, delta=1e-5)
@@ -138,9 +141,12 @@ def test_a_box_hangs_over_a_cylinder(test, device):
 
 
 def test_a_pulley_halves_its_branch(test, device):
-    """A tendon from a point of the world down to the box's top, then a pulley of divisor 2 and a branch from the box's
-    top up to another point of the world: the box's top hangs where ``k (L - 0.6)`` times 1.5 holds its weight, ``L``
-    the first branch's length plus half the second's."""
+    """Halve the length of a tendon's branch after a pulley of divisor 2.
+
+    A tendon runs from a point of the world down to the box's top, then a pulley of divisor 2 and a branch from the
+    box's top up to another point of the world. The box's top hangs where ``k (L - 0.6)`` times 1.5 holds its weight,
+    ``L`` the first branch's length plus half the second's.
+    """
     mjcf = """<?xml version="1.0" ?>
 <mujoco model="pulley">
   <option gravity="0 0 -9.81"/>
@@ -177,11 +183,14 @@ def test_a_pulley_halves_its_branch(test, device):
 
 
 def test_coefficients(test, device):
-    """The tendon's coefficients as SolverMuJoCo reads them: stiffness, damping, armature and friction loss as they are;
-    a spring length pair as a band, -1 as the length at the model's pose; the limit's range, its stiffness in force
-    space, and from solref ``(T, zeta)`` and solimp's ``d_max`` as ``1 / (T^2 zeta^2 w)``, ``w = (r^2 / I) (1 -
-    d_max)``, the arm's inverse weight ``r^2 / I`` (r = 0.3 m, I its inertia about the hinge); its damping ``2 / (T w)``,
-    which the tendon takes past a bound with ``enable_joint_limit_damping``."""
+    """Read a spatial tendon's coefficients as SolverMuJoCo reads them.
+
+    Stiffness, damping, armature and friction loss are taken as they are; a spring length pair as a band, and -1 as the
+    length at the model's pose. The limit takes its range, and its stiffness in force space, or from solref ``(T,
+    zeta)`` and solimp's ``d_max`` as ``1 / (T^2 zeta^2 w)``, ``w = (r^2 / I) (1 - d_max)``, with the arm's inverse
+    weight ``r^2 / I`` (r = 0.3 m, I its inertia about the hinge). Its damping is ``2 / (T w)``, which the tendon takes
+    past a bound with ``enable_joint_limit_damping``.
+    """
     attributes = {"stiffness": 3.0, "damping": 0.5, "armature": 0.2, "frictionloss": 0.1, "springlength": "0.8 0.9",
                   "limited": "true", "range": "0.5 1.5", "solreflimit": "0.05 0.8", "solimplimit": "0.9 0.95 0.001"}  # fmt: skip
     model = _model(device, _ARM, **attributes)
@@ -223,8 +232,11 @@ def test_coefficients(test, device):
 
 
 def test_notify(test, device):
-    """New coefficients (``TENDON_PROPERTIES``) are written into the tendons in place, with the limit's stiffness that
-    new masses give (``BODY_INERTIAL_PROPERTIES``); a site moved (``SHAPE_PROPERTIES``) builds the solve again."""
+    """Write new tendon coefficients in place and rebuild the solve for a moved site.
+
+    New coefficients (``TENDON_PROPERTIES``) are written into the tendons in place, with the limit's stiffness that new
+    masses give (``BODY_INERTIAL_PROPERTIES``); a site moved (``SHAPE_PROPERTIES``) builds the solve again.
+    """
     model = _model(device, _ARM, stiffness=3.0, limited="true", range="0.5 1.5")
     solver = newton.solvers.SolverIPC(model)
     tendons, engine = solver._features.tendons.plan.tendons, solver._engine
@@ -250,7 +262,7 @@ def test_notify(test, device):
 
 
 def test_worlds(test, device):
-    """Three worlds of the hanging box, independent: every world settles as the model of one world does."""
+    """Settle each of three independent worlds of the hanging box as the model of one world does."""
     attributes = {"stiffness": 500.0, "springlength": 0.6, "damping": 44.7}
     one = _model(device, _HANGING, **attributes)
     three = _model(device, _HANGING, 3, **attributes)
@@ -261,8 +273,11 @@ def test_worlds(test, device):
 
 
 def test_friction_lowers_the_tolerances(test, device):
-    """A spatial tendon's friction loss gives the model the Newton tolerances of a model with joint friction, 0.4
-    ``eps_velocity``, where they are left at their default."""
+    """Lower the default Newton tolerances for a spatial tendon's friction loss as for joint friction.
+
+    A spatial tendon's friction loss gives the model the Newton tolerances of a model with joint friction, 0.4
+    ``eps_velocity``, where they are left at their default.
+    """
     solver = newton.solvers.SolverIPC(_model(device, _ARM, stiffness=3.0, frictionloss=0.5))
     bound = solver_ipc._FRICTION_TOLERANCE * solver._config.eps_velocity
     test.assertEqual(solver._config.newton_velocity_tol, bound)
@@ -270,7 +285,10 @@ def test_friction_lowers_the_tolerances(test, device):
 
 
 def test_a_tendon_of_the_world_alone(test, device):
-    """A spatial tendon whose sites are all of the world has a constant length and no force, as in MuJoCo: no term."""
+    """Add no term for a spatial tendon whose sites are all of the world.
+
+    Such a tendon has a constant length and no force, as in MuJoCo.
+    """
     builder = newton.ModelBuilder()
     body = builder.add_body()
     builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
@@ -282,9 +300,12 @@ def test_a_tendon_of_the_world_alone(test, device):
 
 
 def test_grown_lists_keep_the_limit(test, device):
-    """A hinged arm falls until a tendon's limit holds it, while a box drops onto a static box; when it lands the
+    """Keep a tendon limit's strength when an eager step grows overflowing contact lists.
+
+    A hinged arm falls until a tendon's limit holds it, while a box drops onto a static box. When the box lands the
     contact lists, made short, overflow, and the eager step grows them and solves the step again on a new engine, whose
-    tendons take the step's limit strength from the old: the arm's angle goes on as in a solver with room."""
+    tendons take the step's limit strength from the old: the arm's angle goes on as in a solver with room.
+    """
     mjcf = """<?xml version="1.0" ?>
 <mujoco model="grown">
   <option gravity="0 0 -9.81"/>
@@ -335,7 +356,12 @@ def _refusal(test, model, **options):
 
 
 def test_refusals(test, device):
-    """What SolverIPC refuses of tendons, each with its message."""
+    """Refuse the tendons that SolverIPC does not simulate, each with its message.
+
+    The refused cases are Newton's own tendons (``ModelBuilder.add_tendon``), a wrap around a box, a side site inside
+    the shape it wraps, paths that MuJoCo's compiler refuses, a path of one entry, and, through ``joint_terms``, an
+    actuator that drives a tendon and a limit margin.
+    """
     builder = newton.ModelBuilder()
     a, b = builder.add_link(), builder.add_link()
     for body in (a, b):

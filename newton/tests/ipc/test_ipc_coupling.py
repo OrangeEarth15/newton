@@ -70,13 +70,16 @@ def _full_layout_coupler():
 
 
 def test_coupled_entry_steps_as_alone(test, device):
-    """SolverIPC as an entry of SolverCoupled, owning a cloth that falls onto a box on the ground, next to XPBD owning a
-    sphere and VBD a second cloth, steps as SolverIPC alone on the cloth, the box and the ground, in the compact views
-    SolverCoupled builds and in the full layout it falls back to: over 40 steps at tight tolerances the particles' and
-    the box's float64 states stay within 1e-7 m of the run alone. (Two runs of SolverIPC alone part by up to 2e-9 m over
-    these steps, from the order of float atomics in the contact assembly, so no bound of 1e-10 holds.) The other
+    """Step a SolverIPC entry of SolverCoupled as SolverIPC alone steps the same content.
+
+    SolverIPC, as an entry of SolverCoupled, owns a cloth that falls onto a box on the ground, next to XPBD owning a
+    sphere and VBD a second cloth. It steps as SolverIPC alone on the cloth, the box and the ground, in the compact
+    views SolverCoupled builds and in the full layout it falls back to: over 40 steps at tight tolerances the particles'
+    and the box's float64 states stay within 1e-7 m of the run alone. (Two runs of SolverIPC alone part by up to 2e-9 m
+    over these steps, from the order of float atomics in the contact assembly, so no bound of 1e-10 holds.) The other
     entries' content is no part of SolverIPC's solve: VBD's cloth adds no triangle, its particles are fixed and in an
-    element that meets nothing, and in the full layout XPBD's sphere is a kinematic body without surface."""
+    element that meets nothing, and in the full layout XPBD's sphere is a kinematic body without surface.
+    """
     from newton.solvers.experimental.coupled import SolverCoupled  # noqa: PLC0415
 
     alone, box0, _, cloth0, _ = _coupled_content(device, others=False)
@@ -166,14 +169,16 @@ def _proxy_coupler(model, box, mode, **ipc_options):
 
 
 def test_proxy_box_rests_on_cloth(test, device):
-    """SolverCoupledProxy with XPBD owning a 1 kg box and SolverIPC a cloth on a static support, the box SolverIPC's
-    proxy, at 1/240 s with converged steps. With the staggered transfer, which syncs the source's pose at the end of
-    its step, the box comes to rest on the cloth and the harvested feedback carries its weight within 1%, with no
-    torque. With the lagged transfer, which syncs the pose at its start, the box keeps bouncing on the cloth: the
-    feedback, one step late, of a contact this stiff does not settle; it stays on the cloth, and the feedback averages
-    out to its weight. In every step of both, no edge of SolverIPC's engine crosses a triangle, no step fails, and the
-    proxy's synced state keeps the friction of its contacts (no friction discard requested); its contact with the
-    static support is disabled."""
+    """Rest a proxy box on SolverIPC's cloth with staggered transfer and keep it on the cloth with lagged transfer.
+
+    SolverCoupledProxy runs XPBD owning a 1 kg box and SolverIPC a cloth on a static support, the box SolverIPC's proxy,
+    at 1/240 s with converged steps. With the staggered transfer, which syncs the source's pose at the end of its step,
+    the box comes to rest on the cloth and the harvested feedback carries its weight within 1%, with no torque. With the
+    lagged transfer, which syncs the pose at its start, the box keeps bouncing on the cloth: the feedback, one step
+    late, of a contact this stiff does not settle; it stays on the cloth, and the feedback averages out to its weight.
+    In every step of both, no edge of SolverIPC's engine crosses a triangle, no step fails, and the proxy's synced state
+    keeps the friction of its contacts (no friction discard requested); its contact with the static support is disabled.
+    """
     from uipc_warp.validation import SurfaceChecker  # noqa: PLC0415
 
     dt = 1.0 / 240.0
@@ -280,13 +285,16 @@ def _two_passes(model, solver, steps, dt=0.01, capture=False, inputs=None, start
 
 
 def test_restarted_passes_repeat(test, device):
-    """The coupler's protocol by hand (``_two_passes``): a pass after a restart starts where the first pass of the step
-    started, from the float64 state with the friction candidates of the step's start, so that a pass with the first's
-    input repeats it. On particles that repeat bit for bit, every second pass is its first pass bit for bit, eager and
-    captured, and the run is SolverIPC's run without restarts, bit for bit; and so on a driven pendulum under
+    """Repeat the first pass of a step bit for bit in a pass after a restart given the same input.
+
+    The coupler's protocol runs by hand (``_two_passes``): a pass after a restart starts where the first pass of the
+    step started, from the float64 state with the friction candidates of the step's start, so that a pass with the
+    first's input repeats it. On particles that repeat bit for bit, every second pass is its first pass bit for bit,
+    eager and captured, and the run is SolverIPC's run without restarts, bit for bit; and so on a driven pendulum under
     ``integrator="bdf2"``, whose drive reads the joint coordinate of the step before, which the solver carries from step
     to step and restores with the step's start. Without restarts (the negative control) a second step from the same
-    state_in starts from state_in's float32 rounding: the passes differ."""
+    state_in starts from state_in's float32 rounding: the passes differ.
+    """
     pendulum, pendulum_start, _ = _hinged(device, gravity=9.81, offset=(0.0, 0.3, 0.0), radius=0.05, target_ke=5.0,
                                           target_kd=0.1)  # fmt: skip
     pendulum_start.joint_q.assign(np.array([0.5], np.float32))  # swinging from 0.5 rad
@@ -330,12 +338,15 @@ def test_restarted_passes_repeat(test, device):
 
 
 def test_restart_restores_every_world(test, device):
-    """Three independent worlds of a soft cube, a box and a particle (``_world_content``), with the coupler's protocol by
-    hand: after ten steps the first pass of a step takes world 1's particle written through the ground, which fails
+    """Restore every world, the failed one too, to the step's start when a pass is restarted.
+
+    Three independent worlds of a soft cube, a box and a particle (``_world_content``) run the coupler's protocol by
+    hand. After ten steps the first pass of a step takes world 1's particle written through the ground, which fails
     world 1 alone (put back at its start, its friction and history requested anew for the next step); the second pass,
     restarted with the particle written back, starts every world from the step's start again, the failed world and its
     requests too, and takes the step of a solver that never failed, in every world within 1e-6 m. In every other step
-    the two passes end within the rounding of the soft cube's sums, 1e-9 m."""
+    the two passes end within the rounding of the soft cube's sums, 1e-9 m.
+    """
     shifts = (0.0, 0.03, 0.06)
     model = _worlds_at(device, shifts)
     rows = _world_rows(model, len(shifts))
@@ -378,9 +389,12 @@ def test_restart_restores_every_world(test, device):
 
 
 def test_restart_replaces_the_status_of_a_pass(test, device):
-    """Captured passes of one step: a first pass whose input gives a particle a velocity that is not a number fails
-    (a NONFINITE bit, as the same pass alone reports), and its restart from the step's start with a clean input does
-    not; the status bits an entry keeps are the last pass's, so check_status() reports nothing."""
+    """Keep the status bits of the last pass of a step, not those of a failed pass before the restart.
+
+    In captured passes of one step, a first pass whose input gives a particle a velocity that is not a number fails (a
+    NONFINITE bit, as the same pass alone reports), and its restart from the step's start with a clean input does not;
+    the status bits an entry keeps are the last pass's, so check_status() reports nothing.
+    """
     model = _repeating_particles(device)
     solver = newton.solvers.SolverIPC(model)
     solver.coupling_notify_iteration_restarts(True)
@@ -407,11 +421,14 @@ def test_restart_replaces_the_status_of_a_pass(test, device):
 
 
 def test_admm_with_two_iterations(test, device):
-    """``SolverCoupledADMM`` with two iterations, SolverIPC owning four particles with friction on the ground and XPBD a
+    """Step SolverIPC's entry twice per step under ``SolverCoupledADMM`` as SolverIPC alone, bit for bit.
+
+    ``SolverCoupledADMM`` runs two iterations, SolverIPC owning four particles with friction on the ground and XPBD a
     box falling 3 m away: every step solves SolverIPC's entry twice, the second from the step's start restored on the
-    device; with nothing coupling the entries both passes have the same input, and the second ends where the first did,
+    device. With nothing coupling the entries both passes have the same input, and the second ends where the first did,
     bit for bit, and the entry steps as SolverIPC alone, bit for bit, over 30 steps; the box falls on its own. A
-    restart's notification from a coupler that did not announce restarts is refused, and a reset's is not."""
+    restart's notification from a coupler that did not announce restarts is refused, and a reset's is not.
+    """
     from newton.solvers.experimental.coupled import SolverCoupledADMM  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
@@ -464,11 +481,14 @@ def test_admm_with_two_iterations(test, device):
 
 
 def test_admm_leaves_attachments_to_the_entry(test, device):
-    """SolverCoupledADMM leaves a particle-body attachment whose particle and body one SolverIPC entry owns to that
-    entry, as it leaves them to SolverVBD (CouplingInterface.coupling_supports_particle_body_attachments): a particle
-    of 1 kg moving at 1 m/s on an attachment to a free body of 1 kg at its origin, without gravity, steps as SolverIPC
-    alone steps it, finite (no warning that the attachment applies no force) and hard (which the coupler refused), and
-    pulls the body along; the hard attachment holds the particle at the body's origin."""
+    """Leave a particle-body attachment whose particle and body one SolverIPC entry owns to that entry.
+
+    SolverCoupledADMM leaves such an attachment to the entry as it leaves them to SolverVBD
+    (CouplingInterface.coupling_supports_particle_body_attachments). A particle of 1 kg moving at 1 m/s on an attachment
+    to a free body of 1 kg at its origin, without gravity, steps as SolverIPC alone steps it, finite (no warning that
+    the attachment applies no force) and hard (which the coupler refused), and pulls the body along; the hard attachment
+    holds the particle at the body's origin.
+    """
     import math  # noqa: PLC0415
 
     from newton.solvers.experimental.coupled import SolverCoupledADMM  # noqa: PLC0415
@@ -507,14 +527,19 @@ def test_admm_leaves_attachments_to_the_entry(test, device):
 
 
 def test_proxy_passes_converge(test, device):
-    """``SolverCoupledProxy`` with several passes per step: XPBD's 1 kg box on SolverIPC's cloth over a static support
-    (``_proxy_scene``), at 1/240 s with converged steps. Every pass of SolverIPC's entry starts from the step's start,
-    and the coupler iterates the step's feedback: the source steps again with the feedback of the pass before, so the
-    feedback is no longer one step late. Lagged transfer, four passes: the passes converge (the last two differ by less
-    than 0.1% of the weight in each of the last 60 steps) and the box comes to rest with its weight as feedback within
-    0.1%, where one pass keeps it bouncing (``test_proxy_box_rests_on_cloth``). Staggered transfer: the feedback of a
-    pass undoes the motion that made it, so the passes alternate unless relaxed; with a relaxation of 0.5, two passes
-    rest the box with its weight within 0.1%. No crossing and no failure in any step."""
+    """Converge the passes of ``SolverCoupledProxy`` so that a proxy box rests on cloth with its weight as feedback.
+
+    The scene is XPBD's 1 kg box on SolverIPC's cloth over a static support (``_proxy_scene``), at 1/240 s with
+    converged steps and several passes per step. Every pass of SolverIPC's entry starts from the step's start, and the
+    coupler iterates the step's feedback: the source steps again with the feedback of the pass before, so the feedback
+    is no longer one step late.
+
+    Lagged transfer, four passes: the passes converge (the last two differ by less than 0.1% of the weight in each of
+    the last 60 steps) and the box comes to rest with its weight as feedback within 0.1%, where one pass keeps it
+    bouncing (``test_proxy_box_rests_on_cloth``). Staggered transfer: the feedback of a pass undoes the motion that made
+    it, so the passes alternate unless relaxed; with a relaxation of 0.5, two passes rest the box with its weight within
+    0.1%. No crossing and no failure in any step.
+    """
     from uipc_warp.validation import SurfaceChecker  # noqa: PLC0415
 
     from newton.solvers.experimental.coupled import SolverCoupledProxy  # noqa: PLC0415
@@ -600,10 +625,13 @@ def _coupled_boxes(device):
 
 
 def test_coupled_status_of_captured_steps(test, device):
-    """SolverCoupled steps SolverIPC without observables, so SolverIPC keeps the status bits of its steps for
+    """Keep the status bits of captured coupled steps for check_status() without a container.
+
+    SolverCoupled steps SolverIPC without observables, so SolverIPC keeps the status bits of its steps for
     check_status() without a container. A captured coupled step replayed from a clean state reports nothing; replayed
     from a state that rests the box in touching contact it reports THICKNESS_VIOLATED and raises, and the read clears
-    the bits. A solver that is no entry of a coupled solver refuses check_status() without a container."""
+    the bits. A solver that is no entry of a coupled solver refuses check_status() without a container.
+    """
     model, coupled, box, touching = _coupled_boxes(device)
     ipc = coupled.solver("ipc")
     s0, s1 = model.state(), model.state()
@@ -628,10 +656,12 @@ def test_coupled_status_of_captured_steps(test, device):
 
 
 def test_coupled_reset_is_the_solvers_reset(test, device):
-    """A reset through SolverCoupled is SolverIPC's reset with the coupler's world mask, the reset's own notification
-    doing nothing: from one state of a box sliding on a static box, the next step keeps its friction candidates after
-    a reset whose mask leaves out the global entities (SolverIPC's content is global), and records none after a reset
-    that selects them and after a reset without a mask."""
+    """Reset SolverIPC through SolverCoupled as SolverIPC's own reset with the coupler's world mask.
+
+    The reset's own notification does nothing. From one state of a box sliding on a static box, the next step keeps its
+    friction candidates after a reset whose mask leaves out the global entities (SolverIPC's content is global), and
+    records none after a reset that selects them and after a reset without a mask.
+    """
     model, coupled, box, _ = _coupled_boxes(device)
     ipc = coupled.solver("ipc")
     s0, s1 = model.state(), model.state()
@@ -661,12 +691,16 @@ def test_coupled_reset_is_the_solvers_reset(test, device):
 
 
 def test_coupled_entry_of_independent_worlds(test, device):
-    """SolverIPC as an entry of SolverCoupled on a model of two worlds, each a box above the global static box owned by
+    """Solve the worlds of a SolverCoupled entry's view as independent worlds and keep each world's status bits.
+
+    SolverIPC is an entry of SolverCoupled on a model of two worlds, each a box above the global static box owned by
     SolverIPC (world 0's falling, world 1's 1 mm above it) and an XPBD sphere 2 m away: the entry's view holds the two
     worlds and solves them as independent worlds.
+
     It keeps the status bits of every world. A captured coupled step replayed from a clean state reports nothing;
     replayed from a state that rests world 1's box in touching contact it reports THICKNESS_VIOLATED in world 1 alone,
-    check_status() without a container names world 1 and the read clears the bits, and world 0's box takes its step."""
+    check_status() without a container names world 1 and the read clears the bits, and world 0's box takes its step.
+    """
     from newton.solvers.experimental.coupled import SolverCoupled  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
@@ -715,9 +749,13 @@ def test_coupled_entry_of_independent_worlds(test, device):
 
 
 def test_proxies_refuse_bdf2_and_al_ipc(test, device):
-    """An entry with proxies refuses integrator="bdf2" (the coupler writes a proxy's state at every step) and
-    contact_constitution="al-ipc" (no contact forces to harvest the feedback from); without proxies an entry takes
-    both. SolverIPC reads no Contacts: it takes full-surface soft contacts and returns proxy contacts unchanged."""
+    """Refuse integrator="bdf2" and contact_constitution="al-ipc" in an entry with proxies.
+
+    integrator="bdf2" is refused because the coupler writes a proxy's state at every step, and
+    contact_constitution="al-ipc" because it has no contact forces to harvest the feedback from; without proxies an
+    entry takes both. SolverIPC reads no Contacts: it takes full-surface soft contacts and returns proxy contacts
+    unchanged.
+    """
     from newton.solvers.experimental.coupled import SolverCoupled  # noqa: PLC0415
 
     model, box = _proxy_scene(device)
@@ -743,10 +781,13 @@ def test_proxies_refuse_bdf2_and_al_ipc(test, device):
 
 
 def test_proxy_particles_rest_on_a_body(test, device):
-    """SolverCoupledProxy with XPBD owning four particles and SolverIPC a box standing on the ground, the particles
+    """Rest proxy particles on SolverIPC's box, each harvesting its weight as its feedback.
+
+    SolverCoupledProxy runs XPBD owning four particles and SolverIPC a box standing on the ground, the particles
     SolverIPC's proxies, staggered at 1/240 s with converged steps: the particles come to rest on the box, each
     harvesting its weight as its feedback within 1%, the box at rest on the ground. A proxy particle meets the box and
-    neither the ground, a static shape, nor another proxy particle."""
+    neither the ground, a static shape, nor another proxy particle.
+    """
     from newton.solvers.experimental.coupled import SolverCoupledProxy  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
@@ -796,14 +837,16 @@ def test_proxy_particles_rest_on_a_body(test, device):
 
 
 def test_proxy_feedback_is_the_contact_force(test, device):
-    """A proxy's feedback is the force of the step's contact terms on it at the end of the step. In a view of a box
-    resting on a larger box on the ground and of a particle resting on the larger box, the box and the particle
-    SolverIPC's proxies (a coupled solver's view, built by hand), after 120 steps at tight tolerances:
-    coupling_harvest_proxy_wrenches gives the proxy box the forces of libuipc-warp's records on its vertices, summed with
-    their torques about its centre of mass (to float32 rounding), the net force of the step's CONTACT_F rows on it, and
-    its weight within 1e-3 with no torque; coupling_harvest_proxy_particle_forces gives the particle the records' forces
-    on it, minus the soft rows' force on the larger box by it, and its weight. Both zero their outputs first and write no
-    other index."""
+    """Harvest as a proxy's feedback the force of the step's contact terms on it at the end of the step.
+
+    A view (a coupled solver's view, built by hand) holds a box resting on a larger box on the ground and a particle
+    resting on the larger box, the box and the particle SolverIPC's proxies. After 120 steps at tight tolerances,
+    coupling_harvest_proxy_wrenches gives the proxy box the forces of libuipc-warp's records on its vertices, summed
+    with their torques about its centre of mass (to float32 rounding), the net force of the step's CONTACT_F rows on it,
+    and its weight within 1e-3 with no torque; coupling_harvest_proxy_particle_forces gives the particle the records'
+    forces on it, minus the soft rows' force on the larger box by it, and its weight. Both zero their outputs first and
+    write no other index.
+    """
     from newton.solvers.experimental.coupled import ModelView  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
@@ -876,12 +919,15 @@ def test_proxy_feedback_is_the_contact_force(test, device):
 
 
 def test_feedback_of_captured_steps(test, device):
-    """A coupled solver may capture an entry's step alone and harvest the proxies' feedback outside the graph, after
-    every replay. The harvest reads the records of the last replay: the solver counts its steps on the device and
-    brings the records up to date there. A proxy box resting on a box, pressed down by a body force 5 N larger at each
-    of four steps: the wrenches harvested after each of four replays of a captured step are those harvested after each
-    of four eager steps, from the same rest, to 1e-3 of the largest force, while each step's force differs from that of
-    the step before by more than ten times that."""
+    """Harvest the proxies' feedback of the last replay when an entry's step is captured alone.
+
+    A coupled solver may capture an entry's step alone and harvest the proxies' feedback outside the graph, after every
+    replay. The harvest reads the records of the last replay: the solver counts its steps on the device and brings the
+    records up to date there. A proxy box resting on a box is pressed down by a body force 5 N larger at each of four
+    steps: the wrenches harvested after each of four replays of a captured step are those harvested after each of four
+    eager steps, from the same rest, to 1e-3 of the largest force, while each step's force differs from that of the step
+    before by more than ten times that.
+    """
     from newton.solvers.experimental.coupled import ModelView  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
@@ -982,12 +1028,15 @@ def _thrown_proxy(device, proxy=True):
 
 
 def test_proxy_entry_takes_converged_steps(test, device):
-    """An entry with proxies takes converged steps unless told otherwise (newton_velocity_tol 5e-4 m/s,
+    """Take converged steps by default in an entry with proxies, so that the harvested feedback is the converged one.
+
+    An entry with proxies takes converged steps unless told otherwise (newton_velocity_tol 5e-4 m/s,
     newton_transrate_tol 1e-3 1/s, semi_implicit False), so that a proxy's feedback, the force of the step's contact
-    terms at its end, is the converged one: a proxy box thrown at 0.5 m/s onto a box, in steps of 1/60 s. From every
+    terms at its end, is the converged one. A proxy box is thrown at 0.5 m/s onto a box, in steps of 1/60 s. From every
     state of a converged run (newton_velocity_tol 1e-6) one step with the defaults gives the feedback of one converged
     step within 1% of the impact's peak (2.5 times the converged force, the step of impact, under the defaults of an
-    entry without proxies). Without proxies the defaults are libuipc's, and given values are taken."""
+    entry without proxies). Without proxies the defaults are libuipc's, and given values are taken.
+    """
     view, top = _thrown_proxy(device)
     dt, fields = 1.0 / 60.0, ("body_q", "body_qd")
     reference = newton.solvers.SolverIPC(view, **_TIGHT)
@@ -1034,10 +1083,13 @@ def test_proxy_entry_takes_converged_steps(test, device):
 
 
 def test_late_proxy_fails_the_step(test, device):
-    """A proxy's new pose, written by the coupler before every step, is swept from where the last step left it, as a
-    kinematic body's jump: the proxy box 2 mm above a box (``_thrown_proxy``), written 0.5 mm lower, is taken without
-    a friction discard; written 3 cm lower, into the box, it fails the step with INVALID_CCD_STEP, named as the
-    kinematic sweep (an eager step raises), where the barrier would have pushed it further into the box."""
+    """Sweep a proxy's new pose from where the last step left it and fail the step when it moves into a box.
+
+    A proxy's new pose, written by the coupler before every step, is swept as a kinematic body's jump: the proxy box 2
+    mm above a box (``_thrown_proxy``), written 0.5 mm lower, is taken without a friction discard; written 3 cm lower,
+    into the box, it fails the step with INVALID_CCD_STEP, named as the kinematic sweep (an eager step raises), where
+    the barrier would have pushed it further into the box.
+    """
     view, top = _thrown_proxy(device)
     solver = newton.solvers.SolverIPC(view)
     s0, s1 = view.state(), view.state()

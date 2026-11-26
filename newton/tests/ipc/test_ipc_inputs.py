@@ -50,8 +50,7 @@ def _two_particles():
 
 
 def test_rejects_springs_without_a_libuipc_form(test, device):
-    """Reject a spring of negative damping, negative rest length or negative stiffness, and one that joins a particle
-    to itself."""
+    """Reject a spring of negative damping, rest length or stiffness, and one that joins a particle to itself."""
     for case, pattern in (
         ("damped", "spring 0 has spring_damping -0.5; make it 0 or positive"),
         ("negative rest length", "spring_rest_length -0.1[0-9]*; make it 0 or positive"),
@@ -68,8 +67,10 @@ def test_rejects_springs_without_a_libuipc_form(test, device):
 
 
 def test_rejects_attachment_damping(test, device):
-    """Reject a particle-body attachment with a negative damping, naming it (Newton's builder refuses one, a model may
-    hold one)."""
+    """Reject a particle-body attachment with a negative damping, naming it.
+
+    Newton's builder refuses such an attachment, but a model may hold one.
+    """
     builder = _two_particles()
     b = _box_body(builder, (0.0, 0.0, 2.0), (0.1, 0.1, 0.1))
     builder.add_attachment_particle_body(0, b, body_point=(0.0, 0.0, -0.5))
@@ -90,8 +91,11 @@ def _hinged_pair(builder):
 
 
 def test_rejects_mimic_constraints(test, device):
-    """Reject a mimic relation of joints of more than one coordinate (two D6 joints of two linear axes), before the
-    joints' own checks; a relation of revolute or prismatic joints is a joint coordinate term (test_ipc_joint_terms.py)."""
+    """Reject a mimic relation of joints of more than one coordinate before the joints' own checks.
+
+    The joints are two D6 joints of two linear axes. A relation of revolute or prismatic joints is a joint coordinate
+    term (test_ipc_joint_terms.py).
+    """
     builder = newton.ModelBuilder()
     axes = [newton.ModelBuilder.JointDofConfig(axis=a) for a in (newton.Axis.X, newton.Axis.Y)]
     joints = []
@@ -122,9 +126,11 @@ def _equality_row(enabled):
 
 
 def test_rejects_equality_constraints(test, device):
-    """Reject an enabled MuJoCo equality row that no loop joint holds instead of letting the body fall through it;
-    a row disabled when the solver is built and enabled later is refused when notify_model_changed reports
-    CONSTRAINT_PROPERTIES; a mimic relation of two hinges set later builds the solve again with its term."""
+    """Reject an enabled MuJoCo equality row that no loop joint holds instead of letting the body fall through it.
+
+    A row disabled when the solver is built and enabled later is refused when notify_model_changed reports
+    CONSTRAINT_PROPERTIES; a mimic relation of two hinges set later builds the solve again with its term.
+    """
     _rejects(test, _equality_row(True), "1 enabled equality rows that no loop joint holds \\(rows \\[0\\]\\)", device)
     model = _equality_row(False).finalize(device=device)
     solver = newton.solvers.SolverIPC(model)
@@ -177,12 +183,14 @@ def _rotation(q):
 
 
 def test_equality_rows_held_by_loop_joints(test, device):
-    """The MJCF equalities that Newton's importers turn into loop joints are taken, by SolverSteel's rule: a connect of
-    a free box to the world at its centre and a weld of a second free box to it become a BALL and a FIXED joint in no
-    articulation, their rows stay enabled and linked to them, and over 30 steps of 0.01 s the first box stays at its
-    anchor and the second keeps its pose in the first's frame, within the joints' penalties, while the pair swings
-    down under gravity. The model imported without the conversion keeps rows linked to no joint, which are refused,
-    and a row linked to a joint of another kind is refused too."""
+    """Take the MJCF equalities that Newton's importers turn into loop joints, by SolverSteel's rule.
+
+    A connect of a free box to the world at its centre and a weld of a second free box to it become a BALL and a FIXED
+    joint in no articulation, their rows stay enabled and linked to them, and over 30 steps of 0.01 s the first box
+    stays at its anchor and the second keeps its pose in the first's frame, within the joints' penalties, while the pair
+    swings down under gravity. The model imported without the conversion keeps rows linked to no joint, which are
+    refused, and a row linked to a joint of another kind is refused too.
+    """
 
     def imported(convert):
         builder = newton.ModelBuilder()
@@ -270,9 +278,11 @@ def test_rejects_activations(test, device):
 
 
 def test_control_activations_refused_at_eager_steps(test, device):
-    """A step that is not captured refuses a Control with a triangle or a tetrahedron activation other than 0, which
-    the solver does not read, naming the array, and steps again once it is 0; given no control it checks the model's
-    own, which change in place after construction. A captured step does not check them."""
+    """Refuse a Control's non-zero triangle or tetrahedron activation in a step that is not captured.
+
+    The solver does not read these activations. The step names the array, and steps again once it is 0; given no control
+    it checks the model's own, which change in place after construction. A captured step does not check them.
+    """
     builder = newton.ModelBuilder()
     _cloth(builder, 2, 0.05, 1.0)
     builder.add_soft_grid(
@@ -305,9 +315,12 @@ def test_control_activations_refused_at_eager_steps(test, device):
 
 
 def test_rejects_unsupported_joints(test, device):
-    """Reject the joints SolverIPC does not simulate, naming what libuipc lacks: rod joints, drives, passive springs and
-    armature on free joints and on D6 joints that become ball joints, limits on ball joints (Newton defines none), the
-    friction of a free joint, and a negative effort limit on a driven joint."""
+    """Reject the joints SolverIPC does not simulate, naming what libuipc lacks.
+
+    These are rod joints, drives, passive springs and armature on free joints and on D6 joints that become ball joints,
+    limits on ball joints (Newton defines none), the friction of a free joint, and a negative effort limit on a driven
+    joint.
+    """
 
     def hinged(add, **dof):
         builder = newton.ModelBuilder()
@@ -467,10 +480,12 @@ def test_refuses_the_input_checked_first(test, device):
 
 
 def test_rejects_body_variants(test, device):
-    """Refuse a model with body variants by name, as Newton's other solvers that find their own contacts do: the
-    scenes of Newton's body-variant tests, a body replicated in two worlds above the ground with the variants a cube
-    and two spheres (whose second collider row is empty while the cube is selected) or a cube and the same cube as a
-    mesh (every row full)."""
+    """Refuse a model with body variants by name, as Newton's other solvers that find their own contacts do.
+
+    The scenes are those of Newton's body-variant tests: a body replicated in two worlds above the ground with the
+    variants a cube and two spheres (whose second collider row is empty while the cube is selected) or a cube and the
+    same cube as a mesh (every row full).
+    """
 
     def variant(kind):
         builder = newton.ModelBuilder()
@@ -501,10 +516,12 @@ def test_rejects_body_variants(test, device):
 
 
 def test_rejects_invalid_arguments(test, device):
-    """Refuse the constructor's arguments that no simulation takes, naming each: a thickness, a cloth strain rate or
-    a strength ratio of joints or kinematic aims that is negative or not finite (a negative strain rate makes the
-    membrane's energy unbounded below), and fewer than 3 segments around a round shape, or a fraction of one. Their
-    smallest valid values are taken."""
+    """Refuse the constructor's arguments that no simulation takes, naming each.
+
+    These are a thickness, a cloth strain rate or a strength ratio of joints or kinematic aims that is negative or not
+    finite (a negative strain rate makes the membrane's energy unbounded below), and fewer than 3 segments around a
+    round shape, or a fraction of one. Their smallest valid values are taken.
+    """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
     body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity()))
@@ -531,10 +548,12 @@ def test_rejects_invalid_arguments(test, device):
 
 
 def test_rejects_arguments_the_options_do_not_read(test, device):
-    """Refuse a value other than the default of an argument that the other options leave unread, as adaptive_kappa is
-    refused under AL-IPC: kappa under contact_constitution="al-ipc", which has no barrier, and
-    kinematic_strength_ratio under kinematic_motion="jump", which has no aims. Their defaults are taken, and so are
-    the values where they are read."""
+    """Refuse a value other than the default of an argument that the other options leave unread.
+
+    As adaptive_kappa is refused under AL-IPC, so are kappa under contact_constitution="al-ipc", which has no barrier,
+    and kinematic_strength_ratio under kinematic_motion="jump", which has no aims. Their defaults are taken, and so are
+    the values where they are read.
+    """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
     _box_body(builder, (0.0, 0.0, 0.5), (0.1, 0.1, 0.1))
@@ -569,9 +588,12 @@ def test_rejects_gradients(test, device):
 
 
 def test_warns_of_velocity_limits(test, device):
-    """SolverIPC does not limit joint velocities, so it warns of a joint velocity limit below Newton's default, once
-    per solver: when it is built, or at the first notification of the joints' DOFs that brings one, naming how many
-    DOFs have one and the first of them. Newton's default draws no warning."""
+    """Warn once per solver of a joint velocity limit below Newton's default, which SolverIPC does not apply.
+
+    SolverIPC does not limit joint velocities. It warns when it is built, or at the first notification of the joints'
+    DOFs that brings such a limit, naming how many DOFs have one and the first of them. Newton's default draws no
+    warning.
+    """
     builder = newton.ModelBuilder()
     for x, add in ((0.0, builder.add_joint_revolute), (1.0, builder.add_joint_ball)):  # DOF 0; DOFs 1 to 3
         link = builder.add_link(xform=wp.transform((x, 0.0, 1.0), wp.quat_identity()))
@@ -620,8 +642,10 @@ def _open_plane(builder, z=0.0):
 
 
 def test_rejects_intersecting_start(test, device):
-    """Reject the surfaces of different bodies that cross at the start without a pair inside the contact thickness,
-    which a step would not notice; accept the crossings that contact ignores, and flat sheets."""
+    """Reject the surfaces of different bodies that cross at the start without a pair inside the contact thickness.
+
+    A step would not notice such a crossing. The crossings that contact ignores, and flat sheets, are accepted.
+    """
     from uipc_warp.validation import SurfaceChecker  # noqa: PLC0415
 
     with test.subTest(case="box through an open plane"):
@@ -677,9 +701,11 @@ def test_rejects_intersecting_start(test, device):
 
 
 def test_rejects_start_in_contact(test, device):
-    """Reject the surfaces of different bodies that start at or inside their contact thickness, naming the closest
-    pair, which every step would fail on; accept a gap above the thickness, also inside d_hat, and contact that the
-    solve skips (surfaces that never move, the inside of a body)."""
+    """Reject surfaces of different bodies that start at or inside their contact thickness, naming the closest pair.
+
+    Every step would fail on such a start. A gap above the thickness, also inside d_hat, is accepted, and so is contact
+    that the solve skips (surfaces that never move, the inside of a body).
+    """
 
     def build(*parts, **kwargs):
         builder = newton.ModelBuilder()
@@ -810,13 +836,15 @@ def _kinematic_root_pendulum(device):
 
 
 def test_start_of_posed_bodies_is_checked_on_the_first_step(test, device):
-    """The start of a pair with a kinematic body, whose pose the caller writes, is checked on the first step's
-    state_in, not on the model's state. Newton's kinematic-root pendulum, whose probe sphere crosses the root's box in
-    the model and is 0.43 m clear of it once the caller turns the root to -1 rad for the first step, runs, and the
-    turning box pushes the probe without crossing it. A kinematic box that the first step's state_in puts through a
-    body is refused by that step, by name, before it runs. One that crosses the body in the model is refused also
-    when the first step is captured, which cannot read its state_in: the capture raises before anything is captured,
-    and a first step outside capture from a clear state then runs, and the steps captured after it."""
+    """Check the start of a pair with a kinematic body on the first step's state_in, not on the model's state.
+
+    The caller writes a kinematic body's pose. Newton's kinematic-root pendulum, whose probe sphere crosses the root's
+    box in the model and is 0.43 m clear of it once the caller turns the root to -1 rad for the first step, runs, and
+    the turning box pushes the probe without crossing it. A kinematic box that the first step's state_in puts through a
+    body is refused by that step, by name, before it runs. One that crosses the body in the model is refused also when
+    the first step is captured, which cannot read its state_in: the capture raises before anything is captured, and a
+    first step outside capture from a clear state then runs, and the steps captured after it.
+    """
 
     def clearance(q):
         """The probe sphere's distance from the root's box less its radius, from the bodies' poses ``q``."""
@@ -918,12 +946,13 @@ def _write_z(state, body, z):
 
 
 def test_state_written_between_steps_is_checked(test, device):
-    """A state written between steps that puts surfaces at or inside their contact thickness fails the step before it
-    runs: the pendulum whose box is written 1 cm through the ground, which the joint used to pull out of it in the step
-    with no status bit. An eager step raises, naming the box, the ground plane and their distance, and a step from a
-    valid state then runs; a captured step sets THICKNESS_VIOLATED, leaves the box where it was written, and
-    check_status raises with the pair; and so under AL-IPC. A free particle written below the ground fails the same
-    way."""
+    """Fail a step before it runs when the state written before it puts surfaces at or inside contact thickness.
+
+    The case is the pendulum whose box is written 1 cm through the ground, which the joint used to pull out of it in the
+    step with no status bit. An eager step raises, naming the box, the ground plane and their distance, and a step from
+    a valid state then runs; a captured step sets THICKNESS_VIOLATED, leaves the box where it was written, and
+    check_status raises with the pair; and so under AL-IPC. A free particle written below the ground fails the same way.
+    """
     named = r"( \('[^']*'\))?"  # a body's label, where it has one of its own
     # the box's lowest vertex 1 cm under the ground, to the turn of the swinging box and float32 (-0.0100003 m)
     expected = (
@@ -976,10 +1005,12 @@ def test_state_written_between_steps_is_checked(test, device):
 
 
 def test_written_state_is_checked_without_a_sweep(test, device):
-    """The check takes a written state as it is, with no sweep from where the last step left it: of two free boxes
-    without gravity, one written to the other side of the other, through the space it fills, is a valid reset and the
-    step runs; written into it, the step fails, naming the two boxes' surfaces through each other. A step that writes
-    only a velocity, or nothing, asks for no check; one that writes a position asks for it."""
+    """Check a written state as it is, with no sweep from where the last step left it.
+
+    Of two free boxes without gravity, one written to the other side of the other, through the space it fills, is a
+    valid reset and the step runs; written into it, the step fails, naming the two boxes' surfaces through each other. A
+    step that writes only a velocity, or nothing, asks for no check; one that writes a position asks for it.
+    """
     named = r"( \('[^']*'\))?"  # a body's label, where it has one of its own
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     a = _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
@@ -1014,8 +1045,10 @@ def test_written_state_is_checked_without_a_sweep(test, device):
 
 
 def test_written_state_fails_its_world_alone(test, device):
-    """With independent worlds a state written through the ground in world 1 fails world 1 alone: an eager step raises,
-    naming world 1 and its pair, and world 0 takes its step, as the same world takes it alone."""
+    """Fail only world 1 of independent worlds when a state written in world 1 goes through the ground.
+
+    An eager step raises, naming world 1 and its pair, and world 0 takes its step, as the same world takes it alone.
+    """
     named = r"( \('[^']*'\))?"  # a body's label, where it has one of its own
     model = _pendulum(worlds=2).finalize(device=device)
     alone = _pendulum().finalize(device=device)
@@ -1040,9 +1073,12 @@ def test_written_state_fails_its_world_alone(test, device):
 
 
 def test_kinematic_placements_are_checked(test, device):
-    """A kinematic body's move between steps is swept, not checked as written: a step after the kinematic box moves
-    asks for no check. A step that places it without a sweep, the step after a reset, checks it: the kinematic box
-    placed through a free box fails that step."""
+    """Sweep a kinematic body's move between steps, and check its placement on the step after a reset.
+
+    A kinematic body's move between steps is swept, not checked as written: a step after the kinematic box moves asks
+    for no check. A step that places it without a sweep, the step after a reset, checks it: the kinematic box placed
+    through a free box fails that step.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
     pusher = builder.add_body(
@@ -1133,9 +1169,12 @@ def test_external_forces_match_closed_form(test, device):
 
 
 def test_free_joint_force_pushes_the_parent(test, device):
-    """joint_f on the free joint of a body whose parent is another body, without gravity: the child is pushed by the
-    force, as implicit Euler from rest gives it, and the parent by the reaction, so that the pair's momentum stays 0
-    (as SolverXPBD applies it)."""
+    """Push the child by joint_f on its free joint and the parent body by the reaction.
+
+    Without gravity, joint_f acts on the free joint of a body whose parent is another body: the child is pushed by the
+    force, as implicit Euler from rest gives it, and the parent by the reaction, so that the pair's momentum stays 0 (as
+    SolverXPBD applies it).
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Y)
     parent = builder.add_link(xform=wp.transform((1.0, 0.0, 0.0), wp.quat_identity()))
     builder.add_shape_box(parent, hx=0.1, hy=0.1, hz=0.1)
@@ -1174,14 +1213,20 @@ class TestSolverIPCInputs(unittest.TestCase):
             newton.solvers.SolverIPC(model)
 
     def test_velocity_limit_bound_is_newtons_default(self):
-        """The velocity limit below which SolverIPC warns of one, which it does not read, is Newton's default."""
+        """Use Newton's default as the velocity limit below which SolverIPC warns of one.
+
+        SolverIPC does not read the limit.
+        """
         from newton._src.solvers.ipc.joints import _VELOCITY_LIMIT  # noqa: PLC0415
 
         self.assertEqual(_VELOCITY_LIMIT, newton.ModelBuilder.JointDofConfig().velocity_limit)
 
     def test_equality_constants_are_newtons(self):
-        """SolverIPC's copies of MuJoCo's CONNECT and WELD equality types and of Newton's target kind of a row turned
-        into a loop joint, which have no public name, are Newton's."""
+        """Match SolverIPC's copies of the equality constants to Newton's.
+
+        The copies are of MuJoCo's CONNECT and WELD equality types and of Newton's target kind of a row turned into a
+        loop joint, which have no public name.
+        """
         from newton._src.solvers.ipc import solver_ipc  # noqa: PLC0415
         from newton._src.solvers.mujoco.enums import EqType  # noqa: PLC0415
         from newton._src.solvers.mujoco.equality import MjcEqualityTargetKind  # noqa: PLC0415
@@ -1192,8 +1237,11 @@ class TestSolverIPCInputs(unittest.TestCase):
         )
 
     def test_imports_only_public_newton_names(self):
-        """SolverIPC's modules, those of its feature modules among them, import Newton through its public modules
-        only: no import of theirs resolves under newton._src outside SolverIPC's own package."""
+        """Import Newton in SolverIPC's modules through its public modules only.
+
+        This covers SolverIPC's feature modules too: no import of theirs resolves under newton._src outside SolverIPC's
+        own package.
+        """
         module = importlib.import_module(newton.solvers.SolverIPC.__module__)
         root = pathlib.Path(module.__file__).parent
         private, paths = [], sorted(root.rglob("*.py"))
@@ -1215,10 +1263,13 @@ class TestSolverIPCInputs(unittest.TestCase):
         self.assertEqual(private, [])
 
     def test_rest_shape_copies_match_newtons_builders(self):
-        """SolverIPC's copies of Newton's rest-shape helpers, which have no public name, reproduce bit for bit the
-        tri_poses, tri_areas and edge_rest_angle that ModelBuilder stores, computed from particle_q as the solver
-        computes them to tell a cloth built at rest: random sheets from add_cloth_grid, from add_cloth_mesh (bent)
-        and from add_triangles with add_edges (random particles, the hinge rows in both orders)."""
+        """Match the rest shapes of ModelBuilder bit for bit with SolverIPC's copies of Newton's rest-shape helpers.
+
+        The helpers have no public name. The copies reproduce the tri_poses, tri_areas and edge_rest_angle that
+        ModelBuilder stores, computed from particle_q as the solver computes them to tell a cloth built at rest, on
+        random sheets from add_cloth_grid, from add_cloth_mesh (bent) and from add_triangles with add_edges (random
+        particles, the hinge rows in both orders).
+        """
         from newton._src.solvers.ipc.scene import _dihedral_angles, _triangle_rest_geometry  # noqa: PLC0415
 
         rng = np.random.default_rng(3)
@@ -1281,10 +1332,14 @@ class TestSolverIPCInputs(unittest.TestCase):
         self.assertGreater(bent, 1.0)  # folded hinges too, not only flat ones
 
     def test_import_checks_the_version_and_the_capabilities(self):
-        """Refuse a libuipc-warp older than the release SolverIPC is written for, naming it, one of the next minor
-        release or later, saying why, and one without a capability SolverIPC calls (the rigid flight, AL-IPC's sweep of
-        kinematic moves, the frame restart, the start check of written positions, a d_hat per part of the scene),
-        naming what it lacks; take a development build of the release. Every refusal says where to install it from."""
+        """Refuse a libuipc-warp of the wrong release or without a capability SolverIPC calls, naming the reason.
+
+        A libuipc-warp older than the release SolverIPC is written for is refused, naming it; one of the next minor
+        release or later is refused, saying why; and one without a capability SolverIPC calls (the rigid flight,
+        AL-IPC's sweep of kinematic moves, the frame restart, the start check of written positions, a d_hat per part of
+        the scene) is refused, naming what it lacks. A development build of the release is taken. Every refusal says
+        where to install it from.
+        """
         import uipc_warp  # noqa: PLC0415
 
         imported = newton.solvers.SolverIPC._uipc_warp
@@ -1336,10 +1391,13 @@ class TestSolverIPCInputs(unittest.TestCase):
             newton.solvers.SolverIPC._uipc_warp = imported
 
     def test_contact_elements_match_shape_contact_pairs(self):
-        """On random models (collision groups -2 to 3, worlds -1 and 0, collide flags, friction coefficients, filter
-        pairs, shapes on one body), the shape pairs that SolverIPC's contact elements enable on different bodies are
-        exactly Model.shape_contact_pairs, with the mean of the two coefficients; particles meet the shapes with
-        COLLIDE_PARTICLES."""
+        """Enable exactly Model.shape_contact_pairs between shapes on different bodies through the contact elements.
+
+        On random models (collision groups -2 to 3, worlds -1 and 0, collide flags, friction coefficients, filter pairs,
+        shapes on one body), the shape pairs that SolverIPC's contact elements enable on different bodies are exactly
+        Model.shape_contact_pairs, with the mean of the two coefficients; particles meet the shapes with
+        COLLIDE_PARTICLES.
+        """
         from newton._src.solvers.ipc.contacts import _contact_elements  # noqa: PLC0415
         from newton._src.solvers.ipc.scene import _colliding_shapes  # noqa: PLC0415
 
@@ -1398,9 +1456,12 @@ class TestSolverIPCInputs(unittest.TestCase):
                     )
 
     def test_contact_elements_with_kinematic_aims(self):
-        """With kinematic_motion="aim" (``aims``), on random models of static shapes, dynamic and kinematic bodies: the
-        pairs the contact elements enable on different bodies are Model.shape_contact_pairs less the pairs of two
-        shapes that are each static or kinematic, and without the option the elements of before."""
+        """Drop pairs of two static or kinematic shapes from the contact elements under kinematic_motion="aim".
+
+        With kinematic_motion="aim" (``aims``), on random models of static shapes, dynamic and kinematic bodies, the
+        pairs the contact elements enable on different bodies are Model.shape_contact_pairs less the pairs of two shapes
+        that are each static or kinematic.
+        """
         from newton._src.solvers.ipc.contacts import _contact_elements  # noqa: PLC0415
         from newton._src.solvers.ipc.scene import _colliding_shapes  # noqa: PLC0415
 
@@ -1435,10 +1496,13 @@ class TestSolverIPCInputs(unittest.TestCase):
             )
 
     def test_contact_elements_of_coupled_worlds(self):
-        """On random models of global shapes and two to four local worlds, some replicated with their filter pairs and
-        some drawn on their own, the shape pairs that the contact elements enable on different bodies, in the same
-        world or with a global shape (the subscenes), are exactly Model.shape_contact_pairs; replicated worlds add no
-        contact element."""
+        """Match the contact elements of models of global shapes and local worlds to Model.shape_contact_pairs.
+
+        On random models of global shapes and two to four local worlds, some replicated with their filter pairs and some
+        drawn on their own, the shape pairs that the contact elements enable on different bodies, in the same world or
+        with a global shape (the subscenes), are exactly Model.shape_contact_pairs; replicated worlds add no contact
+        element.
+        """
         from newton._src.solvers.ipc.contacts import _contact_elements  # noqa: PLC0415
         from newton._src.solvers.ipc.scene import _colliding_shapes, _Worlds  # noqa: PLC0415
 
@@ -1509,11 +1573,14 @@ class TestSolverIPCInputs(unittest.TestCase):
             self.assertEqual(used.tolist(), first.tolist(), f"trial {trial}: the copies share the elements of world 0")
 
     def test_contact_elements_of_proxies(self):
-        """In a view with proxies, as a coupled solver gives an entry, on random models of static shapes, dynamic and
-        kinematic bodies, free particles and a cloth: the pairs the contact elements enable on different bodies are
+        """Exclude a proxy's pairs with other proxies, static shapes and other entries' bodies from contact.
+
+        In a view with proxies, as a coupled solver gives an entry, on random models of static shapes, dynamic and
+        kinematic bodies, free particles and a cloth, the pairs the contact elements enable on different bodies are
         Model.shape_contact_pairs less those of a proxy shape with another proxy shape, a static shape or a shape on a
         body of inverse mass 0 (another entry's); a proxy particle meets the shapes a particle of its kind meets but
-        those, the entry's own particles as a particle of its kind does, and no other proxy particle."""
+        those, the entry's own particles as a particle of its kind does, and no other proxy particle.
+        """
         from newton._src.solvers.ipc.contacts import _contact_elements  # noqa: PLC0415
         from newton._src.solvers.ipc.scene import _colliding_shapes  # noqa: PLC0415
         from newton.solvers.experimental.coupled import ModelView  # noqa: PLC0415

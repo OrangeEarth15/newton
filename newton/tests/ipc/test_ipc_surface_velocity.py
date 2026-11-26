@@ -122,10 +122,12 @@ def _sliding_acceleration(v, toward):
 
 
 def test_a_belt_carries_a_box(test, device):
-    """The box on a belt running at 1 m/s along x slides at ``mu g`` (2%) and then rides at 1 m/s (to 5e-4 m/s),
-    under implicit Euler and under BDF2, as on a platform that moves at 1 m/s (``kinematic_motion="aim"``: within
-    ``eps_velocity``). Without the property the mesh's velocities are not read (no extension) and the box stays at
-    rest."""
+    """Carry a box on a belt at 1 m/s, as a platform that moves at 1 m/s does.
+
+    The box on a belt running at 1 m/s along x slides at ``mu g`` (2%) and then rides at 1 m/s (to 5e-4 m/s), under
+    implicit Euler and under BDF2, as on a platform that moves at 1 m/s (``kinematic_motion="aim"``: within
+    ``eps_velocity``). Without the property the mesh's velocities are not read (no extension) and the box stays at rest.
+    """
     for integrator in ("bdf1", "bdf2"):
         with test.subTest(integrator=integrator):
             model, _, box = _belt(device)
@@ -174,11 +176,14 @@ def test_a_belt_carries_a_box(test, device):
 
 
 def test_a_welded_vertex_takes_its_first_mesh_vertex(test, device):
-    """A belt mesh whose six vertices list the square's corners out of order, two of them twice, the copies used by
-    the second triangle only: the solver welds the copies, and every vertex of its triangulation takes the velocity of
-    the vertex that the first triangle at its place uses, through that triangle corner (``wp.mesh_get_velocity`` takes
-    a corner of the index buffer). The copies get a velocity of -7 m/s that a vertex taking them would carry the box
-    with; the box rides at 1 m/s."""
+    """Give a welded vertex the velocity of the mesh vertex that the first triangle at its place uses.
+
+    The belt mesh's six vertices list the square's corners out of order, two of them twice, the copies used by the
+    second triangle only. The solver welds the copies, and every vertex of its triangulation takes the velocity of the
+    vertex that the first triangle at its place uses, through that triangle corner (``wp.mesh_get_velocity`` takes a
+    corner of the index buffer). The copies get a velocity of -7 m/s that a vertex taking them would carry the box with;
+    the box rides at 1 m/s.
+    """
     vertices = np.array([[2, 2, 0], [-2, -2, 0], [2, -2, 0], [-2, -2, 0], [-2, 2, 0], [2, 2, 0]], np.float32)
     indices = np.array([1, 2, 0, 3, 5, 4], np.int32)
     mesh = newton.Mesh(vertices, indices, compute_inertia=False, enable_surface_velocity=True)
@@ -202,9 +207,12 @@ def test_a_welded_vertex_takes_its_first_mesh_vertex(test, device):
 
 
 def test_the_shape_pose_turns_and_scales_the_velocity(test, device):
-    """The mesh's velocity (1, 0, 0) in its own coordinates: on a belt shape turned 90 degrees about z and stretched
+    """Turn a mesh's surface velocity into the world by its shape's pose and scale and its body's pose.
+
+    The mesh's velocity is (1, 0, 0) in its own coordinates. On a belt shape turned 90 degrees about z and stretched
     twice along its own x, the box rides at (0, 2, 0); on a belt that a kinematic body turns by 90 degrees, at (0, 1, 0)
-    (float32, after the box has caught up)."""
+    (float32, after the box has caught up).
+    """
     turn = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), float(np.pi / 2)))
     for label, kwargs, expected, steps in (
         ("shape", {"xform": turn, "scale": (2.0, 1.0, 1.0), "at": (-1.0, -0.5)}, (0.0, 2.0, 0.0), 50),
@@ -217,9 +225,12 @@ def test_the_shape_pose_turns_and_scales_the_velocity(test, device):
 
 
 def test_newtons_normal_velocity_test_with_a_clean_start(test, device):
-    """Newton's ``test_normal_surface_velocity_does_not_affect_contact``, with the spheres resting ``GAP`` above their
-    belts instead of 1 cm inside them, which SolverIPC refuses: the belt whose velocities are (0, 0, 2), along its
-    normal, takes its sphere through the steps of the one whose velocities are zero (float32)."""
+    """Step a sphere on a belt moving along its normal as one on a still belt, from a clean start.
+
+    This is Newton's ``test_normal_surface_velocity_does_not_affect_contact``, with the spheres resting ``GAP`` above
+    their belts instead of 1 cm inside them, which SolverIPC refuses. The belt whose velocities are (0, 0, 2), along its
+    normal, takes its sphere through the steps of the one whose velocities are zero (float32).
+    """
     material = newton.ModelBuilder.ShapeConfig(mu=MU)
     builder = newton.ModelBuilder()
     meshes, bodies = [], []
@@ -259,11 +270,14 @@ def _tread(device, velocity):
 
 
 def test_a_tread_drives_its_body(test, device):
-    """A box whose bottom vertices move backwards at 1 m/s over the ground plane slides forwards at ``mu g`` (2%) and
-    then rides at 1 m/s. With a part along the ground's normal, (-1, 0, -0.5), it rides at 1 m/s too, and its steps
-    differ by less than 2e-3 m/s: the box tilts a little while it accelerates, and the pose that turns the mesh's
-    velocity into the world turns that much of the normal part into the plane, as in Newton's pipeline. Kept, the
-    normal part would lift the half plane's friction base out of the barrier's range and the box would not move."""
+    """Drive a box over the ground plane by the backward surface velocity of its bottom vertices.
+
+    Bottom vertices that move backwards at 1 m/s make the box slide forwards at ``mu g`` (2%) and then ride at 1 m/s.
+    With a part along the ground's normal, (-1, 0, -0.5), it rides at 1 m/s too, and its steps differ by less than 2e-3
+    m/s: the box tilts a little while it accelerates, and the pose that turns the mesh's velocity into the world turns
+    that much of the normal part into the plane, as in Newton's pipeline. Kept, the normal part would lift the half
+    plane's friction base out of the barrier's range and the box would not move.
+    """
     runs = {}
     for velocity in ((-1.0, 0.0, 0.0), (-1.0, 0.0, -0.5)):
         model, body = _tread(device, velocity)
@@ -278,8 +292,11 @@ def test_a_tread_drives_its_body(test, device):
 
 
 def test_captured_steps_equal_eager_ones(test, device):
-    """The belt's velocities written in place between steps, 0.5 m/s for eleven steps and 1 m/s after: the captured
-    steps give the eager steps' states (float32), and the box follows the change."""
+    """Match the eager steps' states in captured steps while the belt's velocities change between steps.
+
+    The belt's velocities are written in place between steps, 0.5 m/s for eleven steps and 1 m/s after: the captured
+    steps give the eager steps' states (float32), and the box follows the change.
+    """
 
     def runs(capture):
         model, mesh, box = _belt(device)
@@ -298,9 +315,11 @@ def test_captured_steps_equal_eager_ones(test, device):
 
 
 def test_steps_redone_on_grown_engines_keep_the_belt(test, device):
-    """An engine whose contact lists hold one pair: the eager steps overflow and are solved again on engines with
-    longer lists, each given the solve's ``SurfaceVelocity`` again. The box rides as on an engine with room
-    (float32)."""
+    """Keep the belt in steps solved again on grown engines after the contact lists overflow.
+
+    An engine's contact lists hold one pair: the eager steps overflow and are solved again on engines with longer lists,
+    each given the solve's ``SurfaceVelocity`` again. The box rides as on an engine with room (float32).
+    """
     runs = []
     for tiny in (False, True):
         model, _, box = _belt(device)
@@ -316,8 +335,11 @@ def test_steps_redone_on_grown_engines_keep_the_belt(test, device):
 
 
 def test_independent_worlds_ride_their_own_belts(test, device):
-    """Two worlds, each a box on a belt of its own, at 1 and 0.5 m/s: every box rides at its belt's speed, and its
-    steps are those of its world alone (float32)."""
+    """Carry the box of each independent world at its own belt's speed, as that world alone.
+
+    Two worlds, each a box on a belt of its own, at 1 and 0.5 m/s: every box rides at its belt's speed, and its steps
+    are those of its world alone (float32).
+    """
 
     def world(builder, x):
         material = newton.ModelBuilder.ShapeConfig(mu=MU)
@@ -351,8 +373,10 @@ def test_independent_worlds_ride_their_own_belts(test, device):
 
 
 def test_al_ipc_refuses_a_mesh_with_the_property(test, device):
-    """Under ``contact_constitution="al-ipc"`` a tread on a body is refused, naming its shape: libuipc-warp's AL-IPC
-    friction has no surface velocity."""
+    """Refuse a mesh with surface velocity under ``contact_constitution="al-ipc"``, naming its shape.
+
+    A tread on a body is refused: libuipc-warp's AL-IPC friction has no surface velocity.
+    """
     model, _ = _tread(device, (-1.0, 0.0, 0.0))
     shape = int(np.flatnonzero(model.shape_type.numpy() == int(newton.GeoType.MESH))[0])
     with test.assertRaises(NotImplementedError) as raised:
@@ -366,9 +390,12 @@ def test_al_ipc_refuses_a_mesh_with_the_property(test, device):
 
 
 def test_a_libuipc_warp_without_the_extension_is_named(test, device):
-    """With a libuipc-warp that has no ``uipc_warp.ext.surface_velocity`` (one before it), a mesh with the property
-    raises ``ImportError`` naming the module when the solver is built, where the solver would otherwise fail at its
-    first engine."""
+    """Raise ``ImportError`` naming ``uipc_warp.ext.surface_velocity`` when libuipc-warp lacks it.
+
+    With a libuipc-warp that has no ``uipc_warp.ext.surface_velocity`` (one before it), a mesh with the property raises
+    ``ImportError`` naming the module when the solver is built, where the solver would otherwise fail at its first
+    engine.
+    """
     model, _ = _tread(device, (-1.0, 0.0, 0.0))
     with patch_sys_module("uipc_warp.ext.surface_velocity", None), test.assertRaises(ImportError) as raised:
         newton.solvers.SolverIPC(model)

@@ -99,12 +99,15 @@ def _steps(model, solver, steps, dt, observables, control=None, state=None, body
 
 
 def test_parent_force_is_the_momentum_balance(test, device):
-    """Newton's test_parent_force pendulum, released from rest in steps of 5 ms solved to tight tolerances: at every step
-    BODY_PARENT_F is the box's momentum balance, the force within 1e-6 of the weight and the torque within 1e-6 N m
-    (the default tolerances leave up to 5e-5 N m of it in the torque), and BODY_QDD the
-    finite difference of the twists bit for bit. The joint's vertical force over the weight is not 1 in the first
-    step (0.57 with SolverIPC's default body stiffness, 0.94 with ``body_kappa=1e8``: the joint pulls the box's affine
-    stretch on a 1 m lever) and with ``body_kappa=1e8`` it is within 1e-4 of 1 from the sixth step on."""
+    """Write a pendulum's BODY_PARENT_F as its momentum balance and BODY_QDD as the twists' difference.
+
+    Newton's test_parent_force pendulum is released from rest in steps of 5 ms solved to tight tolerances: at every step
+    BODY_PARENT_F is the box's momentum balance, the force within 1e-6 of the weight and the torque within 1e-6 N m (the
+    default tolerances leave up to 5e-5 N m of it in the torque), and BODY_QDD the finite difference of the twists bit
+    for bit. The joint's vertical force over the weight is not 1 in the first step (0.57 with SolverIPC's default body
+    stiffness, 0.94 with ``body_kappa=1e8``: the joint pulls the box's affine stretch on a 1 m lever) and with
+    ``body_kappa=1e8`` it is within 1e-4 of 1 from the sixth step on.
+    """
     for kappa, first in ((None, 0.569), (1e8, 0.943)):
         with test.subTest(body_kappa=kappa):
             model = _pendulum(device)
@@ -180,11 +183,14 @@ def _every_joint(device):
 
 
 def test_parent_force_of_every_joint_kind(test, device):
-    """A box per joint kind, each held by its joint alone, with a joint_f on each: at every step of 20, each box's
+    """Write BODY_PARENT_F as the momentum balance of a box held by each joint kind.
+
+    A box per joint kind, each held by its joint alone, with a joint_f on each: at every step of 20, each box's
     BODY_PARENT_F is its momentum balance, the force within 1e-5 of the weight and the torque within 1e-4 N m (the
     float32 rounding of the twists). It holds the joint's penalty, drive and limit, a revolute or prismatic joint's
     joint_f (libuipc's joint torque or force), and the joint_f that the solver applies as a wrench to the child of a
-    free, ball or distance joint or a D6 joint of three angular axes: a free joint passes its joint_f alone."""
+    free, ball or distance joint or a D6 joint of three angular axes: a free joint passes its joint_f alone.
+    """
     model, joint_f = _every_joint(device)
     solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
     observables = solver.observables(kinds={_KIND.BODY_PARENT_F})
@@ -201,10 +207,13 @@ def test_parent_force_of_every_joint_kind(test, device):
 
 
 def test_parent_force_of_a_chain_at_rest(test, device):
-    """Newton's test_apply_body_f chain, two links on revolute joints about y, a force along y (10 N) or a torque about x
-    (5 N m) on the lower link, which the joints hold, with ``body_kappa=1e8``: once the chain has settled, the upper
-    link's parent joint carries both links' weight and the force or the torque, as Newton's test expects of a rigid
-    joint, within its tolerances: 1e-4 of the weight and 0.01 N m."""
+    """Carry both links' weight and the applied wrench in the upper parent joint of a settled chain.
+
+    Newton's test_apply_body_f chain, two links on revolute joints about y, takes a force along y (10 N) or a torque
+    about x (5 N m) on the lower link, which the joints hold, with ``body_kappa=1e8``: once the chain has settled, the
+    upper link's parent joint carries both links' weight and the force or the torque, as Newton's test expects of a
+    rigid joint, within its tolerances: 1e-4 of the weight and 0.01 N m.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, -_G), up_axis=newton.Axis.Z)
     links = []
     for _ in range(2):
@@ -240,9 +249,12 @@ def test_parent_force_of_a_chain_at_rest(test, device):
 
 
 def test_parent_force_of_a_spinning_pendulum(test, device):
-    """Newton's centrifugal case: a box on a 1 m arm about a vertical revolute joint, spinning at 5 rad/s. At every step
+    """Write a spinning pendulum's centripetal force into its BODY_PARENT_F.
+
+    Newton's centrifugal case: a box on a 1 m arm about a vertical revolute joint, spinning at 5 rad/s. At every step
     BODY_PARENT_F is the momentum balance, and once the arm has taken up its stretch its radial force is the centripetal
-    force ``m w^2 r`` toward the axis within 1%, at the angular rate of the step."""
+    force ``m w^2 r`` toward the axis within 1%, at the angular rate of the step.
+    """
     model = _pendulum(device, axis=(0.0, 0.0, 1.0), child_offset=(-1.0, 0.0, 0.0))
     solver = newton.solvers.SolverIPC(model, body_kappa=1e8)
     observables = solver.observables(kinds={_KIND.BODY_PARENT_F})
@@ -263,8 +275,11 @@ def test_parent_force_of_a_spinning_pendulum(test, device):
 
 
 def test_body_observables_captured_equal_eager(test, device):
-    """Steps captured in a graph write BODY_PARENT_F and BODY_QDD as eager steps write them, also where state_in is
-    state_out (BODY_QDD keeps the step's starting twists in its own array until the step's end)."""
+    """Write BODY_PARENT_F and BODY_QDD from captured steps as eager steps write them.
+
+    This holds also where state_in is state_out (BODY_QDD keeps the step's starting twists in its own array until the
+    step's end).
+    """
     results = []
     for capture in (False, True):
         model, joint_f = _every_joint(device)
@@ -290,9 +305,12 @@ def test_body_observables_captured_equal_eager(test, device):
 
 
 def test_body_observables_only_where_requested(test, device):
-    """Without a request the solver allocates nothing for the kinds, gives the engines it builds no extension and
-    writes neither array: a container that requests none of them, or a selection without them, leaves their arrays as
-    they were. BODY_QDD alone allocates no records of the joints' forces and gives no extension either."""
+    """Allocate and write BODY_PARENT_F and BODY_QDD only where they are requested.
+
+    Without a request the solver allocates nothing for the kinds, gives the engines it builds no extension and writes
+    neither array: a container that requests none of them, or a selection without them, leaves their arrays as they
+    were. BODY_QDD alone allocates no records of the joints' forces and gives no extension either.
+    """
     model = _pendulum(device)
     solver = newton.solvers.SolverIPC(model)
     status = solver.observables(kinds={solver.ObservableKind.STATUS})
@@ -327,8 +345,11 @@ def test_body_observables_only_where_requested(test, device):
 
 
 def test_parent_force_after_the_solve_is_built_again(test, device):
-    """A joint frame changed and notified builds the solve again: the records are made anew for the new engine's
-    joint groups, and BODY_PARENT_F is the momentum balance of the new solve's steps."""
+    """Make the BODY_PARENT_F records anew when a notified joint frame builds the solve again.
+
+    A joint frame changed and notified builds the solve again: the records are made anew for the new engine's joint
+    groups, and BODY_PARENT_F is the momentum balance of the new solve's steps.
+    """
     model = _pendulum(device)
     solver = newton.solvers.SolverIPC(model)
     observables = solver.observables(kinds={_KIND.BODY_PARENT_F})
@@ -350,10 +371,13 @@ def test_parent_force_after_the_solve_is_built_again(test, device):
 
 
 def test_body_observables_of_independent_worlds(test, device):
-    """Three independent worlds of the pendulum, hung 2 m above a ground plane, write what the pendulum alone writes,
-    within the rounding of the worlds' sums. In a step in which world 1 fails alone (its box given a velocity that is not
-    a number), BODY_PARENT_F and BODY_QDD are zero in world 1 and the other worlds' are those of a clean solver's same
-    step."""
+    """Write independent worlds' body observables as one world alone, and zeros in a world that fails.
+
+    Three independent worlds of the pendulum, hung 2 m above a ground plane, write what the pendulum alone writes,
+    within the rounding of the worlds' sums. In a step in which world 1 fails alone (its box given a velocity that is
+    not a number), BODY_PARENT_F and BODY_QDD are zero in world 1 and the other worlds' are those of a clean solver's
+    same step.
+    """
     content = newton.ModelBuilder(gravity=(0.0, 0.0, -_G), up_axis=newton.Axis.Z)
     _add_pendulum(content, at=(0.0, 0.0, 2.0))
     scene = newton.ModelBuilder(gravity=(0.0, 0.0, -_G), up_axis=newton.Axis.Z)
@@ -391,9 +415,12 @@ def test_body_observables_of_independent_worlds(test, device):
 
 
 def test_body_qdd_of_a_free_body(test, device):
-    """A free box under a constant force and a sphere under a constant torque, no gravity, steps solved to tight
+    """Write BODY_QDD of free bodies as ``F / m`` and ``I^-1 tau``, also under AL-IPC.
+
+    A free box under a constant force and a sphere under a constant torque, no gravity, steps solved to tight
     tolerances: BODY_QDD is ``F / m`` and ``I^-1 tau`` (the rigid rotation integrates the sphere's spin exactly), to the
-    float32 rounding of the twists. Also under AL-IPC, which offers BODY_QDD and BODY_PARENT_F."""
+    float32 rounding of the twists. Also under AL-IPC, which offers BODY_QDD and BODY_PARENT_F.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
     ball = builder.add_body(xform=wp.transform(wp.vec3(2.0, 0.0, 1.0), wp.quat_identity()))
@@ -417,8 +444,11 @@ def test_body_qdd_of_a_free_body(test, device):
 
 
 def test_imu_on_a_box_at_rest(test, device):
-    """SensorIMU on a box resting on the ground reads the ground's reaction to gravity, (0, 0, g) in its frame, within
-    0.01 m/s^2 once the box has settled, and no rotation."""
+    """Read the ground's reaction to gravity with SensorIMU on a box at rest.
+
+    SensorIMU on a box resting on the ground reads the ground's reaction to gravity, (0, 0, g) in its frame, within
+    0.01 m/s^2 once the box has settled, and no rotation.
+    """
     from newton.sensors import SensorIMU  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
@@ -436,8 +466,10 @@ def test_imu_on_a_box_at_rest(test, device):
 
 
 def test_parent_force_needs_element_forces(test, device):
-    """A libuipc-warp without ``uipc_warp.ext.element_forces`` takes BODY_QDD and refuses BODY_PARENT_F with an
-    ImportError that names the module."""
+    """Refuse BODY_PARENT_F with an ImportError naming ``uipc_warp.ext.element_forces`` when it is missing.
+
+    A libuipc-warp without ``uipc_warp.ext.element_forces`` still takes BODY_QDD.
+    """
     model = _pendulum(device)
     solver = newton.solvers.SolverIPC(model)
     solver.observables(kinds={_KIND.BODY_QDD})

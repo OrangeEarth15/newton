@@ -78,9 +78,11 @@ def _wrap(a):
 
 
 def test_joint_q_is_eval_iks(test, device):
-    """A box swinging on a universal joint about both axes: after every step ``joint_q`` is the angles ``eval_ik``
-    computes from the bodies' poses, to the joint's violation of its lock, and ``joint_qd`` is ``eval_ik``'s
-    rates."""
+    """Write ``eval_ik``'s angles and rates of a universal joint to ``joint_q`` and ``joint_qd`` at every step.
+
+    A box swings on a universal joint about both axes. After every step ``joint_q`` is the angles ``eval_ik`` computes
+    from the bodies' poses, to the joint's violation of its lock, and ``joint_qd`` is ``eval_ik``'s rates.
+    """
     model = _pendulum(device)
     solver = newton.solvers.SolverIPC(model)
     q_ik, qd_ik = wp.zeros_like(model.joint_q), wp.zeros_like(model.joint_qd)
@@ -128,9 +130,12 @@ def _cardan(device, beta):
 
 
 def test_cardan_formula(test, device):
-    """The input shaft driven at 2 rad/s turns the output through a universal joint bent by 30 degrees: over a turn
-    and a half the output's angle is ``atan2(cos beta sin phi_1, cos phi_1)``, its speed ``cos beta / (1 - sin^2
-    beta sin^2 phi_1)`` times the input's."""
+    """Match the output angle and speed of a bent universal joint to the Cardan formula.
+
+    The input shaft driven at 2 rad/s turns the output through a universal joint bent by 30 degrees. Over a turn and a
+    half the output's angle is ``atan2(cos beta sin phi_1, cos phi_1)``, its speed ``cos beta / (1 - sin^2 beta sin^2
+    phi_1)`` times the input's.
+    """
     beta, omega, dt = np.radians(30.0), 2.0, 0.01
     model, (j_in, j_out) = _cardan(device, beta)
     solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
@@ -157,8 +162,11 @@ def test_cardan_formula(test, device):
 
 
 def test_drive_targets_and_turns(test, device):
-    """A drive (``target_ke``, ``target_kd``) brings both angles to their targets; then the first angle's target
-    ramps through three turns and ``joint_q`` follows it past 2 pi, as a revolute joint's angle does."""
+    """Drive both angles of a universal joint to their targets and follow a target past 2 pi.
+
+    A drive (``target_ke``, ``target_kd``) brings both angles to their targets; then the first angle's target ramps
+    through three turns and ``joint_q`` follows it past 2 pi, as a revolute joint's angle does.
+    """
     model = _pendulum(device, gravity=0.0, target_ke=50.0, target_kd=20.0)
     solver = newton.solvers.SolverIPC(model)
     control = model.control()
@@ -176,10 +184,13 @@ def test_drive_targets_and_turns(test, device):
 
 
 def test_limit_friction_and_joint_f(test, device):
-    """Per angle: gravity rests a pendulum on a limit of its first angle past the bound by the cubic's
-    ``sqrt(tau delta_r / ke)``; friction above the load's torque holds the pendulum where it started (it creeps at most
-    ``eps_velocity`` times the ratio of the two); ``joint_f`` spins a box about the first axis at ``tau / I`` from the
-    fourth step on (the first steps carry the joint's first pull on the box's stretch)."""
+    """Apply a universal joint's limit, friction and ``joint_f`` per angle.
+
+    Gravity rests a pendulum on a limit of its first angle past the bound by the cubic's ``sqrt(tau delta_r / ke)``.
+    Friction above the load's torque holds the pendulum where it started (it creeps at most ``eps_velocity`` times the
+    ratio of the two). ``joint_f`` spins a box about the first axis at ``tau / I`` from the fourth step on (the first
+    steps carry the joint's first pull on the box's stretch).
+    """
     dt = 0.01
     with test.subTest("limit"):
         # released at 0.2 rad about x, the lower bound of a limit [0.2, 0.5] of limit_ke 1e3 N m/rad: gravity pulls the
@@ -210,7 +221,7 @@ def test_limit_friction_and_joint_f(test, device):
 
 
 def test_parent_force(test, device):
-    """``BODY_PARENT_F`` of a box on a universal joint with a drive is the box's momentum balance at every step."""
+    """Match ``BODY_PARENT_F`` of a box on a driven universal joint to its momentum balance at every step."""
     model = _pendulum(device, target_ke=20.0, target_kd=1.0, friction=0.5)
     solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
     observables = solver.observables(kinds={_KIND.BODY_PARENT_F})
@@ -227,7 +238,7 @@ def test_parent_force(test, device):
 
 
 def test_captured_equal_eager(test, device):
-    """Steps of a universal joint with every term on, captured in a graph, give the eager steps' states."""
+    """Match the eager steps' states with captured steps of a universal joint with every term on."""
     dof = {"target_ke": 20.0, "target_kd": 1.0, "friction": 0.2, "armature": 0.01, "damping": 0.1}
     dof.update(limit_lower=-0.5, limit_upper=0.5, limit_ke=100.0)
     eager_model, model = _pendulum(device, **dof), _pendulum(device, **dof)
@@ -259,9 +270,12 @@ def _hanging(device, lower, upper, start=0.45, gravity=_G, **dof):
 
 
 def test_range_free_inside_and_stopped(test, device):
-    """A box on a distance joint [0.4, 0.6] falls freely while its distance is inside and rests past 0.6 m by the
-    cubic's overshoot ``sqrt(m g delta_r / limit_ke)``; with only a lower bound it falls freely past 0.6 m; with only
-    an upper bound it rests as with both. ``BODY_PARENT_F`` holds its weight at rest."""
+    """Let a box fall freely inside a distance joint's range and rest past its upper bound.
+
+    A box on a distance joint [0.4, 0.6] falls freely while its distance is inside and rests past 0.6 m by the cubic's
+    overshoot ``sqrt(m g delta_r / limit_ke)``; with only a lower bound it falls freely past 0.6 m; with only an upper
+    bound it rests as with both. ``BODY_PARENT_F`` holds its weight at rest.
+    """
     dt = 0.01
     for lower, upper, rests in ((0.4, 0.6, True), (0.4, -1.0, False), (-1.0, 0.6, True)):
         with test.subTest(lower=lower, upper=upper):
@@ -285,8 +299,11 @@ def test_range_free_inside_and_stopped(test, device):
 
 
 def test_range_lower_bound(test, device):
-    """A box thrown at 2 m/s toward the point from 0.5 m on a distance joint [0.4, 0.6] without gravity turns back
-    at the lower bound and leaves again."""
+    """Turn a box back at a distance joint's lower bound.
+
+    A box thrown at 2 m/s toward the point from 0.5 m on a distance joint [0.4, 0.6] without gravity turns back at the
+    lower bound and leaves again.
+    """
     model = _hanging(device, 0.4, 0.6, start=0.5, gravity=0.0, limit_kd=0.0)
     solver = newton.solvers.SolverIPC(model, **_TIGHT_ROTATIONS)
     state = model.state()
@@ -302,8 +319,11 @@ def test_range_lower_bound(test, device):
 
 
 def test_range_bounds_notified(test, device):
-    """A change of a distance joint's bounds that changes its kind builds the solve again (a range becomes a stitch
-    of one length, a length becomes a range, both bounds negative hold nothing); one within a range does not."""
+    """Rebuild the solve when new bounds change a distance joint's kind, and only then.
+
+    A change of a distance joint's bounds that changes its kind builds the solve again (a range becomes a stitch of one
+    length, a length becomes a range, both bounds negative hold nothing); one within a range does not.
+    """
     model = _hanging(device, 0.4, 0.6)
     solver = newton.solvers.SolverIPC(model)
     s = _run(model, solver, 2, 0.01, state=model.state())
@@ -326,8 +346,11 @@ def test_range_bounds_notified(test, device):
 
 
 def test_refusals(test, device):
-    """A D6 joint of two angular axes that are not orthonormal, D6 joints of other axes than a universal joint's that
-    lock what no joint of SolverIPC locks, and a distance joint whose lower bound is above its upper are refused."""
+    """Refuse D6 joints that SolverIPC cannot represent and distance joints with inverted bounds.
+
+    A D6 joint of two angular axes that are not orthonormal, D6 joints of other axes than a universal joint's that lock
+    what no joint of SolverIPC locks, and a distance joint whose lower bound is above its upper are refused.
+    """
 
     def refused(add):
         builder = newton.ModelBuilder()

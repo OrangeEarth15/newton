@@ -31,10 +31,13 @@ def _bdf2_from_rest(n, h, a):
 
 
 def test_bdf2_falls_from_an_implicit_euler_step(test, device):
-    """With integrator="bdf2" (libuipc's integrator/type; BDF1 by default, other values refused) a soft cube and a
-    rigid box fall from rest, eagerly and captured, as BDF2 does after a first implicit Euler step: ``v_n = -g n h`` and
+    """Start BDF2's history with an implicit Euler step for bodies falling from rest.
+
+    With integrator="bdf2" (libuipc's integrator/type; BDF1 by default, other values refused) a soft cube and a rigid
+    box fall from rest, eagerly and captured, as BDF2 does after a first implicit Euler step: ``v_n = -g n h`` and
     ``z_n - z_0 = -g h^2 (n^2 / 2 + 3/4 (1 - 3^-n))``, to the float32 output. (A history started at rest, libuipc's,
-    would give the first step two thirds of the impulse.)"""
+    would give the first step two thirds of the impulse.)
+    """
     builder = newton.ModelBuilder()
     builder.add_soft_grid(
         pos=wp.vec3(-0.1, -0.1, 1.0), rot=wp.quat_identity(), vel=wp.vec3(0.0, 0.0, 0.0), dim_x=2, dim_y=2,
@@ -79,9 +82,12 @@ def test_bdf2_falls_from_an_implicit_euler_step(test, device):
 
 
 def test_bdf2_turns_a_body_by_the_impulse_of_its_first_step(test, device):
-    """A torque from rest turns a free box in one step of 0.1 s to tau dt / I with integrator="bdf2" as with implicit
-    Euler, to 1%: the first step starts the history. Newton's body-force test turns a cube so; a BDF2 history started
-    at rest gives two thirds of it."""
+    """Turn a free box by the full impulse of its first step under BDF2, as under implicit Euler.
+
+    A torque from rest turns a free box in one step of 0.1 s to tau dt / I with integrator="bdf2" as with implicit
+    Euler, to 1%: the first step starts the history. Newton's body-force test turns a cube so; a BDF2 history started at
+    rest gives two thirds of it.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     b = _box_body(builder, (0.0, 0.0, 1.0), (0.5, 0.5, 0.5))
     model = builder.finalize(device=device)
@@ -97,9 +103,12 @@ def test_bdf2_turns_a_body_by_the_impulse_of_its_first_step(test, device):
 
 
 def test_bdf2_is_second_order_on_a_spring(test, device):
-    """Two particles on a spring, started 1 cm beyond its rest length, oscillate as u'' = -omega^2 u. At t = 0.4 s
-    (four radians) halving dt divides the error of integrator="bdf2" by about four, second order, and that of implicit
-    Euler by about two; BDF2's error is the smaller."""
+    """Converge at second order under BDF2 and at first order under implicit Euler on a spring.
+
+    Two particles on a spring, started 1 cm beyond its rest length, oscillate as u'' = -omega^2 u. At t = 0.4 s (four
+    radians) halving dt divides the error of integrator="bdf2" by about four, second order, and that of implicit Euler
+    by about two; BDF2's error is the smaller.
+    """
     m, k, L0 = 1.0, 50.0, 0.1
     omega, T = np.sqrt(2.0 * k / m), 0.4
 
@@ -130,9 +139,12 @@ def test_bdf2_is_second_order_on_a_spring(test, device):
 
 
 def test_bdf2_history_starts_anew(test, device):
-    """With integrator="bdf2" a state written between graph replays, and a reset, continue as a solver started from
-    that state does, to 1e-6: the step from it is an implicit Euler step whose start becomes the history, where a BDF2
-    step from the history the solver holds would move the bodies elsewhere."""
+    """Restart BDF2's history from a state written between graph replays and from a reset.
+
+    With integrator="bdf2" a state written between graph replays, and a reset, continue as a solver started from that
+    state does, to 1e-6: the step from it is an implicit Euler step whose start becomes the history, where a BDF2 step
+    from the history the solver holds would move the bodies elsewhere.
+    """
     tight = {"newton_velocity_tol": 1e-6, "linear_tol_rate": 1e-12, "semi_implicit": False}
 
     def scene():
@@ -186,12 +198,15 @@ def test_bdf2_history_starts_anew(test, device):
 
 
 def test_bdf2_history_restarts_where_gravity_changes(test, device):
-    """With integrator="bdf2" a change of gravity starts the history anew, at the next step and also between replays of
-    a captured graph: a particle and a rigid box that fall from rest under one gravity and then under another follow
+    """Restart BDF2's history where gravity changes, in the changed world only.
+
+    With integrator="bdf2" a change of gravity starts the history anew, at the next step and also between replays of a
+    captured graph: a particle and a rigid box that fall from rest under one gravity and then under another follow
     v = v_k + n h g2 after the change, to the float32 output, where BDF2 within its history would lag h (g2 - g1) / 2
-    behind for good. With two independent worlds a change in world 1 restarts world 1 alone: world 0 steps bit for
-    bit as in a run without the change. A gravity notified unchanged restarts nothing: the steps are bit for bit those
-    of a run without the notification."""
+    behind for good. With two independent worlds a change in world 1 restarts world 1 alone: world 0 steps bit for bit
+    as in a run without the change. A gravity notified unchanged restarts nothing: the steps are bit for bit those of a
+    run without the notification.
+    """
     tight = {"newton_velocity_tol": 1e-6, "newton_transrate_tol": 1e-6, "linear_tol_rate": 1e-12}
     tight["semi_implicit"] = False
     h = 0.01
@@ -265,9 +280,12 @@ def test_bdf2_history_restarts_where_gravity_changes(test, device):
 
 
 def test_bdf2_drives(test, device):
-    """With integrator="bdf2" a revolute and a prismatic joint driven from rest by target gains, a passive spring and
+    """Follow BDF2's recurrence for joints under target gains, a passive spring and passive damping.
+
+    With integrator="bdf2" a revolute and a prismatic joint driven from rest by target gains, a passive spring and
     passive damping follow BDF2's recurrence of I q'' = ke (q* - q) + kd (qd* - qd) - ks (q - q_rest) - c qd after an
-    implicit Euler step, step by step to 1e-4 of their motion; implicit Euler's recurrence is farther off."""
+    implicit Euler step, step by step to 1e-4 of their motion; implicit Euler's recurrence is farther off.
+    """
     for kind, length, scale in (("revolute", 0.1, 1.0), ("prismatic", 1.0, 10.0)):
         with test.subTest(kind):
             gains = {"target_ke": 40.0, "target_kd": 2.0, "stiffness": 10.0, "damping": 1.0}
@@ -292,8 +310,11 @@ def test_bdf2_drives(test, device):
 
 
 def test_al_ipc_rests_at_d_hat(test, device):
-    """With contact_constitution="al-ipc" a box dropped onto the ground comes to rest with its gap at d_hat, the
-    distance AL-IPC's constraint keeps, to 1%, and at rest; the barrier keeps it inside d_hat."""
+    """Rest a dropped box at a gap of d_hat under AL-IPC and inside d_hat under the barrier.
+
+    With contact_constitution="al-ipc" a box dropped onto the ground comes to rest with its gap at d_hat, the distance
+    AL-IPC's constraint keeps, to 1%, and at rest; the barrier keeps it inside d_hat.
+    """
     d_hat = 0.005
     for constitution in ("ipc", "al-ipc"):
         with test.subTest(contact_constitution=constitution):
@@ -316,11 +337,14 @@ def test_al_ipc_rests_at_d_hat(test, device):
 
 
 def test_al_ipc_rests_on_supports_without_mass(test, device):
-    """With contact_constitution="al-ipc" a box dropped onto a support without mass comes to rest with its gap at d_hat
-    to 1%, at rest, every step without a status bit: a static box shape (Newton's static shapes have no mass), a body of
+    """Rest a box at a gap of d_hat on supports without mass under AL-IPC.
+
+    With contact_constitution="al-ipc" a box dropped onto a support without mass comes to rest with its gap at d_hat to
+    1%, at rest, every step without a status bit: a static box shape (Newton's static shapes have no mass), a body of
     mass 0 (which Newton holds still) and a cloth whose particles have mass 0 (pinned). AL-IPC's penalty scales with the
     smallest mass of a pair's vertices; a vertex without mass, which never moves, adds none of its own, so the pair
-    takes the box's."""
+    takes the box's.
+    """
     d_hat = 0.005
     top = 0.1  # the support's top face
 
@@ -359,11 +383,14 @@ def test_al_ipc_rests_on_supports_without_mass(test, device):
 
 
 def test_al_ipc_holds_free_particles(test, device):
-    """With contact_constitution="al-ipc" free particles collide. Two particles of radius 1 cm closing at 2 m/s without
+    """Hold colliding free particles d_hat apart under AL-IPC, from each other and from the ground.
+
+    With contact_constitution="al-ipc" free particles collide. Two particles of radius 1 cm closing at 2 m/s without
     gravity are held d_hat beyond the sum of their radii, and a particle dropped onto the ground comes to rest d_hat
     above its radius, every step without a status bit: libuipc-warp's AL-IPC holds the pairs of two points and of a
-    point and an edge. (libuipc's AL-IPC has no such pairs: the two particles stop where they touch, in a step that
-    runs to its Newton iteration limit, and the solver refused models whose free particles collide.)"""
+    point and an edge. (libuipc's AL-IPC has no such pairs: the two particles stop where they touch, in a step that runs
+    to its Newton iteration limit, and the solver refused models whose free particles collide.)
+    """
 
     def run(model, d_hat, steps):
         solver = newton.solvers.SolverIPC(model, d_hat=d_hat, contact_constitution="al-ipc")
@@ -389,12 +416,15 @@ def test_al_ipc_holds_free_particles(test, device):
 
 
 def test_al_ipc_keeps_a_stack(test, device):
-    """Under contact_constitution="al-ipc" SolverIPC takes the AL-IPC paper's decay factor 0.9 of an opened pair's
-    weight, where libuipc's default 0.3 drops the pair within three outer updates, so that a contact that opens for a
-    moment joins again at the surface and is pushed out to d_hat again: a stack of two 0.1 m boxes released 10 mm above
-    the ground and above each other, d_hat 5 mm, holds through 300 steps of 0.01 s, the upper box over the lower one at
+    """Keep a stack of two boxes standing under AL-IPC with the paper's decay factor 0.9.
+
+    Under contact_constitution="al-ipc" SolverIPC takes the AL-IPC paper's decay factor 0.9 of an opened pair's weight,
+    where libuipc's default 0.3 drops the pair within three outer updates, so that a contact that opens for a moment
+    joins again at the surface and is pushed out to d_hat again: a stack of two 0.1 m boxes released 10 mm above the
+    ground and above each other, d_hat 5 mm, holds through 300 steps of 0.01 s, the upper box over the lower one at
     every step, and is at rest over the last 100 steps. (Under 0.3 the stack keeps bouncing, faster than 6 m/s, and the
-    upper box falls off in some runs.)"""
+    upper box falls off in some runs.)
+    """
     d_hat = 0.005
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
@@ -415,11 +445,14 @@ def test_al_ipc_keeps_a_stack(test, device):
 
 
 def test_al_ipc_sweeps_kinematic_bodies(test, device):
-    """Under contact_constitution="al-ipc" a kinematic body moved between steps is swept from where the last step left
-    it to its state_in pose (AL-IPC's moving boundaries; libuipc's frame takes the written pose, and nothing the body
-    moves into collides with it): a box moved at 1.2 m/s pushes a free sphere it reaches along, the two apart after
-    every step. The first step, and the step after reset(), place it at its pose instead: put across the sphere there,
-    it does not touch it, where the same move swept pushes the sphere away."""
+    """Sweep a kinematic body moved between steps under AL-IPC, except at the first step and after a reset.
+
+    Under contact_constitution="al-ipc" a kinematic body moved between steps is swept from where the last step left it
+    to its state_in pose (AL-IPC's moving boundaries; libuipc's frame takes the written pose, and nothing the body moves
+    into collides with it): a box moved at 1.2 m/s pushes a free sphere it reaches along, the two apart after every
+    step. The first step, and the step after reset(), place it at its pose instead: put across the sphere there, it does
+    not touch it, where the same move swept pushes the sphere away.
+    """
     dt, speed = 1.0 / 240.0, 1.2
 
     def scene():
@@ -471,10 +504,13 @@ def test_al_ipc_sweeps_kinematic_bodies(test, device):
 
 
 def test_al_ipc_status_and_new_masses(test, device):
-    """contact_constitution="al-ipc" (libuipc's contact/constitution; other values refused) builds libuipc-warp's
-    AL-IPC engine and refuses adaptive_kappa, a barrier stiffness, and the residual observable, which AL-IPC has not; a
-    captured step writes STATUS, which check_status reads, and new body masses build the solve again (the AL-IPC
-    penalty follows the masses it was built with), after which a captured step uses them."""
+    """Build the AL-IPC engine, refuse what it lacks, write STATUS and rebuild the solve for new masses.
+
+    contact_constitution="al-ipc" (libuipc's contact/constitution; other values refused) builds libuipc-warp's AL-IPC
+    engine and refuses adaptive_kappa, a barrier stiffness, and the residual observable, which AL-IPC has not; a
+    captured step writes STATUS, which check_status reads, and new body masses build the solve again (the AL-IPC penalty
+    follows the masses it was built with), after which a captured step uses them.
+    """
     builder = newton.ModelBuilder()
     _box_body(builder, (0.0, 0.0, 0.06), (0.05, 0.05, 0.05))
     builder.add_ground_plane()
@@ -517,9 +553,12 @@ def test_al_ipc_status_and_new_masses(test, device):
 
 
 def test_mas_matches_the_block_diagonal_preconditioner(test, device):
-    """With fem_preconditioner="mas" (libuipc's linear_system/fem_preconditioner; other values refused) a stiff beam
+    """Match the block diagonal preconditioner's results with MAS in fewer PCG iterations.
+
+    With fem_preconditioner="mas" (libuipc's linear_system/fem_preconditioner; other values refused) a stiff beam
     hanging from one end, and a soft cube and a cloth falling onto the ground, end where they end under the block
-    diagonal preconditioner, to the tolerance of the solves, in at most 85% of its PCG iterations."""
+    diagonal preconditioner, to the tolerance of the solves, in at most 85% of its PCG iterations.
+    """
     out = {}
     for preconditioner in ("diag", "mas"):
         builder = newton.ModelBuilder()

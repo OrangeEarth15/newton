@@ -68,10 +68,13 @@ def _pusher(device, kinematic_motion, d_hat=0.005, steps=12, capture=False, capa
 
 
 def test_kinematic_pusher_is_swept(test, device):
-    """The acceptance of kinematic aims: a kinematic box that moves three times d_hat in every step drives a box across
-    the ground. With kinematic_motion="aim" no edge crosses a triangle in any step, no status bit is set, the box
-    stays ahead of the pusher, a face apart at most, and is carried 10 cm. With the default jump, the negative
-    control, the pusher lands inside the box: a step fails, or edges cross, or the box ends behind it."""
+    """Drive a box across the ground with a kinematic pusher under kinematic_motion="aim" without crossings.
+
+    This is the acceptance test of kinematic aims: a kinematic box that moves three times d_hat in every step drives a
+    box across the ground. With kinematic_motion="aim" no edge crosses a triangle in any step, no status bit is set, the
+    box stays ahead of the pusher, a face apart at most, and is carried 10 cm. With kinematic_motion="jump", the
+    negative control, the pusher lands inside the box: a step fails, or edges cross, or the box ends behind it.
+    """
     xs, crossings, bits, raised, _ = _pusher(device, "aim")
     test.assertIsNone(raised)
     test.assertEqual(sum(crossings), 0)
@@ -90,8 +93,11 @@ def test_kinematic_pusher_is_swept(test, device):
 
 
 def test_kinematic_aims_captured_equal_eager(test, device):
-    """The pusher's steps captured in a graph, its aims written by a kernel inside it from the state_in written before
-    every replay, end where eager steps end, to 1e-6 m (the float32 output)."""
+    """Match eager steps with the pusher's steps captured in a graph, to 1e-6 m.
+
+    The captured steps write the pusher's aims with a kernel inside the graph, from the state_in written before every
+    replay. They end where eager steps end, to 1e-6 m (the float32 output).
+    """
     eager, _, _, _, _ = _pusher(device, "aim", steps=8)
     captured, crossings, bits, raised, _ = _pusher(device, "aim", steps=8, capture=True)
     test.assertIsNone(raised)
@@ -101,9 +107,12 @@ def test_kinematic_aims_captured_equal_eager(test, device):
 
 
 def test_grown_lists_keep_kinematic_aims(test, device):
-    """The pusher's steps with active contact lists of one pair: its first contact overflows them, and the eager step
-    grows them and solves again from the step's start with the step's aims. The pusher and the box go on as in a
-    solver with room, to 1e-5 m, with no crossing and no status bit."""
+    """Keep the pusher's aims when its first contact overflows active contact lists of one pair.
+
+    The pusher's steps run with active contact lists of one pair: its first contact overflows them, and the eager step
+    grows them and solves again from the step's start with the step's aims. The pusher and the box go on as in a solver
+    with room, to 1e-5 m, with no crossing and no status bit.
+    """
     roomy, _, _, _, _ = _pusher(device, "aim", steps=8)
     grown, crossings, bits, raised, solver = _pusher(device, "aim", steps=8, capacity=_TINY_LISTS)
     test.assertIsNone(raised)
@@ -114,10 +123,13 @@ def test_grown_lists_keep_kinematic_aims(test, device):
 
 
 def test_kinematic_aims_under_bdf2(test, device):
-    """With integrator="bdf2" a kinematic body moved by kinematic_motion="aim" along a path that accelerates and
-    turns faster at every step (its pose and twist written into state_in before every step) ends every step on its
-    aim, to 1e-9: the history of a restart that the solver writes for its rows puts BDF2's prediction on the aim, as
-    implicit Euler's is."""
+    """End every BDF2 step of an accelerating, turning kinematic body on its aim, to 1e-9.
+
+    With integrator="bdf2" a kinematic body moved by kinematic_motion="aim" along a path that accelerates and turns
+    faster at every step (its pose and twist written into state_in before every step) ends every step on its aim, to
+    1e-9: the history of a restart that the solver writes for its rows puts BDF2's prediction on the aim, as implicit
+    Euler's is.
+    """
     builder = newton.ModelBuilder()
     body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity()), is_kinematic=True)
     builder.add_shape_box(body, hx=0.1, hy=0.05, hz=0.02)
@@ -166,9 +178,11 @@ def _platform(device, kinematic_motion, steps, speed=0.5, dt=0.01, load_density=
 
 
 def test_kinematic_platform_carries_a_box(test, device):
-    """A platform sliding at 0.5 m/s under a resting box carries it by friction with kinematic_motion="aim": after
-    40 steps the box moves within eps_velocity of the platform's speed. With the jump friction never sees the
-    platform's motion, and the box stays behind (below 0.05 m/s)."""
+    """Carry a resting box by friction on a kinematic platform sliding at 0.5 m/s under kinematic_motion="aim".
+
+    With kinematic_motion="aim", after 40 steps the box moves within eps_velocity of the platform's speed. With the
+    jump, friction never sees the platform's motion, and the box stays behind (below 0.05 m/s).
+    """
     for mode, check in (("aim", lambda v: abs(v - 0.5) < 0.01), ("jump", lambda v: abs(v) < 0.05)):
         _, _, _, box, state = _platform(device, mode, 40)
         v = float(state.body_qd.numpy()[box, 0])
@@ -176,8 +190,11 @@ def test_kinematic_platform_carries_a_box(test, device):
 
 
 def test_kinematic_body_lags_under_load(test, device):
-    """A kinematic platform held still with kinematic_motion="aim" carries a box of weight F: it rests
-    F dt^2 / ((1 + eta) m) below its aim, eta = kinematic_strength_ratio, m its mass, to 5%."""
+    """Rest a loaded kinematic platform below its aim by the sag its soft constraint predicts, to 5%.
+
+    A kinematic platform held still with kinematic_motion="aim" carries a box of weight F. It rests F dt^2 / ((1 + eta)
+    m) below its aim, with eta = kinematic_strength_ratio and m its mass, to 5%.
+    """
     dt = 1.0 / 60.0
     solver, model, platform, box, _ = _platform(device, "aim", 60, speed=0.0, dt=dt, platform_density=100.0)
     m = float(solver._dyadic[0][platform])
@@ -188,8 +205,11 @@ def test_kinematic_body_lags_under_load(test, device):
 
 
 def test_kinematic_root_tracks_its_angle(test, device):
-    """A kinematic link on a revolute joint to the world, driven through eval_fk at 2 rad/s, with
-    kinematic_motion="aim": its pose ends every step at the joint's angle to 1e-5 rad, and joint_q reports it."""
+    """Track the joint angle of a kinematic revolute link driven through eval_fk, to 1e-5 rad.
+
+    A kinematic link on a revolute joint to the world is driven through eval_fk at 2 rad/s, with kinematic_motion="aim".
+    Its pose ends every step at the joint's angle to 1e-5 rad, and joint_q reports it.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     link = builder.add_link(is_kinematic=True)
     builder.add_shape_box(
@@ -214,8 +234,11 @@ def test_kinematic_root_tracks_its_angle(test, device):
 
 
 def test_reset_teleports_a_kinematic_body(test, device):
-    """With kinematic_motion="aim" a kinematic body moved by state_in sweeps its way there and pushes a free box in its
-    path; after reset() that selects its world it takes the new pose without sweeping, and the box stays put."""
+    """Teleport a kinematic body to a new pose after reset() instead of sweeping it through a free box.
+
+    With kinematic_motion="aim" a kinematic body moved by state_in sweeps its way there and pushes a free box in its
+    path. After reset() that selects its world, it takes the new pose without sweeping, and the box stays put.
+    """
 
     def run(reset):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -243,10 +266,13 @@ def test_reset_teleports_a_kinematic_body(test, device):
 
 
 def test_jump_mode_builds_the_engine_of_before(test, device):
-    """kinematic_motion="jump" builds a kinematic body as before: fixed, without a soft transform constraint, with the
-    contact elements of before, its state_out a copy of state_in; "aim", which the default picks for this model,
-    builds it free, with the constraint and the kinematic and static shapes in elements of their own. Invalid options
-    and AL-IPC with an explicit "aim" are refused; AL-IPC with the default takes the jump."""
+    """Build a kinematic body fixed under "jump", and free with a soft transform constraint under "aim".
+
+    kinematic_motion="jump" builds a kinematic body fixed, without a soft transform constraint, with one contact element
+    for the shapes of the model, its state_out a copy of state_in. "aim", which the default picks for this model, builds
+    it free, with the constraint and the kinematic and static shapes in elements of their own. Invalid options and
+    AL-IPC with an explicit "aim" are refused; AL-IPC with the default takes the jump.
+    """
     from newton._src.solvers.ipc.contacts import _contact_elements  # noqa: PLC0415
 
     builder = newton.ModelBuilder()
@@ -336,11 +362,14 @@ def _anchored_pendulum(device, sheet=False):
 
 
 def test_massless_kinematic_bodies_keep_the_jump(test, device):
-    """A kinematic body of mass 0 keeps the jump under kinematic_motion="aim": there is no mass for the soft transform
-    constraint to move, and a soft anchor lets the joints it holds sag. basic_joints' revolute pendulum, whose anchor
-    is a link of density 0: under "aim" the anchor is fixed, as under "jump", and the pendulum swings in its hinge's
-    plane and as it swings under "jump" over 60 steps, to 1e-9 m. A kinematic body of mass 0 whose shapes enclose no
-    volume (a single triangle) is taken too, without a RuntimeWarning: the solver computes no mass from its shapes."""
+    """Keep the jump for kinematic bodies of mass 0 under kinematic_motion="aim".
+
+    There is no mass for the soft transform constraint to move, and a soft anchor lets the joints it holds sag. In
+    basic_joints' revolute pendulum, whose anchor is a link of density 0, the anchor is fixed under "aim" as under
+    "jump", and the pendulum swings in its hinge's plane and as it swings under "jump" over 60 steps, to 1e-9 m. A
+    kinematic body of mass 0 whose shapes enclose no volume (a single triangle) is taken too, without a RuntimeWarning:
+    the solver computes no mass from its shapes.
+    """
     model, bob = _anchored_pendulum(device)
     paths = {}
     for mode in ("jump", "aim"):
@@ -368,11 +397,14 @@ def test_massless_kinematic_bodies_keep_the_jump(test, device):
 
 
 def test_rekinematic_body_drops_its_twist(test, device):
-    """Newton's test_kinematic_runtime_toggle under kinematic_motion="aim": a kinematic sphere, made dynamic and pushed
-    by 10 N for 60 steps of 1/240 s, then made kinematic again (notify_model_changed(BODY_PROPERTIES)). Its state_in
-    still holds the twist it gained as a dynamic body, which the solver wrote; the body does not take it, and stays
-    where it is over the next 60 steps, to 1e-6 m (it moved on at that twist, 0.12 m). A caller who writes another
-    twist at the second toggle moves the body at it from the first step on."""
+    """Drop the twist a body gained while dynamic when it is made kinematic again under kinematic_motion="aim".
+
+    This is Newton's test_kinematic_runtime_toggle under kinematic_motion="aim": a kinematic sphere is made dynamic and
+    pushed by 10 N for 60 steps of 1/240 s, then made kinematic again (notify_model_changed(BODY_PROPERTIES)). Its
+    state_in still holds the twist it gained as a dynamic body, which the solver wrote; the body does not take it, and
+    stays where it is over the next 60 steps, to 1e-6 m (it moved on at that twist, 0.12 m). A caller who writes another
+    twist at the second toggle moves the body at it from the first step on.
+    """
 
     def run(prescribed):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -416,9 +448,12 @@ def test_rekinematic_body_drops_its_twist(test, device):
 
 
 def test_al_ipc_takes_aims_without_aiming_bodies(test, device):
-    """contact_constitution="al-ipc" refuses kinematic_motion="aim" only for a model with a body that would move toward
-    its aims: two boxes dropped onto the ground, without a kinematic body, step under "aim" as under "jump" (to 1e-9 m
-    over 30 steps); a kinematic box of mass 1 kg with a collision shape is refused, naming it."""
+    """Accept kinematic_motion="aim" under AL-IPC unless a body would move toward its aims.
+
+    Under contact_constitution="al-ipc", two boxes dropped onto the ground, without a kinematic body, step under "aim"
+    as under "jump" (to 1e-9 m over 30 steps). A kinematic box of mass 1 kg with a collision shape would move toward its
+    aims and is refused, naming it.
+    """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
     _box_body(builder, (0.0, 0.0, 0.06), (0.05, 0.05, 0.05))
@@ -484,11 +519,14 @@ def _lift(device, mode, steps=90, capture=False):
 
 
 def test_jump_through_a_surface_fails_the_step(test, device):
-    """R10-1: a kinematic body's jump is swept at the step's start. In R10's lift, where the platform's jumps of
-    4.2 mm outrun the barrier and, unswept, took the box through the platform at the eighth jump with no status bit,
-    the step whose jump meets the box fails with INVALID_CCD_STEP, named as the kinematic sweep: an eager step raises,
-    a captured one sets the bit and check_status raises; no step before it ends with the box inside the platform. With
-    kinematic_motion="aim" the platform's motion is part of the step, and the box rides on it through every step."""
+    """Fail the step whose swept kinematic jump meets a box with INVALID_CCD_STEP.
+
+    R10-1: a kinematic body's jump is swept at the step's start. In R10's lift the platform's jumps of 4.2 mm outrun the
+    barrier and, unswept, took the box through the platform at the eighth jump with no status bit. The step whose jump
+    meets the box fails with INVALID_CCD_STEP, named as the kinematic sweep: an eager step raises, a captured one sets
+    the bit and check_status raises; no step before it ends with the box inside the platform. With
+    kinematic_motion="aim" the platform's motion is part of the step, and the box rides on it through every step.
+    """
     for capture in (False, True):
         with test.subTest(capture=capture):
             gaps, raised = _lift(device, "jump", capture=capture)
@@ -504,8 +542,11 @@ def test_jump_through_a_surface_fails_the_step(test, device):
 
 
 def test_import_requires_the_kinematic_sweep(test, device):
-    """The sweep of the jumps is libuipc-warp's (``EngineOptions(sweep_kinematic=)``), a capability that a development
-    build of the release SolverIPC asks for may lack: the import refuses a build without it, naming it."""
+    """Refuse to import a libuipc-warp build without ``EngineOptions(sweep_kinematic=)``, naming it.
+
+    The sweep of the jumps is libuipc-warp's (``EngineOptions(sweep_kinematic=)``), a capability that a development
+    build of the release SolverIPC asks for may lack.
+    """
     import uipc_warp  # noqa: PLC0415
 
     imported = newton.solvers.SolverIPC._uipc_warp
@@ -520,10 +561,13 @@ def test_import_requires_the_kinematic_sweep(test, device):
 
 
 def test_model_without_contact_asks_for_no_sweep(test, device):
-    """The barrier's sweep of kinematic moves needs a contact surface to sweep against, and SolverIPC asks libuipc-warp
-    for it only where the engine has one: a hinged box whose shape collides with nothing builds and steps without a
-    warning, where libuipc-warp warned that the option had no effect; the same box whose shape collides builds and steps
-    without one too, with the sweep that test_jump_through_a_surface_fails_the_step holds to its work."""
+    """Ask libuipc-warp for the kinematic sweep only where the engine has a contact surface.
+
+    The barrier's sweep of kinematic moves needs a contact surface to sweep against. A hinged box whose shape collides
+    with nothing builds and steps without a warning, where libuipc-warp warned that the option had no effect; the same
+    box whose shape collides builds and steps without one too, with the sweep that
+    test_jump_through_a_surface_fails_the_step holds to its work.
+    """
     for collide in (False, True):
         builder = newton.ModelBuilder()
         cfg = newton.ModelBuilder.ShapeConfig(has_shape_collision=collide, has_particle_collision=collide)
@@ -542,10 +586,13 @@ def test_model_without_contact_asks_for_no_sweep(test, device):
 
 
 def test_refused_first_step_takes_state_in_again(test, device):
-    """With kinematic_motion="aim" a first step that the start check refuses, its state_in putting a kinematic box
-    through a body, leaves the next step the first: the step again from the model's state, where the box is clear,
-    takes the box's pose from its state_in and runs. The refused step held the box at the pose it had loaded, and the
-    step again failed on it."""
+    """Take a kinematic box's pose from state_in again after the start check refuses the first step.
+
+    With kinematic_motion="aim" a first step that the start check refuses, its state_in putting a kinematic box through
+    a body, leaves the next step the first: the step again from the model's state, where the box is clear, takes the
+    box's pose from its state_in and runs. The refused step held the box at the pose it had loaded, and the step again
+    failed on it.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     _box_body(builder, (0.0, 0.0, 1.0), (0.1, 0.1, 0.1))
     pusher = builder.add_body(xform=wp.transform(wp.vec3(1.0, 0.0, 1.0), wp.quat_identity()), is_kinematic=True)
@@ -566,11 +613,14 @@ def test_refused_first_step_takes_state_in_again(test, device):
 
 
 def test_aims_pass_the_twist_through(test, device):
-    """With kinematic_motion="aim" state_out holds the pose a kinematic box reached and the twist of state_in, as
-    Newton's solvers pass a kinematic body's twist through. A caller who writes only body_q, 2 mm further at every
-    step, gets the box at that pose (to 1e-6 m) with the twist 0 it never wrote; one who writes a twist of 0.2 m/s
-    once gets motion at that twist. The box's twist in state_out was the one it reached (0.2 m/s), which the next
-    step took as the caller's: the poses written alone ran a step ahead and swung about their path."""
+    """Pass the twist of state_in through to state_out for a kinematic body under kinematic_motion="aim".
+
+    state_out holds the pose a kinematic box reached and the twist of state_in, as Newton's solvers pass a kinematic
+    body's twist through. A caller who writes only body_q, 2 mm further at every step, gets the box at that pose (to
+    1e-6 m) with the twist 0 it never wrote; one who writes a twist of 0.2 m/s once gets motion at that twist. The box's
+    twist in state_out was the one it reached (0.2 m/s), which the next step took as the caller's: the poses written
+    alone ran a step ahead and swung about their path.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     box = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()), is_kinematic=True)
     builder.add_shape_box(box, hx=0.05, hy=0.05, hz=0.05)
@@ -639,12 +689,15 @@ def _fallback_models(device):
 
 
 def test_default_picks_the_mode_per_solver(test, device):
-    """kinematic_motion=None picks "aim" on the barrier pipeline when every kinematic body that would aim can, and
-    "jump" otherwise: under AL-IPC, for such a body of the global world with independent worlds, and for one with a
-    singular inertia. The fallback warns of nothing and logs its choice at the debug level; solver.kinematic_motion
-    gives the mode (read-only). An explicit "aim" is refused in each fallback case; an explicit "jump" stays the jump,
-    and so does a model that would aim. A kinematic_strength_ratio other than the default is refused where the
-    default takes the jump."""
+    """Pick "aim" by default where every kinematic body that would aim can, and "jump" otherwise.
+
+    kinematic_motion=None picks "aim" on the barrier pipeline when every kinematic body that would aim can. It takes
+    "jump" under AL-IPC, for such a body of the global world with independent worlds, and for one with a singular
+    inertia. The fallback warns of nothing and logs its choice at the debug level; solver.kinematic_motion gives the
+    mode (read-only). An explicit "aim" is refused in each fallback case; an explicit "jump" stays the jump, and so does
+    a model that would aim. A kinematic_strength_ratio other than the default is refused where the default takes the
+    jump.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
     _box_body(builder, (0.0, 0.0, 0.0), (0.05, 0.05, 0.05))
     kinematic = _kinematic_box(builder, (0.5, 0.0, 0.0))

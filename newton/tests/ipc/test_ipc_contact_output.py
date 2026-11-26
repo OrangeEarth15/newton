@@ -63,10 +63,13 @@ def _contact_steps(model, solver, contacts, observables, steps, dt, capture=Fals
 
 
 def test_contact_output_stacking_reports_weights(test, device):
-    """Newton's stacking test with SolverIPC as a native contact backend, its steps captured: after 2 s at 1/240 s
-    SensorContact, reading the rows the steps write, reports each box's weight within 1% (a: 45 kg, b: 4 kg, as the
-    base holds a and b, and a holds b), the force-weighted contact positions sit at the interfaces within 5 cm (IPC
-    rests up to d_hat apart: a on the base at z = 0.25, b on a at z = 0.75), and b never touches the base."""
+    """Report each stacked box's weight through SensorContact from the rows of captured steps.
+
+    This is Newton's stacking test with SolverIPC as a native contact backend, its steps captured: after 2 s at 1/240 s
+    SensorContact, reading the rows the steps write, reports each box's weight within 1% (a: 45 kg, b: 4 kg, as the base
+    holds a and b, and a holds b), the force-weighted contact positions sit at the interfaces within 5 cm (IPC rests up
+    to d_hat apart: a on the base at z = 0.25, b on a at z = 0.75), and b never touches the base.
+    """
     from newton.sensors import SensorContact  # noqa: PLC0415
 
     model = _stacking(device)
@@ -107,9 +110,11 @@ def test_contact_output_stacking_reports_weights(test, device):
 
 
 def test_contact_output_friction_at_rest(test, device):
-    """Newton's stacking-friction test: a 4.5 kg box at rest on the base reports its weight within 2% and a friction
-    force within 2% of it, its barrier rows pushing along their normals and its friction rows holding no more than
-    the slip of a body at rest asks."""
+    """Report the weight of a box at rest on the base, and no friction force to within 2% of it.
+
+    This is Newton's stacking-friction test with a 4.5 kg box. Its weight is reported within 2%; its barrier rows push
+    along their normals, and its friction rows hold no more than the slip of a body at rest asks.
+    """
     from newton.sensors import SensorContact  # noqa: PLC0415
 
     model = _stacking(device, density=100.0, upper=False)
@@ -132,11 +137,14 @@ def test_contact_output_friction_at_rest(test, device):
 
 
 def test_contact_output_soft_rows(test, device):
-    """A cloth draped over a static box and a free particle on the ground: the soft rows' forces on the shapes add up
-    to the cloth's and the particle's weights within 1%; every row names a shape, its record is a particle, an edge or
-    a face of the cloth (all three occur) with weights that add up to 1, its point lies on the shape's surface, its
-    normal points from that point toward the record's point, and its torque is that of its force at its point about
-    the world origin (static shapes); contact of the cloth with itself gives no row, and there are no rigid rows."""
+    """Write soft rows for a draped cloth and a resting particle that balance their weights.
+
+    A cloth is draped over a static box and a free particle rests on the ground. The soft rows' forces on the shapes add
+    up to the cloth's and the particle's weights within 1%; every row names a shape, its record is a particle, an edge
+    or a face of the cloth (all three occur) with weights that add up to 1, its point lies on the shape's surface, its
+    normal points from that point toward the record's point, and its torque is that of its force at its point about the
+    world origin (static shapes). Contact of the cloth with itself gives no row, and there are no rigid rows.
+    """
     builder = newton.ModelBuilder()
     _cloth(builder, 12, 0.02, 0.2050, mass=1.0e-3, tri_k=1.0e3, edge_ke=1.0e-3)  # 2 cm wider than the box each way
     builder.add_shape_box(-1, xform=wp.transform(wp.vec3(0.0, 0.0, 0.1), wp.quat_identity()), hx=0.1, hy=0.1, hz=0.1)
@@ -190,12 +198,15 @@ def test_contact_output_soft_rows(test, device):
 
 
 def test_contact_output_rigid_rows_balance_a_body(test, device):
-    """A box held on a static ramp by friction, its steps converged tightly (at the default newton_velocity_tol the
-    box creeps down at 1.2 mm/s, and its forces balance only to that tolerance, 0.12 N of its 9.81 N): its rows'
-    forces add up to its weight and their torques about its centre of mass to zero, each row holding the force on its
-    shape 0 with its torque about that body's centre of mass at the end of the step (the world origin for the static
-    ramp); the points lie on the box's bottom face in its frame of state_out; the margins are the shapes'
-    shape_margin, the offsets the normal times them, and every normal is the ramp's."""
+    """Balance a box held on a ramp by friction with the forces and torques of its rigid rows.
+
+    The box's steps are converged tightly (at the default newton_velocity_tol the box creeps down at 1.2 mm/s, and its
+    forces balance only to that tolerance, 0.12 N of its 9.81 N). Its rows' forces add up to its weight and their
+    torques about its centre of mass to zero, each row holding the force on its shape 0 with its torque about that
+    body's centre of mass at the end of the step (the world origin for the static ramp). The points lie on the box's
+    bottom face in its frame of state_out; the margins are the shapes' shape_margin, the offsets the normal times them,
+    and every normal is the ramp's.
+    """
     builder = newton.ModelBuilder()
     angle = 0.2
     rot = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), angle)
@@ -241,8 +252,11 @@ def test_contact_output_rigid_rows_balance_a_body(test, device):
 
 
 def test_contact_output_only_enabled_pairs(test, device):
-    """Rows only between pairs that collide: a box made a filter pair with the box under it falls through it to the
-    ground, and no row joins the two; the other pairs give rows."""
+    """Write rows only between pairs that collide.
+
+    A box made a filter pair with the box under it falls through it to the ground, and no row joins the two; the other
+    pairs give rows.
+    """
     builder = newton.ModelBuilder()
     ground = builder.add_ground_plane()
     lower = builder.shape_count
@@ -266,8 +280,10 @@ def test_contact_output_only_enabled_pairs(test, device):
 
 
 def test_contact_output_capacity(test, device):
-    """A Contacts smaller than the solver's worst case is taken: the counts are the true numbers, the rows past the
-    capacity are dropped and the rows within it hold the same terms the full buffer's rows do."""
+    """Take a Contacts smaller than the solver's worst case and drop the rows past its capacity.
+
+    The counts stay the true numbers, and the rows within the capacity hold the same terms the full buffer's rows do.
+    """
     model = _stacking(device, upper=False, lower_z=0.502)
     solver = newton.solvers.SolverIPC(model)
     full = _native_contacts(solver, model)
@@ -290,8 +306,11 @@ def test_contact_output_capacity(test, device):
 
 
 def test_contact_output_not_requested(test, device):
-    """Without CONTACT_F nothing of the output exists or runs: no records are allocated, a step launches none of its
-    kernels, and the Contacts passed to step is not touched; requesting it allocates the records once."""
+    """Allocate and run nothing of the contact output without CONTACT_F.
+
+    No records are allocated, a step launches none of the output's kernels, and the Contacts passed to step is not
+    touched; requesting CONTACT_F allocates the records once.
+    """
     model = _stacking(device, upper=False, lower_z=0.502)
     solver = newton.solvers.SolverIPC(model)
     contacts = newton.Contacts(16, 4, device=device)
@@ -326,8 +345,11 @@ def test_contact_output_not_requested(test, device):
 
 
 def test_contact_output_captured_equals_eager(test, device):
-    """Captured steps write the rows eager steps write: the same pairs with the same forces summed per pair, to the
-    rounding of the solve, over 40 steps of the stacking scene."""
+    """Write the same rows in captured steps as in eager steps.
+
+    Over 120 steps of 1/60 s of the stacking scene, the captured steps write the same pairs with the same forces summed
+    per pair, to the rounding of the solve.
+    """
 
     def run(capture):
         model = _stacking(device)
@@ -349,8 +371,11 @@ def test_contact_output_captured_equals_eager(test, device):
 
 
 def test_contact_output_failed_step_has_no_rows(test, device):
-    """A step that fails writes no rows: an eager step from a state through the ground raises and leaves zero counts
-    and forces; the next step from a valid state writes rows again."""
+    """Write no rows in a step that fails, and rows again in the next valid step.
+
+    An eager step from a state through the ground raises and leaves zero counts and forces; the next step from a valid
+    state writes rows again.
+    """
     model, touching = _boxes_apart(device)
     solver = newton.solvers.SolverIPC(model)
     contacts = _native_contacts(solver, model)
@@ -369,8 +394,12 @@ def test_contact_output_failed_step_has_no_rows(test, device):
 
 
 def test_contact_output_after_grow(test, device):
-    """Contact lists that overflow a captured step and grow with grow(): the export follows the grown solve, whose
-    get_max_contact_count() is larger, and the steps captured again write their rows."""
+    """Follow the grown solve in the contact output after contact lists overflow a captured step.
+
+    The contact lists overflow a captured step and grow with grow(). The export follows the grown solve, whose
+    get_max_soft_contact_count() is larger and equals the export's capacity, and the steps captured again write the
+    cubes' rows on the ground.
+    """
     model = _stacking_cubes(device)
     solver = newton.solvers.SolverIPC(model)
     solver._make_engine(_TINY_LISTS)
@@ -404,8 +433,11 @@ def test_contact_output_after_grow(test, device):
 
 
 def test_contact_output_refusals(test, device):
-    """CONTACT_F is not offered with AL-IPC; a model with fewer than two colliding shapes has no rigid rows and one
-    without particles no soft rows."""
+    """Refuse CONTACT_F under AL-IPC, and give no rows of a kind the model cannot have.
+
+    CONTACT_F is not offered with AL-IPC; a model with fewer than two colliding shapes has no rigid rows and one without
+    particles no soft rows.
+    """
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
     _box_body(builder, (0.0, 0.0, 0.06), (0.05, 0.05, 0.05))
@@ -426,9 +458,12 @@ def test_contact_output_refusals(test, device):
 
 
 def test_contact_output_coupled_worlds(test, device):
-    """With coupled_worlds the rows of every world share the buffer: in four copies of a world of a box on a global
-    ground, SensorContact reports every world's box at its weight within 1%. The worlds are one solve, so a step that
-    fails in one world (its box written through the ground) fails in every world and writes no row of any."""
+    """Write the rows of every coupled world into one buffer, and none when any world's step fails.
+
+    With coupled_worlds, in four copies of a world of a box on a global ground, SensorContact reports every world's box
+    at its weight within 1%. The worlds are one solve, so a step that fails in one world (its box written through the
+    ground) fails in every world and writes no row of any.
+    """
     from newton.sensors import SensorContact  # noqa: PLC0415
 
     def content():
@@ -464,10 +499,13 @@ def test_contact_output_coupled_worlds(test, device):
 
 
 def test_contact_output_independent_worlds(test, device):
-    """With independent worlds the rows of every world share the buffer: four worlds of a box resting on the global
-    ground report every world's box at its weight within 1% through SensorContact, and every world's shapes have rows.
-    A step in which world 0's box is written 1 cm through the ground fails in world 0 alone and writes no row of world
-    0 (the other worlds' rows: ``test_contact_output_when_a_world_fails``)."""
+    """Write the rows of every independent world into one buffer, and none of a world that fails.
+
+    Four worlds of a box resting on the global ground report every world's box at its weight within 1% through
+    SensorContact, and every world's shapes have rows. A step in which world 0's box is written 1 cm through the ground
+    fails in world 0 alone and writes no row of world 0 (the other worlds' rows:
+    ``test_contact_output_when_a_world_fails``).
+    """
     from newton.sensors import SensorContact  # noqa: PLC0415
 
     def content():
@@ -510,11 +548,14 @@ def test_contact_output_independent_worlds(test, device):
 
 
 def test_contact_output_when_a_world_fails(test, device):
-    """Four independent worlds of a box resting on the global ground, two solvers in lockstep, one of them clean. A
-    step in which world 0's box is written 1 cm through the ground fails in world 0 alone and writes the rows of worlds
-    1 to 3 as the clean solver's same step writes them (libuipc-warp's records give the terms of a world that failed
-    no force): the same shape pairs, their points within 1e-6 m and their forces and torques within 1e-4, each of those
-    boxes reporting its weight within 1% through SensorContact, and no row of world 0, whose box reports no force."""
+    """Write the other worlds' rows as a clean solver does when one independent world fails.
+
+    Four independent worlds of a box rest on the global ground, with two solvers in lockstep, one of them clean. A step
+    in which world 0's box is written 1 cm through the ground fails in world 0 alone and writes the rows of worlds 1 to
+    3 as the clean solver's same step writes them (libuipc-warp's records give the terms of a world that failed no
+    force): the same shape pairs, their points within 1e-6 m and their forces and torques within 1e-4, each of those
+    boxes reporting its weight within 1% through SensorContact, and no row of world 0, whose box reports no force.
+    """
     from newton.sensors import SensorContact  # noqa: PLC0415
 
     def content():
