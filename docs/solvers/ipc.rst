@@ -10,11 +10,10 @@ IPC
 rigid bodies with Incremental Potential Contact (IPC): each step is an implicit
 time step in which a barrier energy keeps surfaces apart, so that no surface
 passes through another. The solver runs on
-`libuipc-warp <https://gitlab-master.nvidia.com/sarawang/libuipc-warp>`_, a Warp
+`libuipc-warp <https://github.com/OrangeEarth15/libuipc-warp>`_, a Warp
 implementation of the libuipc simulator, through its array interface; no libuipc
-build is needed. libuipc-warp is NVIDIA-internal: its repository is on NVIDIA's
-GitLab, its GitHub mirror is private, and installing it needs access to the
-GitLab repository (:ref:`ipc-stepping`).
+build is needed. libuipc-warp is not publicly released yet: its GitHub
+repository is private, and access is given on request (:ref:`ipc-stepping`).
 
 .. experimental::
 
@@ -63,17 +62,16 @@ Construction and stepping
 -------------------------
 
 SolverIPC runs on the optional ``libuipc-warp`` package, 0.5.0 or later.
-libuipc-warp is NVIDIA-internal and has no package on PyPI: install it from its
-GitLab repository, to which you need access, into the environment of Newton:
+libuipc-warp has no package on PyPI: install it from its GitHub repository into
+the environment of Newton. The repository is private until libuipc-warp is
+released, and access is given on request.
 
 .. code-block:: console
 
-   git clone ssh://git@gitlab-master.nvidia.com:12051/sarawang/libuipc-warp.git
-   pip install -e ./libuipc-warp
+   pip install git+https://github.com/OrangeEarth15/libuipc-warp
 
-Over HTTPS (``https://gitlab-master.nvidia.com/sarawang/libuipc-warp.git``) the
-clone needs a GitLab access token. Its README gives the requirements: Linux, an
-NVIDIA driver that supports CUDA 12.4 or newer, and Python 3.11 to 3.13.
+Its README gives the requirements: Linux, an NVIDIA driver that supports CUDA
+12.4 or newer, and Python 3.11 to 3.13.
 
 Building the first solver imports libuipc-warp, and raises
 :class:`ImportError` when it is missing, older, or lacks one of the calls the
@@ -312,7 +310,7 @@ The status is a mask of :class:`~newton.solvers.SolverIPC.StatusBits`. A bit of
   ``1 << 4``, as libuipc-warp's ``FrameStatusFlags.INVALID_TOI``, which the
   engine names after the time of impact (TOI) that CCD computes; libuipc-warp's
   `array interface guide
-  <https://gitlab-master.nvidia.com/sarawang/libuipc-warp/-/blob/main/docs/array-api.md#how-a-frame-ended>`__
+  <https://github.com/OrangeEarth15/libuipc-warp/blob/main/docs/array-api.md#how-a-frame-ended>`__
   describes that flag.
 - ``TRAVERSAL_EXHAUSTED``: a search of the collision tree ran out of its node
   budget, so contact candidates are missing.
@@ -770,7 +768,7 @@ into a range it computes from the scene, here called libuipc's stiffness range,
 :math:`\kappa_{lo} = c\,\bar m / \Delta t^2`, where :math:`\bar m` is the mean
 mass of the vertices and :math:`c` a factor of the scene's diagonal and
 ``d_hat`` (libuipc-warp's
-`options guide <https://gitlab-master.nvidia.com/sarawang/libuipc-warp/-/blob/main/docs/options.md#contact-stiffness>`__
+`options guide <https://github.com/OrangeEarth15/libuipc-warp/blob/main/docs/options.md#contact-stiffness>`__
 gives the formula). A scene that sets no contact model takes
 :math:`\kappa_{lo}`, and a stiffness the user gives is clamped into the range.
 ``adaptive_kappa=True`` means "use libuipc's stiffness range": the solver then
