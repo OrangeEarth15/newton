@@ -37,9 +37,7 @@ from .joint_terms import _DEFAULT_SOLREF, _LIMIT_OVERSHOOT, _SOLREF_FORCE_SPACE
 
 if TYPE_CHECKING:
     from newton import Control, Model, State
-    from newton.solvers import SolverBase
 
-    from ..joints import _JointDofs
     from ..solver_ipc import SolverIPC
     from . import FeatureOptions
 
@@ -190,15 +188,10 @@ def check(model: Model, options: FeatureOptions, at: str) -> None:
                     )
 
 
-def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
-    """Nothing: the tendons refuse no joint's degrees of freedom."""
-    return None
-
-
 # ================================================================================================ the solve's tendons
 @dataclass
 class _Plan:
-    """The spatial tendons of a solve (``solver._spatial_tendons``, None for a model without any).
+    """The spatial tendons of a solve (``solver._features.tendons.plan``, None for a model without any).
 
     ``rows``: the tendons' rows of ``model.mujoco.tendon_*``; ``paths``: their paths as ``SpatialTendons`` takes them;
     ``values``: the coefficients they are made with; ``measured``: per tendon, whether its spring length is its length at
@@ -386,17 +379,31 @@ def _signature(model: Model) -> tuple:
     )
 
 
+@dataclass
+class _State:
+    """What the module keeps of a solve (``solver._features.tendons``): the plan of its spatial tendons (None for a
+    model without any) and what their paths were made of (``_signature``)."""
+
+    plan: _Plan | None
+    signature: tuple
+
+
+def _plan(solver: SolverIPC) -> _Plan | None:
+    """The plan of the solve's spatial tendons, None for a solve without any or not built."""
+    state = solver._features.tendons
+    return None if state is None else state.plan
+
+
 def build(solver: SolverIPC, scene) -> None:
     """The plan of the model's spatial tendons (``_Plan``) when the solve is built."""
-    solver._spatial_tendons = _make_plan(solver)
-    solver._spatial_tendons_signature = _signature(solver.model)
+    solver._features.tendons = _State(_make_plan(solver), _signature(solver.model))
 
 
 def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
     """The plan's ``SpatialTendons`` for an engine made from the scene, appended to ``inputs``' element groups; the
     first time, what the model's pose (the scene's positions) gives them (``_measure``); for an engine made again (an
     eager step's or ``grow()``'s longer lists), the step's limit strength the old one held."""
-    plan = solver._spatial_tendons
+    plan = _plan(solver)
     if plan is None:
         return
     from uipc_warp.ext.tendons import SpatialTendons  # noqa: PLC0415 (libuipc-warp is imported lazily)
@@ -434,16 +441,12 @@ def _write_limits(
 
 def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> None:
     """The step's limit strengths (``_write_limits``), on the device."""
-    plan = solver._spatial_tendons
+    plan = _plan(solver)
     if plan is None:
         return
     t = plan.tendons
     wp.launch(_write_limits, len(plan.rows), inputs=[plan.limit_ke, t.limit_lower, t.limit_upper, wp.float64(dt)],
               outputs=[t.limit_strength], device=solver.model.device)  # fmt: skip
-
-
-def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observables | None) -> None:
-    """Nothing."""
 
 
 def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
@@ -453,14 +456,15 @@ def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
     watched = ModelFlags.TENDON_PROPERTIES | ModelFlags.SHAPE_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES
     if not flags & watched:
         return False
-    if solver._spatial_tendons_signature != _signature(solver.model):
+    state = solver._features.tendons
+    if state.signature != _signature(solver.model):
         return True
-    plan = solver._spatial_tendons
+    plan = state.plan
     if plan is None or plan.tendons is None:
         return False
     now = _make_plan(solver)
     now.tendons, now.x0, now.limit_ke = plan.tendons, plan.x0, plan.limit_ke  # the arrays captured steps read
     _measure(solver, now)
     _assign(now)
-    solver._spatial_tendons = now
+    state.plan = now
     return False

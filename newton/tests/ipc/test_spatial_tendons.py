@@ -24,7 +24,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.ipc.features import joint_terms
+from newton._src.solvers.ipc import solver_ipc
 from newton.solvers import mujoco
 from newton.tests.ipc._fixtures import _TINY_LISTS
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, requires
@@ -186,7 +186,7 @@ def test_coefficients(test, device):
                   "limited": "true", "range": "0.5 1.5", "solreflimit": "0.05 0.8", "solimplimit": "0.9 0.95 0.001"}  # fmt: skip
     model = _model(device, _ARM, **attributes)
     solver = newton.solvers.SolverIPC(model)
-    plan = solver._spatial_tendons
+    plan = solver._features.tendons.plan
     tendons = plan.tendons
     for name, array, value in (
         ("spring", tendons.spring, 3.0), ("spring_lower", tendons.spring_lower, 0.8),
@@ -209,14 +209,14 @@ def test_coefficients(test, device):
     )
     # without the limit's damping; in force space; the spring length -1: the length at the model's pose, 1 m
     solver = newton.solvers.SolverIPC(model, enable_joint_limit_damping=False)
-    test.assertEqual(float(solver._spatial_tendons.tendons.limit_damping.numpy()[0]), 0.0)
+    test.assertEqual(float(solver._features.tendons.plan.tendons.limit_damping.numpy()[0]), 0.0)
     model = _model(device, _ARM, stiffness=3.0, springlength=-1, limited="true", range="0.5 1.5")
     model.mujoco.tendon_solref_limit_mode.fill_(0)  # force space
     model.mujoco.tendon_limit_ke.fill_(250.0)
     model.mujoco.tendon_limit_kd.fill_(4.0)
     solver = newton.solvers.SolverIPC(model)
-    tendons = solver._spatial_tendons.tendons
-    test.assertAlmostEqual(float(solver._spatial_tendons.limit_ke.numpy()[0]), 250.0, delta=1e-12)
+    tendons = solver._features.tendons.plan.tendons
+    test.assertAlmostEqual(float(solver._features.tendons.plan.limit_ke.numpy()[0]), 250.0, delta=1e-12)
     test.assertAlmostEqual(float(tendons.limit_damping.numpy()[0]), 4.0, delta=1e-12)
     test.assertAlmostEqual(float(tendons.spring_lower.numpy()[0]), 1.0, delta=1e-12)
     test.assertAlmostEqual(float(tendons.spring_upper.numpy()[0]), 1.0, delta=1e-12)
@@ -227,20 +227,20 @@ def test_notify(test, device):
     new masses give (``BODY_INERTIAL_PROPERTIES``); a site moved (``SHAPE_PROPERTIES``) builds the solve again."""
     model = _model(device, _ARM, stiffness=3.0, limited="true", range="0.5 1.5")
     solver = newton.solvers.SolverIPC(model)
-    tendons, engine = solver._spatial_tendons.tendons, solver._engine
-    ke = float(solver._spatial_tendons.limit_ke.numpy()[0])
+    tendons, engine = solver._features.tendons.plan.tendons, solver._engine
+    ke = float(solver._features.tendons.plan.limit_ke.numpy()[0])
     model.mujoco.tendon_stiffness.fill_(7.0)
     model.mujoco.tendon_damping.fill_(0.25)
     solver.notify_model_changed(newton.ModelFlags.TENDON_PROPERTIES)
     test.assertIs(solver._engine, engine)
-    test.assertIs(solver._spatial_tendons.tendons, tendons)
+    test.assertIs(solver._features.tendons.plan.tendons, tendons)
     test.assertEqual(float(tendons.spring.numpy()[0]), 7.0)
     test.assertEqual(float(tendons.damping.numpy()[0]), 0.25)
     model.body_mass.assign(2.0 * model.body_mass.numpy())
     model.body_inertia.assign(2.0 * model.body_inertia.numpy())
     solver.notify_model_changed(newton.ModelFlags.BODY_INERTIAL_PROPERTIES)
     test.assertIs(solver._engine, engine)
-    test.assertAlmostEqual(float(solver._spatial_tendons.limit_ke.numpy()[0]) / ke, 2.0, delta=1e-5)
+    test.assertAlmostEqual(float(solver._features.tendons.plan.limit_ke.numpy()[0]) / ke, 2.0, delta=1e-5)
     xform = model.shape_transform.numpy()
     sites = np.flatnonzero(model.shape_flags.numpy() & int(newton.ShapeFlags.SITE))
     xform[sites[-1], 0] += 0.01
@@ -264,7 +264,7 @@ def test_friction_lowers_the_tolerances(test, device):
     """A spatial tendon's friction loss gives the model the Newton tolerances of a model with joint friction, 0.4
     ``eps_velocity``, where they are left at their default."""
     solver = newton.solvers.SolverIPC(_model(device, _ARM, stiffness=3.0, frictionloss=0.5))
-    bound = joint_terms._FRICTION_TOLERANCE * solver._config.eps_velocity
+    bound = solver_ipc._FRICTION_TOLERANCE * solver._config.eps_velocity
     test.assertEqual(solver._config.newton_velocity_tol, bound)
     test.assertEqual(solver._config.newton_transrate_tol, bound)
 
@@ -278,7 +278,7 @@ def test_a_tendon_of_the_world_alone(test, device):
     b = builder.add_site(-1, xform=wp.transform((0.5, 0.0, 1.0), wp.quat_identity()))
     mujoco.add_tendon_spatial(builder, [mujoco.TendonWrapSite(s) for s in (a, b)], stiffness=10.0)
     solver = newton.solvers.SolverIPC(builder.finalize(device=device))
-    test.assertIsNone(solver._spatial_tendons)
+    test.assertIsNone(solver._features.tendons.plan)
 
 
 def test_grown_lists_keep_the_limit(test, device):

@@ -24,6 +24,7 @@ are those of ``features`` (its docstring).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -36,11 +37,9 @@ from ..scene import _quat_to_matrix_np
 
 if TYPE_CHECKING:
     from newton import Control, Model, State
-    from newton.solvers import SolverBase
 
     from ..joints import _JointDofs
     from ..solver_ipc import SolverIPC
-    from . import FeatureOptions
 
 # the model's per-DOF arrays of a ball joint whose value other than 0 gives it a term
 _TERMS = ("joint_target_ke", "joint_target_kd", "joint_stiffness", "joint_damping", "joint_armature", "joint_friction")
@@ -48,10 +47,6 @@ _D6 = (
     "SolverIPC takes the drives, springs, damping, armature and friction of a BALL joint, on the rotation vector of its "
     "rotation, and those of no D6 joint of three angular axes, whose coordinates are angles about its axes"
 )
-
-
-def check(model: Model, options: FeatureOptions, at: str) -> None:
-    """Nothing: the joints' degrees of freedom are checked through ``joint_refusal``."""
 
 
 def _lowest(*refusals: tuple[int, str] | None) -> tuple[int, str] | None:
@@ -167,12 +162,25 @@ def _with_terms(model: Model) -> np.ndarray:
     return np.array([j for j in balls if term[start[j] : start[j] + 3].any()], np.int32)
 
 
+@dataclass
+class _State:
+    """The ball joints with terms of a solve (``solver._features.ball``): the joints (``joints``, also on the device as
+    ``rows``), their bodies as the spherical joints laid them out, their joint frames' rotations in the bodies' frames
+    (parent's, child's), and the ``BallTerms`` of the last engine made from the scene (``terms``)."""
+
+    joints: np.ndarray
+    rows: wp.array
+    bodies: np.ndarray
+    frames: tuple
+    terms: object = None
+
+
 def build(solver: SolverIPC, scene) -> None:
-    """The ball joints with terms (``_with_terms``): their bodies, as the spherical joints laid them out, and their joint
-    frames in the bodies' frames."""
+    """The ball joints with terms (``_with_terms``, ``_State``; None without one): their bodies, as the spherical joints
+    laid them out, and their joint frames in the bodies' frames."""
     model = solver.model
-    solver._ball_terms = None  # the group of the last engine made from the scene
-    solver._ball_joints = joints = _with_terms(model)
+    solver._features.ball = None
+    joints = _with_terms(model)
     if not len(joints):
         return
     try:
@@ -183,26 +191,29 @@ def build(solver: SolverIPC, scene) -> None:
             "terms (uipc_warp.ext.ball); install a libuipc-warp that has them, or set those of every ball joint to 0."
         ) from e
     element = solver._joint_element.numpy()[joints]
-    solver._ball_bodies = solver._joint_bodies["spherical"][element]
     X_p, X_c = model.joint_X_p.numpy().astype(np.float64), model.joint_X_c.numpy().astype(np.float64)
-    solver._ball_frames = tuple(np.array([_quat_to_matrix_np(q) for q in X[joints, 3:7]]) for X in (X_p, X_c))
-    solver._ball_rows = wp.array(joints, dtype=wp.int32, device=model.device)
+    solver._features.ball = _State(
+        joints=joints,
+        rows=wp.array(joints, dtype=wp.int32, device=model.device),
+        bodies=solver._joint_bodies["spherical"][element],
+        frames=tuple(np.array([_quat_to_matrix_np(q) for q in X[joints, 3:7]]) for X in (X_p, X_c)),
+    )
 
 
 def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
     """The ball terms of the joints with terms (``uipc_warp.ext.ball.BallTerms``), appended to ``inputs["elements"]``;
     for an engine made again with longer lists, with the inputs the last step wrote into those of the engine before."""
-    if not len(solver._ball_joints):
+    state = solver._features.ball
+    if state is None:
         return
     from uipc_warp.ext.ball import BallTerms  # noqa: PLC0415 (libuipc-warp is imported lazily)
 
-    terms = BallTerms(solver._scene.layout(), solver._ball_bodies, *solver._ball_frames, solver.model.device)
-    before = solver._ball_terms
-    if before is not None:
-        for new, old in zip(_inputs(terms), _inputs(before), strict=True):
+    terms = BallTerms(solver._scene.layout(), state.bodies, *state.frames, solver.model.device)
+    if state.terms is not None:
+        for new, old in zip(_inputs(terms), _inputs(state.terms), strict=True):
             wp.copy(new, old)
     inputs["elements"].append(terms)
-    solver._ball_terms = terms
+    state.terms = terms
 
 
 def _inputs(terms) -> tuple:
@@ -216,10 +227,10 @@ def _inputs(terms) -> tuple:
 def parent_terms(solver: SolverIPC, engine) -> list:
     """The ball terms of ``engine`` and the joint of each of their elements, for ``BODY_PARENT_F`` (``observables``):
     they are terms of the ball joint, whose wrench on its child they are part of."""
-    terms = solver._ball_terms
-    if terms is None:
+    state = solver._features.ball
+    if state is None or state.terms is None:
         return []
-    return [(terms, solver._ball_joints)]
+    return [(state.terms, state.joints)]
 
 
 @wp.func
@@ -315,15 +326,15 @@ def _ball_inputs(
 
 def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> None:
     """The ball terms of the step (``_ball_inputs``), on the device."""
-    terms = solver._ball_terms
-    if terms is None:
+    state = solver._features.ball
+    if state is None or state.terms is None:
         return
-    model = solver.model
+    terms, model = state.terms, solver.model
     wp.launch(
         _ball_inputs,
         terms.n,
         inputs=[
-            solver._ball_rows,
+            state.rows,
             model.joint_q_start,
             model.joint_qd_start,
             model.joint_enabled,
@@ -344,10 +355,6 @@ def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> 
     )
 
 
-def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observables | None) -> None:
-    """Nothing."""
-
-
 def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
     """Whether a ball joint without terms when the solve was built has one now (a flag of the joints' degrees of
     freedom): the solve is built again with its terms. The solver checks the joints again (``joint_refusal``) when such
@@ -360,4 +367,6 @@ def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
     )
     if not flags & dof_flags:
         return False
-    return not set(_with_terms(solver.model).tolist()) <= set(solver._ball_joints.tolist())
+    state = solver._features.ball
+    planned = set() if state is None else set(state.joints.tolist())
+    return not set(_with_terms(solver.model).tolist()) <= planned

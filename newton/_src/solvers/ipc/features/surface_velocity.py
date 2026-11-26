@@ -14,7 +14,8 @@ A vertex the triangulation welded from several of the mesh's vertices takes the 
 triangle at its place uses.
 
 The hooks are those of ``features`` (its docstring): ``build`` finds the meshes and refuses AL-IPC, ``engine_inputs``
-gives every engine the extension, and ``prepare`` writes the velocities of the step.
+gives every engine the extension, and ``prepare`` writes the velocities of the step from the meshes' velocities and the
+shapes' transforms and scales, which it reads at every step, so a notification needs nothing of this module.
 """
 
 from __future__ import annotations
@@ -30,12 +31,9 @@ from newton import GeoType, Mesh
 from ..scene import _colliding_shapes, _shape_mesh
 
 if TYPE_CHECKING:
-    from newton import Control, Model, ModelFlags, State
-    from newton.solvers import SolverBase
+    from newton import Control, Model, State
 
-    from ..joints import _JointDofs
     from ..solver_ipc import SolverIPC
-    from . import FeatureOptions
 
 
 @wp.kernel(enable_backward=False)
@@ -112,22 +110,13 @@ def _first_corners(model: Model, s: int, welded: np.ndarray) -> np.ndarray:
     return corners.astype(np.int32)
 
 
-def check(model: Model, options: FeatureOptions, at: str) -> None:
-    """Nothing: the solver takes every mesh with a surface velocity, but under AL-IPC (``build``)."""
-
-
-def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
-    """Nothing of the joints."""
-    return None
-
-
 def build(solver: SolverIPC, scene) -> None:
-    """Find the colliding meshes with a surface velocity (``solver._belts``, None without one). ``NotImplementedError``
-    for one under ``contact_constitution="al-ipc"``, whose friction in libuipc-warp takes no surface velocity, and
-    ``ImportError`` when the installed libuipc-warp has no ``uipc_warp.ext.surface_velocity``."""
+    """Find the colliding meshes with a surface velocity (``solver._features.surface_velocity``, None without one).
+    ``NotImplementedError`` for one under ``contact_constitution="al-ipc"``, whose friction in libuipc-warp takes no
+    surface velocity, and ``ImportError`` when the installed libuipc-warp has no ``uipc_warp.ext.surface_velocity``."""
     shapes = _belt_shapes(solver.model)
-    solver._belts = _Belts(shapes) if len(shapes) else None
-    if solver._belts is None:
+    solver._features.surface_velocity = _Belts(shapes) if len(shapes) else None
+    if not len(shapes):
         return
     if solver._config.contact_constitution == "al-ipc":
         raise NotImplementedError(
@@ -150,7 +139,7 @@ def build(solver: SolverIPC, scene) -> None:
 def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
     """Give the engine the solve's ``SurfaceVelocity``: made with the solve's first engine, for its vertex count, and
     given again to every engine with longer lists that an eager step or ``grow()`` builds."""
-    belts = solver._belts
+    belts = solver._features.surface_velocity
     if belts is None:
         return
     if belts.extension is None:
@@ -174,7 +163,7 @@ def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
 def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> None:
     """Write the world velocity of every vertex of the meshes with a surface velocity, from their Warp meshes'
     velocities and the shapes' poses in ``state_in`` (device work only)."""
-    belts = solver._belts
+    belts = solver._features.surface_velocity
     if belts is None:
         return
     model = solver.model
@@ -188,13 +177,3 @@ def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> 
         outputs=[belts.extension.velocity],
         device=model.device,
     )  # fmt: skip
-
-
-def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observables | None) -> None:
-    """Nothing."""
-
-
-def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
-    """Nothing: ``prepare`` reads the meshes' velocities and the shapes' transforms and scales at every step, and a solve
-    built again finds the meshes again (``build``)."""
-    return False

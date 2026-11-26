@@ -158,16 +158,16 @@ def test_the_values_it_takes(test, device):
     row of its own. Any other value raises ``ValueError`` naming the choices."""
     model = _drop(device)
     solver = _solver(model)
-    test.assertIsNone(solver._contact_damping)
+    test.assertIsNone(solver._features.contact_damping)
     inputs = {"extensions": []}
     features.contact_damping.engine_inputs(solver, inputs)
     test.assertEqual(inputs["extensions"], [])
     solver = _solver(model, contact_damping=40.0)
-    np.testing.assert_array_equal(solver._contact_damping.extension.table.numpy(), [[40.0]])
+    np.testing.assert_array_equal(solver._features.contact_damping.extension.table.numpy(), [[40.0]])
     solver = _solver(model, contact_damping=np.float32(7.5))
-    np.testing.assert_array_equal(solver._contact_damping.extension.table.numpy(), [[7.5]])
+    np.testing.assert_array_equal(solver._features.contact_damping.extension.table.numpy(), [[7.5]])
     solver = _solver(model, contact_damping="material")
-    extension = solver._contact_damping.extension
+    extension = solver._features.contact_damping.extension
     np.testing.assert_array_equal(extension.table.numpy(), [[30.0, 40.0], [40.0, 50.0]])
     test.assertEqual(extension.plane_elements.numpy().tolist(), [1])  # the ground's 50 N s/m
     rows = extension.elements.numpy()
@@ -197,7 +197,7 @@ def test_material_takes_vbds_means(test, device):
     model = builder.finalize(device=device)
     model.soft_contact_kd = 10.0
     solver = _solver(model, contact_damping="material")
-    extension = solver._contact_damping.extension
+    extension = solver._features.contact_damping.extension
     table, rows = extension.table.numpy(), extension.elements.numpy()
     np.testing.assert_array_equal(table, table.T)
     shapes = solver._vertex_shape
@@ -310,7 +310,9 @@ def test_notify_builds_the_solve_again_for_new_coefficients(test, device):
     test.assertIs(solver._engine, engine)
     solver.notify_model_changed(newton.ModelFlags.SHAPE_PROPERTIES)
     test.assertIsNot(solver._engine, engine)
-    np.testing.assert_array_equal(solver._contact_damping.extension.table.numpy(), [[50.0, 60.0], [60.0, 70.0]])
+    np.testing.assert_array_equal(
+        solver._features.contact_damping.extension.table.numpy(), [[50.0, 60.0], [60.0, 70.0]]
+    )
     number = _solver(model, contact_damping=5.0)
     engine = number._engine
     kd[1] = 20.0

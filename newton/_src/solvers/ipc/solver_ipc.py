@@ -141,6 +141,13 @@ logger = logging.getLogger(__name__)
 # measured scenes (docs/solvers/ipc.rst > "Coupling")
 _TOLERANCES = {"newton_velocity_tol": 0.05, "newton_transrate_tol": 0.1, "semi_implicit": True}
 _PROXY_TOLERANCES = {"newton_velocity_tol": 5.0e-4, "newton_transrate_tol": 1.0e-3, "semi_implicit": False}
+# the Newton tolerances, as a fraction of eps_velocity, that a model with friction takes by default
+# (_newton_tolerances): the largest at which a joint under 1.5 times its friction slides at (f - F) / I to 1% whatever
+# its axis. Newton's steps inside the smoothing band are short, the first about f / (2 F) eps_velocity, the smallest
+# about sqrt(f / F - 1) eps_velocity, and the test takes a step's largest component, 1 / sqrt(3) of it for an axis along
+# a diagonal: measured, 1.5 F slides up to 0.7 eps_velocity along a coordinate axis and up to 0.4 along the diagonal. A
+# load nearer the friction needs less (1.2 F slides up to 0.45 and 0.25, 1.1 F up to 0.3 and 0.1).
+_FRICTION_TOLERANCE = 0.4
 # AL-IPC's decay of the weight of a pair that has opened: the paper's 0.9 (Zheng, Luo and Li), under which a stack of
 # boxes comes to rest, where libuipc's default 0.3 drops the pair within three outer updates (docs/solvers/ipc.rst >
 # "AL-IPC contact")
@@ -184,6 +191,33 @@ def _capabilities(uipc_warp) -> dict[str, bool]:
             for add in (scene.add_vertices, scene.add_obstacle, scene.add_affine_body)
         ),
     }
+
+
+def _newton_tolerances(
+    model: Model, given: dict[str, float | None], defaults: dict, eps_velocity: float
+) -> tuple[dict[str, float], list[str]]:
+    """The Newton tolerances of a solve of ``model``, the one place that decides their defaults, and those of the given
+    ones that are too loose for its friction, as ``"name value"``.
+
+    A tolerance the caller gave (not None in ``given``) is kept whatever its value. One left unset takes its value in
+    ``defaults`` (``_TOLERANCES``, or ``_PROXY_TOLERANCES`` for an entry of a coupled solver with proxies), at most
+    ``_FRICTION_TOLERANCE`` times ``eps_velocity`` for a model with friction on any joint or tendon
+    (``features.joint_terms.has_friction``). libuipc's Newton loop ends when its step is below the tolerance, and within
+    its smoothing band the friction is so stiff that Newton's steps there are short, the first from rest about
+    ``f / (2 F)`` times ``eps_velocity`` for a load ``f`` above the friction ``F``: at the default tolerances the loop
+    would end inside the band, and a joint loaded beyond its friction would creep instead of sliding. A given tolerance
+    above the bound is returned among the loose ones."""
+    friction = features.joint_terms.has_friction(model)
+    bound = _FRICTION_TOLERANCE * eps_velocity
+    values, loose = {}, []
+    for name in ("newton_velocity_tol", "newton_transrate_tol"):
+        value = given[name]
+        if value is None:
+            value = min(defaults[name], bound) if friction else defaults[name]
+        elif friction and value > bound:
+            loose.append(f"{name} {value:g}")
+        values[name] = value
+    return values, loose
 
 
 def _check_choice(name: str, value: str, accepted: tuple) -> None:
@@ -694,26 +728,25 @@ class SolverIPC(SolverBase, CouplingInterface):
         uipc_warp = self._import_uipc_warp()
         # an entry of a coupled solver with proxies takes converged steps unless told otherwise: a proxy's feedback is
         # the force of the step's contact terms at its end (docs/solvers/ipc.rst > "Coupling")
-        tolerances = _PROXY_TOLERANCES if _proxy_bodies(model).any() or _proxy_particles(model).any() else _TOLERANCES
-        # the Newton tolerances the caller gave, which a model with joint friction keeps (features.joint_terms)
+        proxies = _proxy_bodies(model).any() or _proxy_particles(model).any()
+        self._tolerance_defaults = _PROXY_TOLERANCES if proxies else _TOLERANCES
+        # the Newton tolerances the caller gave (None: the default of _newton_tolerances, which every build decides
+        # again, since it follows the model's friction)
         self._tolerances_given = {
-            "newton_velocity_tol": newton_velocity_tol is not None,
-            "newton_transrate_tol": newton_transrate_tol is not None,
+            "newton_velocity_tol": newton_velocity_tol,
+            "newton_transrate_tol": newton_transrate_tol,
         }
-        if newton_velocity_tol is None:
-            newton_velocity_tol = tolerances["newton_velocity_tol"]
-        if newton_transrate_tol is None:
-            newton_transrate_tol = tolerances["newton_transrate_tol"]
+        self._defaults_lowered = False  # whether the last build lowered a default for friction (_set_newton_tolerances)
+        tolerances, _ = _newton_tolerances(model, self._tolerances_given, self._tolerance_defaults, eps_velocity)
         if semi_implicit is None:
-            semi_implicit = tolerances["semi_implicit"]
+            semi_implicit = self._tolerance_defaults["semi_implicit"]
         self._d_hat_given = d_hat is not None
         al = {"al_decay_factor": _AL_DECAY_FACTOR} if contact_constitution == "al-ipc" else {}
         self._config = uipc_warp.SimConfig(
             kappa=kappa,
             d_hat=_D_HAT if d_hat is None else d_hat,
             newton_max_iter=newton_max_iter,
-            newton_velocity_tol=newton_velocity_tol,
-            newton_transrate_tol=newton_transrate_tol,
+            **tolerances,
             linear_tol_rate=linear_tol_rate,
             line_search_max_iter=line_search_max_iter,
             semi_implicit=semi_implicit,
@@ -753,6 +786,8 @@ class SolverIPC(SolverBase, CouplingInterface):
         self._kinematic_strength_ratio = float(kinematic_strength_ratio)
         self._dt = self._config.dt  # of the last step, which grow() solves again
         self._observables = None  # the observables container of the last step (None: none), which prepare reads
+        # what the feature modules keep from one hook to the next, one field per module (features.FeatureState)
+        self._features = features.FeatureState()
         self._clamp_checked_dt = None  # the step size whose stiffness the clamp warning was last checked for
         self._clamp_reported = False
         self._engine = None
@@ -955,6 +990,7 @@ class SolverIPC(SolverBase, CouplingInterface):
         if len(self._aim_bodies):  # libuipc's soft transform constraint on the kinematic bodies, in their order
             ratio = self._kinematic_strength_ratio
             scene.add_soft_transform_constraints(self._aim_bodies, (ratio, ratio))
+        self._set_newton_tolerances()  # before the engine inputs, which read them
         features.build(self, scene)  # the feature modules, on the scene the solver laid out
         self._scene = scene
         self._scene_inputs = _scene_inputs_now(self)
@@ -1115,6 +1151,30 @@ class SolverIPC(SolverBase, CouplingInterface):
             self._placing.fill_(1)
         if self.model.joint_count:
             self._joint_q_written.fill_(np.nan)
+
+    def _set_newton_tolerances(self) -> None:
+        """The Newton tolerances of the solve about to be built, in the config (``_newton_tolerances``), with a
+        ``NewtonWarning`` when the model has friction and a tolerance the caller gave is above the bound; not again at
+        a build that lowers a default as the build before did."""
+        config, given = self._config, self._tolerances_given
+        values, loose = _newton_tolerances(self.model, given, self._tolerance_defaults, config.eps_velocity)
+        config.newton_velocity_tol, config.newton_transrate_tol = (
+            values["newton_velocity_tol"],
+            values["newton_transrate_tol"],
+        )
+        lowered = any(given[n] is None and values[n] != self._tolerance_defaults[n] for n in values)
+        repeated, self._defaults_lowered = lowered and self._defaults_lowered, lowered
+        if loose and not repeated:
+            bound = _FRICTION_TOLERANCE * config.eps_velocity
+            warnings.warn(
+                f"SolverIPC: the model has joint or tendon friction, and the Newton tolerances given "
+                f"({', '.join(loose)}) are above {_FRICTION_TOLERANCE:g} eps_velocity = {bound:g}: a step within the "
+                "friction's smoothing band ends the Newton loop, so a joint loaded beyond its friction creeps instead of "
+                "sliding. Leave them at their default, which a model with friction takes as that bound, or pass them at "
+                "it or below (see Mimic joints, fixed tendons and joint friction in Newton's IPC solver guide).",
+                NewtonWarning,
+                stacklevel=4,
+            )
 
     def _make_engine(self, capacity: dict | None) -> None:
         """The engine of the laid-out scene, with the current gravity and masses; ``capacity``: its list

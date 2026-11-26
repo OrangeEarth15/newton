@@ -46,11 +46,9 @@ from newton.solvers import SolverBase
 from ..kernels import _d6_joint_wrenches, _joint_wrenches
 
 if TYPE_CHECKING:
-    from newton import Control, Model, ModelFlags, State
+    from newton import Control, Model, State
 
-    from ..joints import _JointDofs
     from ..solver_ipc import SolverIPC
-    from . import FeatureOptions
 
 # the standard observable kinds SolverIPC writes, besides its own STATUS (SolverIPC.ObservableKind.STATUS)
 KINDS = frozenset(
@@ -188,7 +186,7 @@ class _Records:
     def attach(self, engine):
         solver = self._solver()
         if solver is not None:
-            solver._body_observables.parents = _Parents.of(solver, engine)
+            solver._features.observables.parents = _Parents.of(solver, engine)
 
 
 @dataclass
@@ -262,7 +260,7 @@ class _Parents:
 
 @dataclass
 class _BodyObservables:
-    """What the body observables of one solver keep (``solver._body_observables``), made by the first container that
+    """What the body observables of one solver keep (``solver._features.observables``), made by the first container that
     requests one: the step's failures (``flags``, one word per world entry, the global world's last); for
     ``BODY_PARENT_F``, what it reads of the solve (``parents``, None until requested), the bodies' shares of their
     parent joints' ``joint_f`` (``share``), and for the solver's joint-force kernels a parent of -1 for every joint and
@@ -295,7 +293,7 @@ def _parent_joints(model: Model) -> np.ndarray:
 def _parents_requested(solver: SolverIPC) -> None:
     """Make what ``BODY_PARENT_F`` needs, once: the records of the solver's engine, and the joints whose ``joint_f``
     acts as a wrench."""
-    state = solver._body_observables
+    state = solver._features.observables
     model, device = solver.model, solver.model.device
     try:
         import uipc_warp.ext.element_forces  # noqa: F401, PLC0415
@@ -316,8 +314,7 @@ def supported(solver: SolverIPC) -> frozenset[str]:
     ``STATUS``), and with ``contact_constitution="al-ipc"`` ``STATUS``, ``BODY_PARENT_F`` and ``BODY_QDD`` only, since
     the AL-IPC frame ends on its own criterion, without a Newton residual, and its contact is an active set with
     multipliers, not the barrier and friction terms the contact output exports."""
-    config = getattr(solver, "_config", None)
-    if config is not None and config.contact_constitution == "al-ipc":
+    if solver._config.contact_constitution == "al-ipc":
         return frozenset({solver.ObservableKind.STATUS, *_BODY_KINDS})
     return solver.SUPPORTED_OBSERVABLES
 
@@ -328,30 +325,17 @@ def allocate(solver: SolverIPC, observables: SolverBase.Observables) -> None:
     Nothing for a model without bodies, or for a container that requests neither."""
     if solver._engine is None or solver.model.body_count == 0 or not (observables.kinds & _BODY_KINDS):
         return
-    if getattr(solver, "_body_observables", None) is None:
+    if solver._features.observables is None:
         entries = solver.model.world_count + 1
-        solver._body_observables = _BodyObservables(wp.zeros(entries, dtype=wp.int32, device=solver.model.device))
-    if observables.is_requested(SolverBase.ObservableKind.BODY_PARENT_F) and solver._body_observables.share is None:
+        solver._features.observables = _BodyObservables(wp.zeros(entries, dtype=wp.int32, device=solver.model.device))
+    if observables.is_requested(SolverBase.ObservableKind.BODY_PARENT_F) and solver._features.observables.share is None:
         _parents_requested(solver)
-
-
-def check(model: Model, options: FeatureOptions, at: str) -> None:
-    """Nothing of the model."""
-
-
-def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
-    """Nothing of the joints."""
-    return None
-
-
-def build(solver: SolverIPC, scene) -> None:
-    """Nothing."""
 
 
 def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
     """Once a container has requested ``BODY_PARENT_F``, the extension that makes the records of the engine's joints
     when it is built (``_Records``)."""
-    state = getattr(solver, "_body_observables", None)
+    state = solver._features.observables
     if state is not None and state.share is not None:
         inputs["extensions"].append(_Records(solver))
 
@@ -360,7 +344,7 @@ def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> 
     """What the step's start holds for the step's container (``solver._observables``): the twists of ``state_in`` in
     its ``body_qdd`` (``BODY_QDD``), and the bodies' shares of their parent joints' ``joint_f`` at ``state_in``'s poses,
     as the solver applies it (``BODY_PARENT_F``)."""
-    observables, state = solver._observables, getattr(solver, "_body_observables", None)
+    observables, state = solver._observables, solver._features.observables
     if observables is None or state is None:
         return
     if observables.is_requested(SolverBase.ObservableKind.BODY_QDD):
@@ -427,7 +411,7 @@ def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> 
 def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observables | None) -> None:
     """``BODY_PARENT_F`` and ``BODY_QDD`` of the step, when the container requests them (module docstring), zero in a
     world whose step failed."""
-    state = getattr(solver, "_body_observables", None)
+    state = solver._features.observables
     if observables is None or state is None or state_out is None:
         return
     qdd = observables.is_requested(SolverBase.ObservableKind.BODY_QDD)
@@ -473,9 +457,3 @@ def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observab
             outputs=[observables.body_qdd],
             device=model.device,
         )
-
-
-def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
-    """Nothing: the records of a solve built again are made by its engine's extension (``engine_inputs``), and every
-    step reads the bodies' centres of mass and the joints' inputs from the model."""
-    return False

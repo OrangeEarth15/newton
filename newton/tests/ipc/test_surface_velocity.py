@@ -139,7 +139,7 @@ def test_a_belt_carries_a_box(test, device):
             test.assertAlmostEqual(a / (MU * G), 1.0, delta=0.02)
             # BDF2 damps the ringing of the catch-up less: 1e-4 m/s is left after 35 steps
             np.testing.assert_allclose(v[-5:], np.tile([1.0, 0.0, 0.0], (5, 1)), rtol=0.0, atol=5e-4)
-            test.assertIsNotNone(solver._belts)
+            test.assertIsNotNone(solver._features.surface_velocity)
     # the same box on a kinematic platform that moves at 1 m/s
     material = newton.ModelBuilder.ShapeConfig(mu=MU)
     builder = newton.ModelBuilder()
@@ -169,7 +169,7 @@ def test_a_belt_carries_a_box(test, device):
     model, _, box = _belt(device, enable=False)
     solver = _solver(model)
     _, qd = _steps(model, solver, 10)
-    test.assertIsNone(solver._belts)
+    test.assertIsNone(solver._features.surface_velocity)
     test.assertLess(np.abs(qd[:, box, :2]).max(), 1e-6)
 
 
@@ -193,7 +193,9 @@ def test_a_welded_vertex_takes_its_first_mesh_vertex(test, device):
     solver = _solver(model)
     _, qd = _steps(model, solver, STEPS)
     rows = np.flatnonzero(solver._vertex_shape == shape)
-    corners = solver._belts.corner.numpy()[np.argsort(solver._belts.rows.numpy())]
+    corners = solver._features.surface_velocity.corner.numpy()[
+        np.argsort(solver._features.surface_velocity.rows.numpy())
+    ]
     np.testing.assert_array_equal(corners, [0, 5, 1, 2])  # the welded corners (-2,-2), (-2,2), (2,-2), (2,2)
     np.testing.assert_array_equal(solver._engine.positions()[rows], vertices[indices[corners]])
     np.testing.assert_allclose(qd[-1, box, :3], (1.0, 0.0, 0.0), rtol=0.0, atol=1e-4)

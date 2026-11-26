@@ -19,15 +19,10 @@ Newton's ``joint_q``, with convex potentials of ``L``:
 - the friction of a joint: the ``joint_friction`` of a revolute or prismatic joint's degree of freedom, an item of
   that joint alone.
 
-A model with friction on any degree of freedom of any joint (``joint_friction`` over all of them, revolute, prismatic,
-ball or other, whichever module holds it) or on a tendon, fixed or spatial, takes Newton tolerances of at most
-``_FRICTION_TOLERANCE`` times ``eps_velocity`` where the caller leaves them unset (``_friction_tolerances``).
-libuipc's Newton loop ends when its step is below the tolerance, and within its smoothing band the friction is so stiff
-that Newton's steps there are short, the first from rest about ``f / (2 F)`` times ``eps_velocity`` for a load ``f``
-above the friction ``F``: at the default tolerances the loop would end inside the band, and a joint loaded beyond its
-friction would creep instead of sliding. A tolerance the caller gives is kept whatever its value, and one above the
-bound gets a ``NewtonWarning``. MuJoCo's JOINT equality rows that repeat the mimic rows Newton's importers made of them
-are held by those (``held_equality_rows``).
+A model with friction on any degree of freedom of any joint, or on a tendon, fixed or spatial (``has_friction``), takes
+lower default Newton tolerances, which the solver decides with its other defaults (``solver_ipc._newton_tolerances``).
+MuJoCo's JOINT equality rows that repeat the mimic rows Newton's importers made of them are held by those
+(``held_equality_rows``).
 
 Refused: actuators that drive a tendon and a limit margin other than 0, of every MuJoCo tendon, a mimic or fixed
 tendon over a joint that becomes no revolute or prismatic joint, and the friction of free and distance joints (the ball
@@ -37,7 +32,6 @@ hooks are those of ``features`` (its docstring); ``parent_terms`` gives the term
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -45,11 +39,10 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton import JointType, ModelFlags, NewtonWarning
+from newton import JointType, ModelFlags
 
 if TYPE_CHECKING:
     from newton import Control, Model, State
-    from newton.solvers import SolverBase
 
     from ..joints import _JointDofs
     from ..solver_ipc import SolverIPC
@@ -64,13 +57,6 @@ _DEFAULT_SOLREF = (0.02, 1.0)
 # MuJoCo's JOINT equality (EqType.JOINT) and the target kind with which Newton's importers link it to the mimic row
 # they made of it (MjcEqualityTargetKind.MIMIC); neither has a public name in Newton
 _EQ_JOINT, _EQ_TARGET_MIMIC = 2, 2
-# the Newton tolerances, as a fraction of eps_velocity, that a model with friction takes by default
-# (``_friction_tolerances``): the largest at which a joint under 1.5 times its friction slides at (f - F) / I to 1%
-# whatever its axis. Newton's steps inside the smoothing band are short, the first about f / (2 F) eps_velocity, the
-# smallest about sqrt(f / F - 1) eps_velocity, and the test takes a step's largest component, 1 / sqrt(3) of it for an
-# axis along a diagonal: measured, 1.5 F slides up to 0.7 eps_velocity along a coordinate axis and up to 0.4 along the
-# diagonal. A load nearer the friction needs less (1.2 F slides up to 0.45 and 0.25, 1.1 F up to 0.3 and 0.1).
-_FRICTION_TOLERANCE = 0.4
 # the overshoot at which SolverIPC's cubic limit has a limit's stiffness (kernels._LIMIT_OVERSHOOT) [m or rad]
 _LIMIT_OVERSHOOT = wp.constant(wp.float64(1.0e-3))
 
@@ -262,7 +248,7 @@ def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
 # ================================================================================================ the solve's items
 @dataclass
 class _Plan:
-    """The coordinate terms of a solve (``solver._joint_terms``, None for a model without any).
+    """The coordinate terms of a solve (``solver._features.joint_terms.plan``, None for a model without any).
 
     Per item: its terms (``items``, ``CoordinateTerms``' form), its coefficients as the terms are made with them
     (``values``), and what a step writes into them: the joints whose ``joint_enabled`` it takes and its row of
@@ -288,10 +274,10 @@ class _Plan:
     terms: object = None
 
 
-def _has_friction(model: Model) -> bool:
+def has_friction(model: Model) -> bool:
     """Whether a degree of freedom of any joint, of whatever kind, has a ``joint_friction`` other than 0, or one of
     MuJoCo's tendons, fixed or spatial, a friction loss: a model whose default Newton tolerances are lowered
-    (``_friction_tolerances``)."""
+    (``solver_ipc._newton_tolerances``)."""
     if model.joint_dof_count and model.joint_friction is not None and np.any(model.joint_friction.numpy() != 0.0):
         return True
     return bool(_tendons(model)) and bool(np.any(model.mujoco.tendon_frictionloss.numpy() != 0.0))
@@ -306,7 +292,7 @@ def _signature(model: Model) -> tuple:
         friction = np.flatnonzero(model.joint_friction.numpy() != 0.0)
     mimics = tuple((f, r, row) for f, r, _, _, row in _mimics(model))
     tendons = tuple((t, tuple(j.tolist()), tuple(c.tolist())) for t, j, c in _tendons(model))
-    return mimics, tendons, tuple(friction.tolist()), _has_friction(model)
+    return mimics, tendons, tuple(friction.tolist()), has_friction(model)
 
 
 def _rows(solver: SolverIPC) -> dict:
@@ -472,65 +458,31 @@ def _make_plan(solver: SolverIPC) -> _Plan | None:
     )  # fmt: skip
 
 
+@dataclass
+class _State:
+    """What the module keeps of a solve (``solver._features.joint_terms``): the plan of its coordinate terms (None for
+    a model without any) and what the plan was made of (``_signature``)."""
+
+    plan: _Plan | None
+    signature: tuple
+
+
+def _plan(solver: SolverIPC) -> _Plan | None:
+    """The plan of the solve's coordinate terms, None for a solve without any or not built."""
+    state = solver._features.joint_terms
+    return None if state is None else state.plan
+
+
 def build(solver: SolverIPC, scene) -> None:
     """The items of the model's mimic relations, fixed tendons and joint friction (``_Plan``), when the solve is
-    built, and the Newton tolerances of a model with friction (``_friction_tolerances``): here, since the scene's
-    engine inputs read them (the weight of a rigid body's rows of A in Newton's test) before the ``engine_inputs`` hook
-    runs. A ``NewtonWarning`` when the model has friction and a tolerance the caller gave is above
-    ``_FRICTION_TOLERANCE`` times ``eps_velocity``."""
-    model = solver.model
-    solver._joint_terms = _make_plan(solver)
-    solver._joint_terms_signature = _signature(model)
-    loose = _friction_tolerances(solver, _has_friction(model))
-    if loose:
-        bound = _FRICTION_TOLERANCE * solver._config.eps_velocity
-        warnings.warn(
-            f"SolverIPC: the model has joint or tendon friction, and the Newton tolerances given ({', '.join(loose)}) "
-            f"are above {_FRICTION_TOLERANCE:g} eps_velocity = {bound:g}: a step within the friction's smoothing band "
-            "ends the Newton loop, so a joint loaded beyond its friction creeps instead of sliding. Leave them at their "
-            "default, which a model with friction takes as that bound, or pass them at it or below (see Mimic joints, "
-            "fixed tendons and joint friction in Newton's IPC solver guide).",
-            NewtonWarning,
-            stacklevel=5,
-        )
-
-
-def _friction_tolerances(solver: SolverIPC, friction: bool) -> list[str]:
-    """With ``friction`` (``_has_friction``), the Newton tolerances the caller left at their default (``None``) that are
-    above ``_FRICTION_TOLERANCE`` times ``eps_velocity`` lowered to it in the solver's config, which the solve about to
-    be built takes; without, the defaults this function lowered before put back. A tolerance the caller gave is left as
-    it is, whatever its value, a default's among them (``solver._tolerances_given``); returned are those of them above
-    the bound, as ``"name value"``."""
-    config = solver._config
-    lowered = getattr(solver, "_friction_tolerances_of", None)  # the defaults this function lowered
-    if not friction:
-        if lowered is not None:
-            config.newton_velocity_tol, config.newton_transrate_tol = lowered
-            solver._friction_tolerances_of = None
-        return []
-    if lowered is not None:
-        return []
-    bound = _FRICTION_TOLERANCE * config.eps_velocity
-    velocity, transrate = config.newton_velocity_tol, config.newton_transrate_tol
-    loose = []
-    for name, value in (("newton_velocity_tol", velocity), ("newton_transrate_tol", transrate)):
-        if value <= bound:
-            continue
-        if solver._tolerances_given[name]:
-            loose.append(f"{name} {value:g}")
-        elif name == "newton_velocity_tol":
-            config.newton_velocity_tol = bound
-        else:
-            config.newton_transrate_tol = bound
-    if (velocity, transrate) != (config.newton_velocity_tol, config.newton_transrate_tol):
-        solver._friction_tolerances_of = (velocity, transrate)
-    return loose
+    built."""
+    solver._features.joint_terms = _State(_make_plan(solver), _signature(solver.model))
 
 
 def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
     """The coordinate terms of the plan, made from ``inputs``' joint groups and appended to its element groups; for an
     engine made again (an eager step's or ``grow()``'s longer lists), with what the steps wrote into the old terms."""
-    plan = solver._joint_terms
+    plan = _plan(solver)
     if plan is None:
         return
     from uipc_warp.ext.coordinate_terms import CoordinateTerms  # noqa: PLC0415 (libuipc-warp is imported lazily)
@@ -548,7 +500,7 @@ def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
 def parent_terms(solver: SolverIPC, engine) -> list:
     """The terms' group of ``engine`` whose elements are the items' forces through each joint, with the joint of every
     element, for ``BODY_PARENT_F``."""
-    plan = solver._joint_terms
+    plan = _plan(solver)
     if plan is None or plan.terms is None:
         return []
     group = plan.terms.groups[0]
@@ -620,7 +572,7 @@ def _write_terms(
 
 def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> None:
     """The step's inputs of the items (``_write_terms``), on the device."""
-    plan = solver._joint_terms
+    plan = _plan(solver)
     if plan is None:
         return
     model, terms, groups, none = solver.model, plan.terms, solver._joint_groups, plan.none
@@ -641,21 +593,17 @@ def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> 
     )  # fmt: skip
 
 
-def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observables | None) -> None:
-    """Nothing."""
-
-
 def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
     """Whether the solve must be built again: when the degrees of freedom with friction, the mimic relations or the
     fixed tendons have changed which joints they hold, or the model has gained or lost friction. New coefficients of the mimic relations and the tendons
     (``CONSTRAINT_PROPERTIES``, ``TENDON_PROPERTIES``), and the mimic penalties, which follow the bodies' masses
     (``BODY_INERTIAL_PROPERTIES``, ``BODY_PROPERTIES``), are written into the terms in place."""
-    plan = solver._joint_terms
+    plan = _plan(solver)
     joints = ModelFlags.JOINT_PROPERTIES | ModelFlags.JOINT_DOF_PROPERTIES | ModelFlags.JOINT_DOF_FORCE_PROPERTIES
     values = ModelFlags.CONSTRAINT_PROPERTIES | ModelFlags.TENDON_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES
     if not flags & (joints | values | ModelFlags.BODY_PROPERTIES):
         return False
-    if solver._joint_terms_signature != _signature(solver.model):
+    if solver._features.joint_terms.signature != _signature(solver.model):
         return True
     if plan is None or plan.terms is None:
         return False

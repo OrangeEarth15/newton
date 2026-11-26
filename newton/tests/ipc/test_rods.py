@@ -438,7 +438,7 @@ def test_grown_lists_keep_the_rods(test, device):
             solver.step(s0, s1, None, None, _H)
             s0, s1 = s1, s0
             out.append(s0.body_q.numpy().copy())
-        return np.array(out), len(regrown), solver._rods.bend_twist.sigma.numpy()
+        return np.array(out), len(regrown), solver._features.rods.terms.bend_twist.sigma.numpy()
 
     (roomy, roomy_regrown, roomy_sigma), (grown, grown_regrown, grown_sigma) = run(False), run(True)
     test.assertEqual(roomy_regrown, 0)

@@ -39,9 +39,7 @@ if TYPE_CHECKING:
     from newton import Control, Model, State
     from newton.solvers import SolverBase
 
-    from ..joints import _JointDofs
     from ..solver_ipc import SolverIPC
-    from . import FeatureOptions
 
 _INFINITY = wp.constant(wp.float64(np.inf))
 # a distance joint's upper bound that is none, Newton's MAXVAL: the cubic's 1 / w^3 cancels the strength's w^3
@@ -88,16 +86,6 @@ def take_distance(model: Model, joint: int, lower, upper) -> None:
             f"SolverIPC: the DISTANCE joint {joint} bounds its distance to [{float(lower)!r}, {float(upper)!r}], the "
             "lower bound above the upper; make the lower bound at most the upper, or negative for none."
         )
-
-
-def check(model: Model, options: FeatureOptions, at: str) -> None:
-    """Nothing: the joints are offered through ``take_d6`` and ``take_distance``."""
-
-
-def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
-    """Nothing: a universal joint takes every term of its degrees of freedom; the refusals of a distance joint's are
-    the free joint's (``ball``)."""
-    return None
 
 
 # ---------------------------------------------------------------- kernels
@@ -388,11 +376,26 @@ def _universal_strengths(solver: SolverIPC, bodies: np.ndarray) -> np.ndarray:
     return solver._joint_strength_ratio * dynamic[bodies].sum(axis=1)
 
 
+@dataclass
+class _State:
+    """What the module keeps of a solve (``solver._features.universal``): its universal joints and its distance joints
+    with a range, None for a solve without them."""
+
+    universal: _Universal | None = None
+    ranges: _Ranges | None = None
+
+
+def _planned(solver: SolverIPC) -> tuple[_Universal | None, _Ranges | None]:
+    """The universal joints and the distance ranges of the solve, None where it has none or was not built."""
+    state = solver._features.universal
+    return (None, None) if state is None else (state.universal, state.ranges)
+
+
 def build(solver: SolverIPC, scene) -> None:
     """Plan the universal joints and the distance joints with a range (``_Universal``, ``_Ranges``): their bodies, and
     their frames' origins and axes in the bodies' frames, from the model's joint frames."""
     model, device = solver.model, solver.model.device
-    solver._universal = solver._ranges = None
+    state = solver._features.universal = _State()
     if model.joint_count == 0:
         return
     parent, child = model.joint_parent.numpy(), model.joint_child.numpy()
@@ -408,7 +411,7 @@ def build(solver: SolverIPC, scene) -> None:
             a = axis[qd_start[j] : qd_start[j] + 2]
             for side, X in enumerate((X_p[j], X_c[j])):
                 axes[k, side] = a @ _quat_to_matrix_np(X[3:7]).T  # the joint frame's axes in the body's frame
-        solver._universal = _Universal(
+        state.universal = _Universal(
             joints,
             wp.array(joints.astype(np.int32), dtype=wp.int32, device=device),
             bodies,
@@ -420,15 +423,13 @@ def build(solver: SolverIPC, scene) -> None:
     if len(joints):
         pairs = np.stack([np.where(parent[joints] >= 0, parent[joints], -1), child[joints]], axis=1)
         points = np.stack([X_p[joints, :3], X_c[joints, :3]], axis=1)  # the parent's in the world for -1
-        solver._ranges = _Ranges(
-            joints, wp.array(joints.astype(np.int32), dtype=wp.int32, device=device), pairs, points
-        )
+        state.ranges = _Ranges(joints, wp.array(joints.astype(np.int32), dtype=wp.int32, device=device), pairs, points)
 
 
 def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
     """The universal joints' and the distance ranges' element groups of an engine made from the scene, with the terms
     of the last step (none before the first)."""
-    universal, ranges = getattr(solver, "_universal", None), getattr(solver, "_ranges", None)
+    universal, ranges = _planned(solver)
     if universal is None and ranges is None:
         return
     from uipc_warp.ext import joints as ext  # noqa: PLC0415 (libuipc-warp is imported lazily)
@@ -452,7 +453,7 @@ def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
 def _write_terms(solver: SolverIPC, control: Control, dt: float) -> None:
     """The terms of the universal joints and the ranges of the distance joints for the next step, on the device."""
     model, options = solver.model, solver._joint_options
-    universal, ranges = solver._universal, solver._ranges
+    universal, ranges = _planned(solver)
     if universal is not None:
         g = universal.group
         wp.launch(
@@ -513,7 +514,7 @@ def _write_terms(solver: SolverIPC, control: Control, dt: float) -> None:
 def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> None:
     """The step's terms; a universal joint's angles at the step's start: those of the bodies' state just loaded,
     unwrapped against the angles it had, or against ``state_in.joint_q`` where that is not what the solver wrote."""
-    universal, ranges = getattr(solver, "_universal", None), getattr(solver, "_ranges", None)
+    universal, ranges = _planned(solver)
     if universal is None and ranges is None:
         return
     if universal is not None:
@@ -532,7 +533,7 @@ def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> 
 
 def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observables | None) -> None:
     """``joint_q`` and ``joint_qd`` of the universal joints (``_store_universal``)."""
-    universal = getattr(solver, "_universal", None)
+    universal, _ = _planned(solver)
     if universal is None or state_out is None or state_out.joint_q is None:
         return
     model = solver.model
@@ -561,7 +562,7 @@ def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
     """New masses give the universal joints new penalties (``BODY_INERTIAL_PROPERTIES``); a distance joint that gains
     or loses its range (a DOF flag) needs the solve built again."""
     model = solver.model
-    universal, ranges = getattr(solver, "_universal", None), getattr(solver, "_ranges", None)
+    universal, ranges = _planned(solver)
     if flags & ModelFlags.BODY_INERTIAL_PROPERTIES and universal is not None:
         universal.strength.assign(_universal_strengths(solver, universal.bodies))
     if flags & _DOF_FLAGS and model.joint_count:
@@ -574,7 +575,7 @@ def parent_terms(solver: SolverIPC, engine) -> list:
     """The element groups of the joints of this module in ``engine``, the engine being made, with the joint of every
     element: the universal joints, and the distance joints' range stitches by stencil size."""
     terms = []
-    universal, ranges = getattr(solver, "_universal", None), getattr(solver, "_ranges", None)
+    universal, ranges = _planned(solver)
     if universal is not None:
         terms.append((universal.group, universal.joints))
     if ranges is not None:

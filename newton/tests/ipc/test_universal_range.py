@@ -322,7 +322,7 @@ def test_range_bounds_notified(test, device):
         with test.subTest(lower=lower, upper=upper):
             test.assertEqual(bounds(lower, upper), rebuilt)
             s = _run(model, solver, 2, 0.01, state=s)
-    test.assertIsNone(solver._ranges)
+    test.assertIsNone(solver._features.universal.ranges)
 
 
 def test_refusals(test, device):

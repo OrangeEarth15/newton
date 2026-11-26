@@ -140,7 +140,7 @@ def test_mimic_penalty_and_enabled_flags(test, device):
             else:  # a disabled joint: the relation is off at the next step
                 model.joint_enabled.assign(np.array([True, False]))
                 _steps(model, solver, 1, dt, control)
-                test.assertEqual(solver._joint_terms.terms.on.numpy().tolist(), [0])
+                test.assertEqual(solver._features.joint_terms.plan.terms.on.numpy().tolist(), [0])
 
 
 def test_mimic_coefficients_change_in_place(test, device):
@@ -249,9 +249,9 @@ def test_friction_takes_tight_default_tolerances(test, device):
     builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
     builder.add_articulation([builder.add_joint_ball(-1, body)])
     builder.joint_friction[1] = 0.5
-    test.assertTrue(joint_terms._has_friction(builder.finalize(device=device)))
-    test.assertTrue(joint_terms._has_friction(_sliders(device, tendon='frictionloss="0.5"')))
-    test.assertFalse(joint_terms._has_friction(_sliders(device)))
+    test.assertTrue(joint_terms.has_friction(builder.finalize(device=device)))
+    test.assertTrue(joint_terms.has_friction(_sliders(device, tendon='frictionloss="0.5"')))
+    test.assertFalse(joint_terms.has_friction(_sliders(device)))
 
 
 def test_tolerances_given_at_their_default_values_are_kept(test, device):

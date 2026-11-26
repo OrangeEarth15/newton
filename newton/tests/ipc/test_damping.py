@@ -70,7 +70,7 @@ def test_spring_damping_as_implicit_euler(test, device):
             model = builder.finalize(device=device)
             model.particle_q.assign(np.array([[-0.06, 0.0, 0.0], [0.06, 0.0, 0.0]], np.float32))
             solver = newton.solvers.SolverIPC(model, integrator=integrator, **_TIGHT)
-            test.assertIsNotNone(solver._damping.springs)
+            test.assertIsNotNone(solver._features.damping.springs)
             q = _steps(model, solver, 30)
             expected = 0.1 + _recurrence(0.02, 0.3, 0.05, 50.0, 0.8, _DT, 30, integrator)
             np.testing.assert_allclose(q[:, 1, 0] - q[:, 0, 0], expected, rtol=0.0, atol=2e-7)
@@ -98,7 +98,7 @@ def test_stitch_damping_as_implicit_euler(test, device):
     model.spring_rest_length.assign(np.zeros(1, np.float32))
     model.particle_grid = None
     solver = newton.solvers.SolverIPC(model, **_TIGHT)
-    test.assertIsNotNone(solver._damping.stitches)
+    test.assertIsNotNone(solver._features.damping.stitches)
     q = _steps(model, solver, 30)
     np.testing.assert_allclose(q[:, 0], _recurrence(u0, v0, 0.01, 4.0, 0.05, _DT, 30, "bdf1"), atol=2e-7)
     relative = _recurrence(u0, v0, 0.005, 4.0, 0.05, _DT, 30, "bdf1")
@@ -144,7 +144,7 @@ def test_what_the_engine_takes(test, device):
 
     model = _every_kind(device)
     solver = newton.solvers.SolverIPC(model)
-    plan = solver._damping
+    plan = solver._features.damping
     groups = [plan.springs.group, plan.tets.group, plan.tris.group, plan.hinges.group]
     kinds = [ext.SpringDamping, ext.StrainRateDamping, ext.StrainRateDamping, ext.HingeDamping]
     test.assertEqual([type(g) for g in groups], kinds)
@@ -173,7 +173,7 @@ def test_what_the_engine_takes(test, device):
     np.testing.assert_array_equal(plan.hinges.group.rest_length.numpy(), model.edge_rest_length.numpy()[rows])
     np.testing.assert_allclose(plan.hinges.group.k.numpy(), 1e-3, rtol=1e-6)
     plain = newton.solvers.SolverIPC(_every_kind(device, tri_kd=0.0, edge_kd=0.0, k_damp=0.0, spring_kd=0.0))
-    terms = plain._damping
+    terms = plain._features.damping
     test.assertEqual([terms.springs, terms.stitches, terms.tets, terms.tris, terms.hinges], [None] * 5)
     builder = newton.ModelBuilder()
     builder.add_cloth_grid(
@@ -181,7 +181,7 @@ def test_what_the_engine_takes(test, device):
         cell_y=0.05, mass=1.0e-3,
     )  # fmt: skip
     default = newton.solvers.SolverIPC(builder.finalize(device=device))
-    np.testing.assert_allclose(default._damping.tris.group.k.numpy(), 10.0)  # Newton's default tri_kd
+    np.testing.assert_allclose(default._features.damping.tris.group.k.numpy(), 10.0)  # Newton's default tri_kd
 
 
 def test_coefficients_read_at_every_step(test, device):
@@ -198,7 +198,7 @@ def test_coefficients_read_at_every_step(test, device):
         )  # fmt: skip
         model = builder.finalize(device=device)
         solver = newton.solvers.SolverIPC(model, **_TIGHT)
-        test.assertIsNotNone(solver._damping.tris)
+        test.assertIsNotNone(solver._features.damping.tris)
         s0, s1 = model.state(), model.state()
         solver.step(s0, s1, None, None, _DT)  # loads the kernels
         s0, s1 = s1, s0

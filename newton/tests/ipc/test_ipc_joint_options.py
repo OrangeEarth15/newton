@@ -252,7 +252,7 @@ def test_distance_joint_swings_as_a_pendulum(test, device):
         with test.subTest(bounds=(lower, upper)):
             solver = newton.solvers.SolverIPC(_distance_pendulum(device, L, 0.0, lower, upper))
             test.assertEqual(len(solver._distance_rows), 0)
-            np.testing.assert_array_equal(solver._ranges.joints, [0])
+            np.testing.assert_array_equal(solver._features.universal.ranges.joints, [0])
     with test.assertRaisesRegex(NotImplementedError, "the lower bound above the upper"):
         newton.solvers.SolverIPC(_distance_pendulum(device, L, 0.0, 1.0, 0.5))
 

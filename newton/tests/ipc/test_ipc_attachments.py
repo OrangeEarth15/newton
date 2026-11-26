@@ -217,7 +217,7 @@ def test_attachment_changes(test, device):
     solver.notify_model_changed(newton.ModelFlags.CONSTRAINT_PROPERTIES)
     test.assertIs(solver._engine, engine)
     solver.step(s0, s1, None, None, 0.01)
-    np.testing.assert_array_equal(solver._damping.stitches.group.c.numpy(), [2.0])
+    np.testing.assert_array_equal(solver._features.damping.stitches.group.c.numpy(), [2.0])
     model.attachment_particle_body_body_point.assign(np.array([[0.0, 0.0, -0.19]], np.float32))
     solver.notify_model_changed(newton.ModelFlags.CONSTRAINT_PROPERTIES)
     test.assertIsNot(solver._engine, engine)

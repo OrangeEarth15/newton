@@ -36,9 +36,7 @@ from ..scene import _own_elements
 
 if TYPE_CHECKING:
     from newton import Control, Model, ModelFlags, State
-    from newton.solvers import SolverBase
 
-    from ..joints import _JointDofs
     from ..solver_ipc import SolverIPC
     from . import FeatureOptions
 
@@ -137,8 +135,8 @@ class _Terms:
 
 @dataclass
 class _Plan:
-    """The damping of a solve (``solver._damping``): the terms of every kind (None for a kind without), and the drag
-    and lift."""
+    """The damping of a solve (``solver._features.damping``): the terms of every kind (None for a kind without), and
+    the drag and lift."""
 
     springs: _Terms | None = None  # SpringDamping, inputs (edges,)
     stitches: _Terms | None = None  # VectorDamping, inputs (pairs,); rows: SolverIPC's stitch sources
@@ -227,14 +225,9 @@ def _check_values(values: np.ndarray, mine: np.ndarray, what: str, signed: bool 
         raise NotImplementedError(f"SolverIPC: {what.format(k=k)} {float(values[k])!r}; make it {rule}.")
 
 
-def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
-    """Nothing of the joints."""
-    return None
-
-
 def build(solver: SolverIPC, scene) -> None:
-    """The damped terms of the solve (``solver._damping``), from what the solver laid out in ``scene``: its springs,
-    stitches, tetrahedra and cloth, whose groups ``engine_inputs`` makes for every engine."""
+    """The damped terms of the solve (``solver._features.damping``), from what the solver laid out in ``scene``: its
+    springs, stitches, tetrahedra and cloth, whose groups ``engine_inputs`` makes for every engine."""
     model, device = solver.model, solver.model.device
     plan = _Plan()
     own_tris, own_tets, own_springs = _own_elements(model)
@@ -282,7 +275,7 @@ def build(solver: SolverIPC, scene) -> None:
             stencils = model.edge_indices.numpy().reshape(-1, 4).astype(np.int64)[rows][:, [0, 2, 3, 1]]
             plan.hinges = _terms(rows, device, stencils, model.edge_rest_length.numpy().astype(np.float64)[rows])
     plan.drag = _plan_drag(solver, own_tris)
-    solver._damping = plan
+    solver._features.damping = plan
 
 
 def _stitch_pairs(solver: SolverIPC, scene) -> np.ndarray:
@@ -329,7 +322,7 @@ def _plan_drag(solver: SolverIPC, own_tris: np.ndarray) -> dict | None:
 
 def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
     """The damping groups of an engine made from the scene, with the model's coefficients now."""
-    plan = getattr(solver, "_damping", None)
+    plan = solver._features.damping
     if plan is None:
         return
     from uipc_warp.ext import damping as ext  # noqa: PLC0415
@@ -353,7 +346,7 @@ def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
 
 def _write_coefficients(solver: SolverIPC) -> None:
     """The coefficients of every damping group from the model's arrays, on the device."""
-    model, plan, device = solver.model, solver._damping, solver.model.device
+    model, plan, device = solver.model, solver._features.damping, solver.model.device
     if plan.springs is not None:
         t = plan.springs
         wp.launch(_coefficient, len(t.rows), [t.source, model.spring_damping], [t.group.c], device=device)
@@ -379,7 +372,7 @@ def _write_coefficients(solver: SolverIPC) -> None:
 def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> None:
     """The step's damping coefficients from the model, and the drag and lift of ``state_in`` added to the free
     particles' external accelerations, which the solver wrote from ``particle_f`` before."""
-    plan = getattr(solver, "_damping", None)
+    plan = solver._features.damping
     if plan is None:
         return
     _write_coefficients(solver)
@@ -392,10 +385,6 @@ def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> 
         wp.launch(_add_drag_and_lift, solver._n_free, inputs, [solver._forces.a], device=device)
 
 
-def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observables | None) -> None:
-    """Nothing."""
-
-
 def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
     """Whether an attachment's damping appeared that the solve has no terms for (``CONSTRAINT_PROPERTIES``, which
     builds the solve again only for new bodies, particles or points). A change of the springs' or the elements' damping,
@@ -403,7 +392,7 @@ def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
     from newton import ModelFlags  # noqa: PLC0415
 
     model = solver.model
-    plan = getattr(solver, "_damping", None)
+    plan = solver._features.damping
     if plan is None or plan.stitches is not None or not (flags & ModelFlags.CONSTRAINT_PROPERTIES):
         return False  # with stitch terms every attachment has one, its coefficient read at every step
     if not model.attachment_particle_body_count:

@@ -136,10 +136,10 @@ def test_rejects_equality_constraints(test, device):
     _hinged_pair(builder)
     model = builder.finalize(device=device)
     solver = newton.solvers.SolverIPC(model)
-    test.assertIsNone(solver._joint_terms)
+    test.assertIsNone(solver._features.joint_terms.plan)
     model.joint_mimic_joint.assign(np.array([-1, 0], np.int32))
     solver.notify_model_changed(newton.ModelFlags.CONSTRAINT_PROPERTIES)
-    test.assertEqual(len(solver._joint_terms.items), 1)
+    test.assertEqual(len(solver._features.joint_terms.plan.items), 1)
 
 
 # Newton's importers turn the weld into a FIXED joint between the boxes and the connect into a BALL joint from the world

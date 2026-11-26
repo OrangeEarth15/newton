@@ -28,10 +28,8 @@ import numpy as np
 from newton import ModelFlags
 
 if TYPE_CHECKING:
-    from newton import Control, Model, State
-    from newton.solvers import SolverBase
+    from newton import Model
 
-    from ..joints import _JointDofs
     from ..solver_ipc import SolverIPC
     from . import FeatureOptions
 
@@ -65,17 +63,12 @@ def check(model: Model, options: FeatureOptions, at: str) -> None:
         )
 
 
-def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
-    """Nothing of the joints."""
-    return None
-
-
 def build(solver: SolverIPC, scene) -> None:
-    """The solve's contact damping (``solver._contact_damping``, None without one). ``NotImplementedError`` under
-    ``contact_constitution="al-ipc"``, whose contact terms are an active set of its own, and ``ImportError`` when the
-    installed libuipc-warp has no ``uipc_warp.ext.contact_damping``."""
+    """The solve's contact damping (``solver._features.contact_damping``, None without one). ``NotImplementedError``
+    under ``contact_constitution="al-ipc"``, whose contact terms are an active set of its own, and ``ImportError`` when
+    the installed libuipc-warp has no ``uipc_warp.ext.contact_damping``."""
     value = solver._feature_options.contact_damping
-    solver._contact_damping = None
+    solver._features.contact_damping = None
     if value is None:
         return
     if solver._config.contact_constitution == "al-ipc":
@@ -94,7 +87,7 @@ def build(solver: SolverIPC, scene) -> None:
             f"installed libuipc-warp has none. Install a newer one: {_UIPC_WARP_INSTALL}"
         ) from e
     materials = _materials(solver.model) if value == "material" else None
-    solver._contact_damping = _Damping(value, materials)
+    solver._features.contact_damping = _Damping(value, materials)
 
 
 def _material_rows(solver: SolverIPC, n: int, n_planes: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -102,7 +95,7 @@ def _material_rows(solver: SolverIPC, n: int, n_planes: int) -> tuple[np.ndarray
     row per coefficient in use, entry ``[a, b]`` the mean of rows ``a`` and ``b``. The vertices of a shape take its
     ``shape_material_kd``, particles ``soft_contact_kd``, half planes their shape's; the rows on no contact primitive
     (the bodies' degrees of freedom) take row 0, which no pair reads for them."""
-    kd, soft = solver._contact_damping.materials
+    kd, soft = solver._features.contact_damping.materials
     vertex = np.full(n, np.nan)
     vertex[: solver.model.particle_count] = soft
     on_shape = solver._vertex_shape >= 0
@@ -119,7 +112,7 @@ def _material_rows(solver: SolverIPC, n: int, n_planes: int) -> tuple[np.ndarray
 def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
     """Give the engine the solve's ``ContactDamping``: made with the solve's first engine, and given again to every
     engine with longer lists that an eager step or ``grow()`` builds."""
-    damping = solver._contact_damping
+    damping = solver._features.contact_damping
     if damping is None:
         return
     if damping.extension is None:
@@ -136,19 +129,11 @@ def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
     inputs["extensions"].append(damping.extension)
 
 
-def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> None:
-    """Nothing: the coefficients are the extension's, made when the solve is built."""
-
-
-def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observables | None) -> None:
-    """Nothing."""
-
-
 def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
     """With ``"material"`` and ``SHAPE_PROPERTIES`` or ``MODEL_PROPERTIES``, whether the shapes' or the soft contacts'
     damping coefficients have changed since the solve was built: the solve is then built again with the new ones, as
     after a change of a friction coefficient."""
-    damping = solver._contact_damping
+    damping = solver._features.contact_damping
     properties = ModelFlags.SHAPE_PROPERTIES | ModelFlags.MODEL_PROPERTIES
     if damping is None or damping.materials is None or not flags & properties:
         return False

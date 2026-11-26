@@ -10,8 +10,8 @@ ball joints (``ball``), rod joints (``rods``), the surface velocity of a mesh (`
 (``contact_damping``) and the solver observables (``observables``). A module holds what SolverIPC does with its
 feature, and what it refuses of it.
 
-The solver calls every module, in the order of ``FEATURES``, at these points; a module with nothing to do there does
-nothing:
+The solver calls every module that defines a hook, in the order of ``FEATURES``, at these points; every hook is
+optional, and a module without it has nothing to do there:
 
 - ``check(model, options, at)``: raise ``NotImplementedError`` for what the module refuses of ``model`` at the check
   ``at`` names, among the solver's own checks: ``"tendons"`` (after the body variants, before the muscles),
@@ -40,8 +40,11 @@ nothing:
   independent worlds alone among them), after ``state_out`` and the observables.
 - ``notify(solver, flags)``: in ``notify_model_changed``, after the solver's own checks and before it decides whether
   to build the solve again: returns whether the solve must be built again.
-- ``reset(solver, world_mask)``, of the modules that keep a state across steps: in ``SolverIPC.reset`` once the solve
-  is built, with its ``world_mask``; on the device only, since a reset may be captured.
+- ``reset(solver, world_mask)``: in ``SolverIPC.reset`` once the solve is built, with its ``world_mask``, for a module
+  that keeps a state across steps; on the device only, since a reset may be captured.
+
+A module keeps what it needs from one hook to the next in its field of ``solver._features`` (``FeatureState``), which
+its ``build`` sets; nothing else of the module lives on the solver.
 
 The universal module is also offered the joints that ``joints._map_joints`` cannot map onto a libuipc joint
 (``universal.take_d6``, ``universal.take_distance``), the rods module the rod joints (``rods.take_rods``), and the
@@ -70,6 +73,23 @@ if TYPE_CHECKING:
 FEATURES = (damping, tendons, joint_terms, universal, ball, rods, surface_velocity, contact_damping, observables)
 
 
+@dataclass
+class FeatureState:
+    """What the feature modules keep of a solver (``SolverIPC._features``), one field per module: None until the
+    module's ``build`` makes it, and for a module with nothing to keep in that solve (``observables``: until a container
+    requests a body observable)."""
+
+    damping: damping._Plan | None = None
+    tendons: tendons._State | None = None
+    joint_terms: joint_terms._State | None = None
+    universal: universal._State | None = None
+    ball: ball._State | None = None
+    rods: rods._State | None = None
+    surface_velocity: surface_velocity._Belts | None = None
+    contact_damping: contact_damping._Damping | None = None
+    observables: observables._BodyObservables | None = None
+
+
 @dataclass(frozen=True)
 class FeatureOptions:
     """The constructor options of :class:`~newton.solvers.SolverIPC` that the feature modules' checks read."""
@@ -77,54 +97,57 @@ class FeatureOptions:
     contact_damping: float | str | None = None
 
 
+def _hooks(name: str) -> list:
+    """The modules' hook ``name``, of the modules that define it, in the order of ``FEATURES``."""
+    return [hook for feature in FEATURES if (hook := getattr(feature, name, None)) is not None]
+
+
 def check(model: Model, options: FeatureOptions, at: str) -> None:
     """Every module's refusals of ``model`` at the check ``at``, in the order of ``FEATURES``."""
-    for feature in FEATURES:
-        feature.check(model, options, at)
+    for hook in _hooks("check"):
+        hook(model, options, at)
 
 
 def joint_refusal(category: str, dofs: _JointDofs) -> tuple[int, str] | None:
     """Of the modules' refusals of the joints' degrees of freedom in ``category``, the one of the lowest degree of
     freedom, as ``(dof, message)``, or None."""
-    found = [refusal for feature in FEATURES if (refusal := feature.joint_refusal(category, dofs)) is not None]
+    found = [refusal for hook in _hooks("joint_refusal") if (refusal := hook(category, dofs)) is not None]
     return min(found, key=lambda refusal: refusal[0]) if found else None
 
 
 def build(solver: SolverIPC, scene) -> None:
     """Every module's work when the solve is built (``scene``: the solver's ``ArrayScene``)."""
-    for feature in FEATURES:
-        feature.build(solver, scene)
+    for hook in _hooks("build"):
+        hook(solver, scene)
 
 
 def engine_inputs(solver: SolverIPC, inputs: dict) -> None:
     """Every module's additions to the inputs of an engine made from the scene."""
-    for feature in FEATURES:
-        feature.engine_inputs(solver, inputs)
+    for hook in _hooks("engine_inputs"):
+        hook(solver, inputs)
 
 
 def prepare(solver: SolverIPC, state_in: State, control: Control, dt: float) -> None:
     """Every module's work of a step before its frame is enqueued."""
-    for feature in FEATURES:
-        feature.prepare(solver, state_in, control, dt)
+    for hook in _hooks("prepare"):
+        hook(solver, state_in, control, dt)
 
 
 def finish(solver: SolverIPC, state_out: State, observables: SolverBase.Observables | None) -> None:
     """Every module's work of a step after ``state_out`` and the observables are written."""
-    for feature in FEATURES:
-        feature.finish(solver, state_out, observables)
+    for hook in _hooks("finish"):
+        hook(solver, state_out, observables)
 
 
 def notify(solver: SolverIPC, flags: ModelFlags | int) -> bool:
     """Every module's response to ``notify_model_changed(flags)``: whether one of them needs the solve built again."""
     rebuild = False
-    for feature in FEATURES:
-        rebuild |= bool(feature.notify(solver, flags))
+    for hook in _hooks("notify"):
+        rebuild |= bool(hook(solver, flags))
     return rebuild
 
 
 def reset(solver: SolverIPC, world_mask: wp.array | None) -> None:
     """The work of the modules that keep a state across steps in ``SolverIPC.reset(state, world_mask)``."""
-    for feature in FEATURES:
-        hook = getattr(feature, "reset", None)
-        if hook is not None:
-            hook(solver, world_mask)
+    for hook in _hooks("reset"):
+        hook(solver, world_mask)
